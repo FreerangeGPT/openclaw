@@ -86,6 +86,7 @@ What has been implemented so far:
 - loader final cache, readiness promotion, and activation finalization now routes through `src/extension-host/loader-finalize.ts`
 - runtime registration normalization has started in `src/extension-host/runtime-registrations.ts` for channel, provider, HTTP-route, gateway-method, tool, CLI, service, command, context-engine, and hook registrations
 - low-risk runtime compatibility writes for channel, provider, gateway-method, HTTP-route, tool, CLI, service, command, context-engine, and hook registrations now route through `src/extension-host/registry-writes.ts`
+- legacy internal-hook bridging and typed prompt-injection compatibility policy now route through `src/extension-host/hook-compat.ts`
 - several static and lookup consumers now read through the host boundary or resolved-extension model:
   - channel registry and dock lookups
   - message-channel normalization
@@ -131,6 +132,7 @@ How it has been done:
 - by turning open-allowlist discovery warnings into explicit host-owned discovery-policy results before the orchestrator logs them
 - by moving duplicate precedence, config enablement, and early memory-slot gating into explicit host-owned activation-policy outcomes instead of leaving them inline in the loader flow
 - by turning provenance-based untracked-extension warnings and final memory-slot warnings into explicit host-owned finalization-policy results before the finalizer applies them
+- by extracting legacy internal-hook bridging and typed prompt-injection compatibility policy into a host-owned hook-compat helper while leaving actual hook execution ownership unchanged
 - by moving central readers first, so later lifecycle and compatibility work can land on one boundary instead of many ad hoc call sites
 - by adding focused tests for each extracted seam before widening the boundary further
 
