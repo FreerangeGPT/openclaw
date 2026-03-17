@@ -503,6 +503,7 @@ export const FIELD_LABELS: Record<string, string> = {
   "commands.bash": "Allow Bash Chat Command",
   "commands.bashForegroundMs": "Bash Foreground Window (ms)",
   "commands.config": "Allow /config",
+  "commands.mcp": "Allow /mcp",
   "commands.debug": "Allow /debug",
   "commands.restart": "Allow Restart",
   "commands.useAccessGroups": "Use Access Groups",

@@ -5,17 +5,11 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { logDebug, logWarn } from "../logger.js";
 import { loadEnabledBundleMcpConfig } from "../plugins/bundle-mcp.js";
+import {
+  describeStdioMcpServerLaunchConfig,
+  resolveStdioMcpServerLaunchConfig,
+} from "./mcp-stdio.js";
 import type { AnyAgentTool } from "./tools/common.js";
-
-type BundleMcpServerLaunchConfig = {
-  command: string;
-  args?: string[];
-  env?: Record<string, string>;
-  cwd?: string;
-};
-type BundleMcpServerLaunchResult =
-  | { ok: true; config: BundleMcpServerLaunchConfig }
-  | { ok: false; reason: string };
 
 type BundleMcpToolRuntime = {
   tools: AnyAgentTool[];
@@ -31,69 +25,6 @@ type BundleMcpSession = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function toStringRecord(value: unknown): Record<string, string> | undefined {
-  if (!isRecord(value)) {
-    return undefined;
-  }
-  const entries = Object.entries(value)
-    .map(([key, entry]) => {
-      if (typeof entry === "string") {
-        return [key, entry] as const;
-      }
-      if (typeof entry === "number" || typeof entry === "boolean") {
-        return [key, String(entry)] as const;
-      }
-      return null;
-    })
-    .filter((entry): entry is readonly [string, string] => entry !== null);
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
-}
-
-function toStringArray(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-  const entries = value.filter((entry): entry is string => typeof entry === "string");
-  return entries.length > 0 ? entries : [];
-}
-
-function resolveLaunchConfig(raw: unknown): BundleMcpServerLaunchResult {
-  if (!isRecord(raw)) {
-    return { ok: false, reason: "server config must be an object" };
-  }
-  if (typeof raw.command !== "string" || raw.command.trim().length === 0) {
-    if (typeof raw.url === "string" && raw.url.trim().length > 0) {
-      return {
-        ok: false,
-        reason: "only stdio bundle MCP servers are supported right now",
-      };
-    }
-    return { ok: false, reason: "its command is missing" };
-  }
-  const cwd =
-    typeof raw.cwd === "string" && raw.cwd.trim().length > 0
-      ? raw.cwd
-      : typeof raw.workingDirectory === "string" && raw.workingDirectory.trim().length > 0
-        ? raw.workingDirectory
-        : undefined;
-  return {
-    ok: true,
-    config: {
-      command: raw.command,
-      args: toStringArray(raw.args),
-      env: toStringRecord(raw.env),
-      cwd,
-    },
-  };
-}
-
-function describeServerLaunchConfig(config: BundleMcpServerLaunchConfig): string {
-  const args =
-    Array.isArray(config.args) && config.args.length > 0 ? ` ${config.args.join(" ")}` : "";
-  const cwd = config.cwd ? ` (cwd=${config.cwd})` : "";
-  return `${config.command}${args}${cwd}`;
 }
 
 async function listAllTools(client: Client) {
@@ -209,7 +140,7 @@ export async function createBundleMcpToolRuntime(params: {
 
   try {
     for (const [serverName, rawServer] of Object.entries(loaded.config.mcpServers)) {
-      const launch = resolveLaunchConfig(rawServer);
+      const launch = resolveStdioMcpServerLaunchConfig(rawServer);
       if (!launch.ok) {
         logWarn(`bundle-mcp: skipped server "${serverName}" because ${launch.reason}.`);
         continue;
@@ -258,7 +189,7 @@ export async function createBundleMcpToolRuntime(params: {
             label: tool.title ?? tool.name,
             description:
               tool.description?.trim() ||
-              `Provided by bundle MCP server "${serverName}" (${describeServerLaunchConfig(launchConfig)}).`,
+              `Provided by bundle MCP server "${serverName}" (${describeStdioMcpServerLaunchConfig(launchConfig)}).`,
             parameters: tool.inputSchema,
             execute: async (_toolCallId, input) => {
               const result = (await client.callTool({
@@ -275,7 +206,7 @@ export async function createBundleMcpToolRuntime(params: {
         }
       } catch (error) {
         logWarn(
-          `bundle-mcp: failed to start server "${serverName}" (${describeServerLaunchConfig(launchConfig)}): ${String(error)}`,
+          `bundle-mcp: failed to start server "${serverName}" (${describeStdioMcpServerLaunchConfig(launchConfig)}): ${String(error)}`,
         );
         await disposeSession(session);
       }
