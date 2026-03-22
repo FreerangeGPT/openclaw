@@ -1,17 +1,14 @@
-import { editChannelDiscord } from "../../../extensions/discord/src/send.channels.js";
-import { sendDiscordComponentMessage } from "../../../extensions/discord/src/send.components.js";
+import { editChannelDiscord } from "../../plugin-sdk/discord-runtime-send.js";
+import { sendDiscordComponentMessage } from "../../plugin-sdk/discord-runtime-send.js";
 import {
   createThreadDiscord,
   deleteMessageDiscord,
   editMessageDiscord,
   pinMessageDiscord,
   unpinMessageDiscord,
-} from "../../../extensions/discord/src/send.messages.js";
-import {
-  sendMessageDiscord,
-  sendPollDiscord,
-} from "../../../extensions/discord/src/send.outbound.js";
-import { sendTypingDiscord } from "../../../extensions/discord/src/send.typing.js";
+} from "../../plugin-sdk/discord-runtime-send.js";
+import { sendMessageDiscord, sendPollDiscord } from "../../plugin-sdk/discord-runtime-send.js";
+import { sendTypingDiscord } from "../../plugin-sdk/discord-runtime-send.js";
 import type { PluginRuntimeChannel } from "./types-channel.js";
 
 export const runtimeDiscordSend = {

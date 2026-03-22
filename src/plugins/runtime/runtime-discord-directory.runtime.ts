@@ -1,10 +1,10 @@
-import { auditDiscordChannelPermissions } from "../../../extensions/discord/src/audit.js";
+import { auditDiscordChannelPermissions } from "../../plugin-sdk/discord-runtime-directory.js";
 import {
   listDiscordDirectoryGroupsLive,
   listDiscordDirectoryPeersLive,
-} from "../../../extensions/discord/src/directory-live.js";
-import { resolveDiscordChannelAllowlist } from "../../../extensions/discord/src/resolve-channels.js";
-import { resolveDiscordUserAllowlist } from "../../../extensions/discord/src/resolve-users.js";
+} from "../../plugin-sdk/discord-runtime-directory.js";
+import { resolveDiscordChannelAllowlist } from "../../plugin-sdk/discord-runtime-directory.js";
+import { resolveDiscordUserAllowlist } from "../../plugin-sdk/discord-runtime-directory.js";
 import type { PluginRuntimeChannel } from "./types-channel.js";
 
 export const runtimeDiscordDirectory = {
