@@ -68,6 +68,7 @@ export type FeishuMessageInfo = {
   chatType?: FeishuChatType;
   senderId?: string;
   senderOpenId?: string;
+  senderUserId?: string;
   senderType?: string;
   content: string;
   contentType: string;

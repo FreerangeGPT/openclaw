@@ -2585,6 +2585,81 @@ describe("handleFeishuMessage command authorization", () => {
     );
   });
 
+  it("keeps allowlisted topic bootstrap context when fetched messages use user_id and allowlist uses open_id", async () => {
+    mockShouldComputeCommandAuthorized.mockReturnValue(false);
+    mockGetMessageFeishu.mockResolvedValue({
+      messageId: "om_topic_root",
+      chatId: "oc-group",
+      senderId: "user_blocked",
+      senderOpenId: "ou-blocked",
+      senderType: "user",
+      content: "blocked root starter",
+      contentType: "text",
+      threadId: "omt_topic_1",
+    });
+    mockListFeishuThreadMessages.mockResolvedValue([
+      {
+        messageId: "om_bot_reply",
+        senderId: "app_1",
+        senderType: "app",
+        content: "assistant reply",
+        contentType: "text",
+        createTime: 1710000001000,
+      },
+      {
+        messageId: "om_allowed_reply",
+        senderId: "user_allowed",
+        senderOpenId: "ou-allowed",
+        senderType: "user",
+        content: "allowed follow-up",
+        contentType: "text",
+        createTime: 1710000002000,
+      },
+    ]);
+
+    const cfg: ClawdbotConfig = {
+      channels: {
+        feishu: {
+          groupPolicy: "open",
+          groupSenderAllowFrom: ["ou-allowed"],
+          groups: {
+            "oc-group": {
+              requireMention: false,
+              groupSessionScope: "group_topic",
+            },
+          },
+        },
+      },
+    } as ClawdbotConfig;
+
+    const event: FeishuMessageEvent = {
+      sender: {
+        sender_id: {
+          open_id: "ou-allowed",
+          user_id: "user_allowed",
+        },
+      },
+      message: {
+        message_id: "om_topic_followup_allowlisted_mixed_ids",
+        root_id: "om_topic_root",
+        thread_id: "omt_topic_1",
+        chat_id: "oc-group",
+        chat_type: "group",
+        message_type: "text",
+        content: JSON.stringify({ text: "current turn" }),
+      },
+    };
+
+    await dispatchMessage({ cfg, event });
+
+    expect(mockFinalizeInboundContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ThreadStarterBody: "assistant reply",
+        ThreadHistoryBody: "assistant reply\n\nallowed follow-up",
+      }),
+    );
+  });
+
   it("does not dispatch twice for the same image message_id (concurrent dedupe)", async () => {
     mockShouldComputeCommandAuthorized.mockReturnValue(false);
 

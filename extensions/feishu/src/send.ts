@@ -270,6 +270,7 @@ function parseFeishuMessageItem(
         : undefined,
     senderId: item.sender?.id,
     senderOpenId: item.sender?.id_type === "open_id" ? item.sender?.id : undefined,
+    senderUserId: item.sender?.id_type === "user_id" ? item.sender?.id : undefined,
     senderType: item.sender?.sender_type,
     content: parseFeishuMessageContent(rawContent, msgType),
     contentType: msgType,
@@ -324,6 +325,8 @@ export async function getMessageFeishu(params: {
 export type FeishuThreadMessageInfo = {
   messageId: string;
   senderId?: string;
+  senderOpenId?: string;
+  senderUserId?: string;
   senderType?: string;
   content: string;
   contentType: string;
@@ -393,6 +396,8 @@ export async function listFeishuThreadMessages(params: {
     results.push({
       messageId: parsed.messageId,
       senderId: parsed.senderId,
+      senderOpenId: parsed.senderOpenId,
+      senderUserId: parsed.senderUserId,
       senderType: parsed.senderType,
       content: parsed.content,
       contentType: parsed.contentType,

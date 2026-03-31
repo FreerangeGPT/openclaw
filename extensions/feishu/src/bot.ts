@@ -222,6 +222,7 @@ function shouldIncludeFetchedGroupContextMessage(params: {
   isGroup: boolean;
   allowFrom: Array<string | number>;
   senderId?: string;
+  senderIds?: Array<string | null | undefined>;
   senderType?: string;
 }): boolean {
   if (!params.isGroup || params.allowFrom.length === 0) {
@@ -238,12 +239,13 @@ function shouldIncludeFetchedGroupContextMessage(params: {
     groupPolicy: "allowlist",
     allowFrom: params.allowFrom,
     senderId,
+    senderIds: params.senderIds,
     senderName: undefined,
   });
 }
 
 function filterFetchedGroupContextMessages<
-  T extends Pick<FeishuMessageInfo, "senderId" | "senderType">,
+  T extends Pick<FeishuMessageInfo, "senderId" | "senderOpenId" | "senderUserId" | "senderType">,
 >(
   messages: readonly T[],
   params: {
@@ -256,6 +258,7 @@ function filterFetchedGroupContextMessages<
       isGroup: params.isGroup,
       allowFrom: params.allowFrom,
       senderId: message.senderId,
+      senderIds: [message.senderOpenId, message.senderUserId],
       senderType: message.senderType,
     }),
   );
@@ -741,6 +744,7 @@ export async function handleFeishuMessage(params: {
             isGroup,
             allowFrom: effectiveGroupSenderAllowFrom,
             senderId: quotedMessageInfo.senderId,
+            senderIds: [quotedMessageInfo.senderOpenId],
             senderType: quotedMessageInfo.senderType,
           })
         ) {
@@ -852,6 +856,7 @@ export async function handleFeishuMessage(params: {
             isGroup,
             allowFrom: effectiveGroupSenderAllowFrom,
             senderId: rootMessageInfo.senderId,
+            senderIds: [rootMessageInfo.senderOpenId],
             senderType: rootMessageInfo.senderType,
           })
         ) {
