@@ -431,6 +431,8 @@ class NodeRuntime(
     _statusText.value =
       when {
         operatorConnected && _nodeConnected.value -> "Connected"
+        _nodeConnected.value && isOperatorApprovalPendingStatus(operator) ->
+          "Connected (awaiting operator approval)"
         operatorConnected && !_nodeConnected.value -> "Connected (node offline)"
         !operatorConnected && _nodeConnected.value ->
           if (operator.isNotEmpty() && operator != "Offline") {
@@ -1245,6 +1247,11 @@ internal fun shouldConnectOperatorSession(
       !password.isNullOrBlank() ||
       !storedOperatorToken.isNullOrBlank()
     )
+}
+
+internal fun isOperatorApprovalPendingStatus(statusText: String): Boolean {
+  val lower = statusText.trim().lowercase()
+  return lower.contains("pairing required") || lower.contains("approve")
 }
 
 private enum class HomeCanvasGatewayState {

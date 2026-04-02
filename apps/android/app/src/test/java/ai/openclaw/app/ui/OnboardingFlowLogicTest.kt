@@ -24,4 +24,34 @@ class OnboardingFlowLogicTest {
   fun allowsFinishOnlyWhenOperatorAndNodeAreConnected() {
     assertTrue(canFinishOnboarding(isConnected = true, isNodeConnected = true))
   }
+
+  @Test
+  fun waitsForOperatorApprovalAfterNodeConnect() {
+    assertTrue(
+      isWaitingForOperatorApproval(
+        statusText = "Connected (awaiting operator approval)",
+        isConnected = false,
+        isNodeConnected = true,
+        attemptedConnect = true,
+      ),
+    )
+  }
+
+  @Test
+  fun doesNotWaitForApprovalBeforeConnectAttempt() {
+    assertFalse(
+      isWaitingForOperatorApproval(
+        statusText = "Connected (awaiting operator approval)",
+        isConnected = false,
+        isNodeConnected = true,
+        attemptedConnect = false,
+      ),
+    )
+  }
+
+  @Test
+  fun autoFinishesAfterSuccessfulReconnect() {
+    assertTrue(shouldAutoFinishOnboarding(attemptedConnect = true, canFinishOnboarding = true))
+    assertFalse(shouldAutoFinishOnboarding(attemptedConnect = false, canFinishOnboarding = true))
+  }
 }

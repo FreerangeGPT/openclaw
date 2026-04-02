@@ -55,4 +55,11 @@ class GatewayBootstrapAuthTest {
     assertEquals("setup-bootstrap-token", auth.bootstrapToken)
     assertNull(auth.password)
   }
+
+  @Test
+  fun detectsOperatorApprovalPendingStatus() {
+    assertTrue(isOperatorApprovalPendingStatus("Gateway error: pairing required"))
+    assertTrue(isOperatorApprovalPendingStatus("approve latest pending device pairing request"))
+    assertFalse(isOperatorApprovalPendingStatus("Offline"))
+  }
 }

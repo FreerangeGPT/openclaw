@@ -71,6 +71,7 @@ import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -230,6 +231,19 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
   var gatewayError by rememberSaveable { mutableStateOf<String?>(null) }
   var attemptedConnect by rememberSaveable { mutableStateOf(false) }
   val canFinishOnboarding = canFinishOnboarding(isConnected = isConnected, isNodeConnected = isNodeConnected)
+  val waitingForApproval =
+    isWaitingForOperatorApproval(
+      statusText = statusText,
+      isConnected = isConnected,
+      isNodeConnected = isNodeConnected,
+      attemptedConnect = attemptedConnect,
+    )
+
+  LaunchedEffect(attemptedConnect, canFinishOnboarding) {
+    if (shouldAutoFinishOnboarding(attemptedConnect = attemptedConnect, canFinishOnboarding = canFinishOnboarding)) {
+      viewModel.setOnboardingCompleted(true)
+    }
+  }
 
   val lifecycleOwner = LocalLifecycleOwner.current
   val qrScannerOptions =
@@ -736,6 +750,8 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
               parsedGateway = parseGatewayEndpoint(gatewayUrl),
               statusText = statusText,
               isConnected = canFinishOnboarding,
+              isNodeConnected = isNodeConnected,
+              waitingForApproval = waitingForApproval,
               serverName = serverName,
               remoteAddress = remoteAddress,
               attemptedConnect = attemptedConnect,
@@ -900,8 +916,12 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                 modifier = Modifier.weight(1f).height(52.dp),
                 shape = RoundedCornerShape(14.dp),
                 colors = onboardingPrimaryButtonColors(),
+                enabled = !waitingForApproval,
               ) {
-                Text("Connect", style = onboardingHeadlineStyle.copy(fontWeight = FontWeight.Bold))
+                Text(
+                  if (waitingForApproval) "Waiting for approval" else "Connect",
+                  style = onboardingHeadlineStyle.copy(fontWeight = FontWeight.Bold),
+                )
               }
             }
           }
@@ -1545,6 +1565,8 @@ private fun FinalStep(
   parsedGateway: GatewayEndpointConfig?,
   statusText: String,
   isConnected: Boolean,
+  isNodeConnected: Boolean,
+  waitingForApproval: Boolean,
   serverName: String?,
   remoteAddress: String?,
   attemptedConnect: Boolean,
@@ -1555,7 +1577,7 @@ private fun FinalStep(
   val gatewayAddress = parsedGateway?.displayUrl ?: "Invalid gateway URL"
   val statusLabel = gatewayStatusForDisplay(statusText)
   val showDiagnostics = gatewayStatusHasDiagnostics(statusText)
-  val pairingRequired = gatewayStatusLooksLikePairing(statusText)
+  val pairingRequired = waitingForApproval || gatewayStatusLooksLikePairing(statusText)
 
   Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
     Text("Review", style = onboardingTitle1Style, color = onboardingText)
@@ -1648,6 +1670,67 @@ private fun FinalStep(
           }
         }
       }
+    } else if (waitingForApproval) {
+      Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = onboardingAccentSoft,
+        border = androidx.compose.foundation.BorderStroke(1.dp, onboardingAccent.copy(alpha = 0.2f)),
+      ) {
+        Column(
+          modifier = Modifier.padding(14.dp),
+          verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+          Row(
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Box(
+              modifier =
+                Modifier
+                  .size(42.dp)
+                  .background(onboardingAccent.copy(alpha = 0.1f), RoundedCornerShape(11.dp)),
+              contentAlignment = Alignment.Center,
+            ) {
+              Icon(
+                imageVector = Icons.Default.Wifi,
+                contentDescription = null,
+                tint = onboardingAccent,
+                modifier = Modifier.size(22.dp),
+              )
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+              Text("Waiting for Approval", style = onboardingHeadlineStyle, color = onboardingAccent)
+              Text(
+                if (isNodeConnected) {
+                  "Phone linked. Approve operator access on the gateway host."
+                } else {
+                  "Approve this phone on the gateway host."
+                },
+                style = onboardingCalloutStyle,
+                color = onboardingTextSecondary,
+              )
+            }
+          }
+          Text("Status", style = onboardingCaption1Style.copy(fontWeight = FontWeight.Bold), color = onboardingTextSecondary)
+          Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            color = onboardingCommandBg,
+            border = BorderStroke(1.dp, onboardingCommandBorder),
+          ) {
+            Text(
+              statusLabel,
+              modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+              style = onboardingCalloutStyle.copy(fontFamily = FontFamily.Monospace),
+              color = onboardingCommandText,
+            )
+          }
+          CommandBlock("openclaw devices list")
+          CommandBlock("openclaw devices approve <requestId>")
+          Text("Android will keep retrying and finish automatically after approval.", style = onboardingCalloutStyle, color = onboardingTextSecondary)
+        }
+      }
     } else {
       Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -1737,12 +1820,30 @@ private fun FinalStep(
           if (pairingRequired) {
             CommandBlock("openclaw devices list")
             CommandBlock("openclaw devices approve <requestId>")
-            Text("Then tap Connect again.", style = onboardingCalloutStyle, color = onboardingTextSecondary)
+            Text("Approve the request, then wait here.", style = onboardingCalloutStyle, color = onboardingTextSecondary)
           }
         }
       }
     }
   }
+}
+
+internal fun isWaitingForOperatorApproval(
+  statusText: String,
+  isConnected: Boolean,
+  isNodeConnected: Boolean,
+  attemptedConnect: Boolean,
+): Boolean {
+  if (!attemptedConnect || isConnected || !isNodeConnected) return false
+  val lower = gatewayStatusForDisplay(statusText).lowercase()
+  return lower.contains("awaiting operator approval") || lower.contains("pairing required")
+}
+
+internal fun shouldAutoFinishOnboarding(
+  attemptedConnect: Boolean,
+  canFinishOnboarding: Boolean,
+): Boolean {
+  return attemptedConnect && canFinishOnboarding
 }
 
 @Composable
