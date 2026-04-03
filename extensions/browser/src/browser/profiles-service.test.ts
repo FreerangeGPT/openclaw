@@ -141,6 +141,34 @@ describe("BrowserProfilesService", () => {
     );
   });
 
+  it("accepts remote hostnames without DNS resolution in trusted SSRF mode", async () => {
+    const resolved = resolveBrowserConfig({});
+    const { ctx } = createCtx(resolved);
+
+    vi.mocked(loadConfig).mockReturnValue({ browser: { profiles: {} } });
+
+    const service = createBrowserProfilesService(ctx);
+    const result = await service.createProfile({
+      name: "remote-hostname",
+      cdpUrl: "https://vpn-only.invalid:9222",
+    });
+
+    expect(result.cdpUrl).toBe("https://vpn-only.invalid:9222");
+    expect(result.cdpPort).toBe(9222);
+    expect(result.isRemote).toBe(true);
+    expect(writeConfigFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        browser: expect.objectContaining({
+          profiles: expect.objectContaining({
+            "remote-hostname": expect.objectContaining({
+              cdpUrl: "https://vpn-only.invalid:9222",
+            }),
+          }),
+        }),
+      }),
+    );
+  });
+
   it("rejects private-network cdpUrl when strict SSRF mode is enabled", async () => {
     const resolved = resolveBrowserConfig({
       ssrfPolicy: {

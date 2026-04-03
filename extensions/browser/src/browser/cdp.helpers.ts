@@ -23,16 +23,26 @@ export function isWebSocketUrl(url: string): boolean {
   }
 }
 
+function shouldSkipCreationTimePolicyResolution(ssrfPolicy?: SsrFPolicy): boolean {
+  if (!ssrfPolicy) {
+    return true;
+  }
+  return (
+    ssrfPolicy.dangerouslyAllowPrivateNetwork === true &&
+    (!ssrfPolicy.hostnameAllowlist || ssrfPolicy.hostnameAllowlist.length === 0)
+  );
+}
+
 export async function assertCdpEndpointAllowed(
   cdpUrl: string,
   ssrfPolicy?: SsrFPolicy,
 ): Promise<void> {
-  if (!ssrfPolicy) {
-    return;
-  }
   const parsed = new URL(cdpUrl);
   if (!["http:", "https:", "ws:", "wss:"].includes(parsed.protocol)) {
     throw new Error(`Invalid CDP URL protocol: ${parsed.protocol.replace(":", "")}`);
+  }
+  if (shouldSkipCreationTimePolicyResolution(ssrfPolicy)) {
+    return;
   }
   await resolvePinnedHostnameWithPolicy(parsed.hostname, {
     policy: ssrfPolicy,
