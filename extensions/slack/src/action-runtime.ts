@@ -1,4 +1,5 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
+import type { ReplyToMode } from "openclaw/plugin-sdk/config-runtime";
 import { parseSlackBlocksInput } from "./blocks-input.js";
 import {
   createActionGate,
@@ -76,7 +77,7 @@ export type SlackActionContext = {
   /** Current thread timestamp for auto-threading. */
   currentThreadTs?: string;
   /** Reply-to mode for auto-threading. */
-  replyToMode?: "off" | "first" | "all" | "batched";
+  replyToMode?: ReplyToMode;
   /** Mutable ref to track if a reply was sent (for "first" mode). */
   hasRepliedRef?: { value: boolean };
   /** Allowed local media directories for file uploads. */
@@ -121,11 +122,7 @@ function resolveThreadTsFromContext(
   if (context.replyToMode === "all") {
     return context.currentThreadTs;
   }
-  if (
-    (context.replyToMode === "first" || context.replyToMode === "batched") &&
-    context.hasRepliedRef &&
-    !context.hasRepliedRef.value
-  ) {
+  if (context.replyToMode === "first" && context.hasRepliedRef && !context.hasRepliedRef.value) {
     context.hasRepliedRef.value = true;
     return context.currentThreadTs;
   }

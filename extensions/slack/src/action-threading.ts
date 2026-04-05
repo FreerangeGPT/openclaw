@@ -1,3 +1,4 @@
+import type { ReplyToMode } from "openclaw/plugin-sdk/config-runtime";
 import { parseSlackTarget } from "./targets.js";
 
 export function resolveSlackAutoThreadId(params: {
@@ -5,7 +6,7 @@ export function resolveSlackAutoThreadId(params: {
   toolContext?: {
     currentChannelId?: string;
     currentThreadTs?: string;
-    replyToMode?: "off" | "first" | "all" | "batched";
+    replyToMode?: ReplyToMode;
     hasRepliedRef?: { value: boolean };
   };
 }): string | undefined {
@@ -13,11 +14,7 @@ export function resolveSlackAutoThreadId(params: {
   if (!context?.currentThreadTs || !context.currentChannelId) {
     return undefined;
   }
-  if (
-    context.replyToMode !== "all" &&
-    context.replyToMode !== "first" &&
-    context.replyToMode !== "batched"
-  ) {
+  if (context.replyToMode !== "all" && context.replyToMode !== "first") {
     return undefined;
   }
   const parsedTarget = parseSlackTarget(params.to, { defaultKind: "channel" });
@@ -27,10 +24,7 @@ export function resolveSlackAutoThreadId(params: {
   if (parsedTarget.id.toLowerCase() !== context.currentChannelId.toLowerCase()) {
     return undefined;
   }
-  if (
-    (context.replyToMode === "first" || context.replyToMode === "batched") &&
-    context.hasRepliedRef?.value
-  ) {
+  if (context.replyToMode === "first" && context.hasRepliedRef?.value) {
     return undefined;
   }
   return context.currentThreadTs;

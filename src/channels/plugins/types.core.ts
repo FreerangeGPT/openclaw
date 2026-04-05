@@ -2,7 +2,7 @@ import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { TSchema } from "@sinclair/typebox";
 import type { MsgContext } from "../../auto-reply/templating.js";
 import type { ReplyPayload } from "../../auto-reply/types.js";
-import type { OpenClawConfig } from "../../config/config.js";
+import type { OpenClawConfig, ReplyToMode } from "../../config/config.js";
 import type { MarkdownTableMode } from "../../config/types.base.js";
 import type { OutboundMediaAccess } from "../../media/load-options.js";
 import type { PollInput } from "../../polls.js";
@@ -338,7 +338,7 @@ export type ChannelThreadingAdapter = {
     cfg: OpenClawConfig;
     accountId?: string | null;
     chatType?: string | null;
-  }) => "off" | "first" | "all" | "batched";
+  }) => ReplyToMode;
   /**
    * When replyToMode is "off", allow explicit reply tags/directives to keep replyToId.
    *
@@ -395,7 +395,7 @@ export type ChannelThreadingToolContext = {
   currentChannelProvider?: ChannelId;
   currentThreadTs?: string;
   currentMessageId?: string | number;
-  replyToMode?: "off" | "first" | "all" | "batched";
+  replyToMode?: ReplyToMode;
   hasRepliedRef?: { value: boolean };
   /**
    * When true, skip cross-context decoration (e.g., "[from X]" prefix).
@@ -534,7 +534,6 @@ export type ChannelMessagingAdapter = {
     agentId: string;
     accountId?: string | null;
     target: string;
-    currentSessionKey?: string;
     resolvedTarget?: {
       to: string;
       kind: ChannelDirectoryEntryKind | "channel";

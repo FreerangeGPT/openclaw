@@ -7,7 +7,7 @@ import {
   patchAllowlistUsersInConfigEntries,
   summarizeMapping,
 } from "openclaw/plugin-sdk/allow-from";
-import type { SessionScope } from "openclaw/plugin-sdk/config-runtime";
+import type { ReplyToMode, SessionScope } from "openclaw/plugin-sdk/config-runtime";
 import { createConnectedChannelStatusPatch } from "openclaw/plugin-sdk/gateway-runtime";
 import { DEFAULT_GROUP_HISTORY_LIMIT } from "openclaw/plugin-sdk/reply-history";
 import { normalizeMainKey } from "openclaw/plugin-sdk/routing";

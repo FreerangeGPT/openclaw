@@ -1,5 +1,5 @@
 import { codingTools, createReadTool, readTool } from "@mariozechner/pi-coding-agent";
-import type { OpenClawConfig } from "../config/config.js";
+import type { OpenClawConfig, ReplyToMode } from "../config/config.js";
 import type { ModelCompatConfig } from "../config/types.models.js";
 import type { ToolLoopDetectionConfig } from "../config/types.tools.js";
 import { resolveMergedSafeBinProfileFixtures } from "../infra/exec-safe-bin-runtime-policy.js";
@@ -38,11 +38,12 @@ import {
   createSandboxedEditTool,
   createSandboxedReadTool,
   createSandboxedWriteTool,
-  getToolParamsRecord,
+  normalizeToolParams,
+  patchToolSchemaForClaudeCompatibility,
   wrapToolMemoryFlushAppendOnlyWrite,
   wrapToolWorkspaceRootGuard,
   wrapToolWorkspaceRootGuardWithOptions,
-  wrapToolParamValidation,
+  wrapToolParamNormalization,
 } from "./pi-tools.read.js";
 import { cleanToolSchemaForGemini, normalizeToolParameters } from "./pi-tools.schema.js";
 import type { AnyAgentTool } from "./pi-tools.types.js";
@@ -233,8 +234,9 @@ export function resolveToolLoopDetectionConfig(params: {
 
 export const __testing = {
   cleanToolSchemaForGemini,
-  getToolParamsRecord,
-  wrapToolParamValidation,
+  normalizeToolParams,
+  patchToolSchemaForClaudeCompatibility,
+  wrapToolParamNormalization,
   assertRequiredParams,
   applyModelProviderToolPolicy,
 } as const;
@@ -304,7 +306,7 @@ export function createOpenClawCodingTools(options?: {
   senderUsername?: string | null;
   senderE164?: string | null;
   /** Reply-to mode for Slack auto-threading. */
-  replyToMode?: "off" | "first" | "all" | "batched";
+  replyToMode?: ReplyToMode;
   /** Mutable ref to track if a reply was sent (for "first" mode). */
   hasRepliedRef?: { value: boolean };
   /** Allow plugin tools for this run to late-bind the gateway subagent. */

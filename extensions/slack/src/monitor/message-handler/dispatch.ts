@@ -8,6 +8,7 @@ import {
   type StatusReactionAdapter,
 } from "openclaw/plugin-sdk/channel-feedback";
 import { createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-reply-pipeline";
+import type { ReplyToMode } from "openclaw/plugin-sdk/config-runtime";
 import { resolveAgentOutboundIdentity } from "openclaw/plugin-sdk/outbound-runtime";
 import { clearHistoryEntriesIfEnabled } from "openclaw/plugin-sdk/reply-history";
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
@@ -108,7 +109,7 @@ export function shouldInitializeSlackDraftStream(params: {
 }
 
 export function resolveSlackStreamingThreadHint(params: {
-  replyToMode: "off" | "first" | "all" | "batched";
+  replyToMode: ReplyToMode;
   incomingThreadTs: string | undefined;
   messageTs: string | undefined;
   isThreadReply?: boolean;
