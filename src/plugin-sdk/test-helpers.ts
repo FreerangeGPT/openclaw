@@ -1,10 +1,14 @@
-import { mkdtempSync, type RmOptions } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach } from "vitest";
 
-export function createPluginSdkTestHarness(options?: { cleanup?: RmOptions }) {
+type PluginSdkTestHarnessCleanupOptions = Parameters<typeof rm>[1];
+
+export function createPluginSdkTestHarness(options?: {
+  cleanup?: PluginSdkTestHarnessCleanupOptions;
+}) {
   const tempDirs: string[] = [];
 
   afterEach(async () => {
