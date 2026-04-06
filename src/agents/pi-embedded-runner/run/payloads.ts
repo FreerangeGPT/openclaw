@@ -191,6 +191,9 @@ export function buildEmbeddedRunPayloads(params: {
         replyToTag,
         replyToCurrent,
       } = parseReplyDirectives(agg);
+      if (agg.includes("[[reply_to")) {
+        console.log("[auto-trace] RAW agg before tag strip:", agg.substring(0, 300));
+      }
       if (cleanedText) {
         replyItems.push({
           text: cleanedText,
@@ -283,6 +286,9 @@ export function buildEmbeddedRunPayloads(params: {
       replyToTag,
       replyToCurrent,
     } = parseReplyDirectives(text);
+    if (text.includes("[[reply_to")) {
+      console.log("[auto-trace] RAW text before tag strip:", text.substring(0, 300));
+    }
     if (!cleanedText && (!mediaUrls || mediaUrls.length === 0) && !audioAsVoice) {
       continue;
     }
