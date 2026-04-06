@@ -123,22 +123,22 @@ export function scheduleFollowupDrain(
 
           const routing = resolveOriginRoutingMetadata(items);
 
-          // When multiple messages are collected, enrich the prompt with per-item
-          // message_id hints so the model can produce separate [[reply_to:<id>]]
-          // tagged sections for each distinct topic or sender.
+          // When multiple messages are collected, spell out the exact
+          // [[reply_to:<id>]] tag each answer section must start with so
+          // the delivery layer can split the response and quote correctly.
           const hasMultipleItems = items.length > 1;
-          const senderIds = new Set(items.map((i) => i.run.senderId).filter(Boolean));
-          const senderNote = senderIds.size > 1 ? ` from ${senderIds.size} senders` : "";
           const prompt = buildCollectPrompt({
             title: hasMultipleItems
-              ? `[Queued messages while agent was busy — ${items.length} messages${senderNote}]\nUse [[reply_to:<message_id>]] before each section of your reply to quote the message you are answering.`
+              ? `[${items.length} queued messages — answer each one starting with its [[reply_to:<message_id>]] tag]`
               : "[Queued messages while agent was busy]",
             items,
             summary,
             renderItem: (item, idx) => {
-              const tagHint =
-                hasMultipleItems && item.messageId ? ` (message_id: ${item.messageId})` : "";
-              return `---\nQueued #${idx + 1}${tagHint}\n${item.prompt}`.trim();
+              const tagLine =
+                hasMultipleItems && item.messageId
+                  ? ` — start your answer with: [[reply_to:${item.messageId}]]`
+                  : "";
+              return `---\nQueued #${idx + 1}${tagLine}\n${item.prompt}`.trim();
             },
           });
           console.log(
