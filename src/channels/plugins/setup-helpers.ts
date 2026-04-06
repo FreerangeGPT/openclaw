@@ -1,7 +1,7 @@
 import { z, type ZodType } from "zod";
 import type { OpenClawConfig } from "../../config/config.js";
 import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "../../routing/session-key.js";
-import { getBundledChannelContractSurfaceEntries } from "./contract-surfaces.js";
+import { getChannelPlugin } from "./registry.js";
 import type { ChannelSetupAdapter } from "./types.adapters.js";
 import type { ChannelSetupInput } from "./types.core.js";
 
@@ -149,6 +149,8 @@ export function prepareScopedSetupConfig(params: {
     alwaysUseAccounts: params.alwaysUseAccounts,
   });
 }
+
+export function clearSetupPromotionRuntimeModuleCache(): void {}
 
 export function applySetupAccountConfigPatch(params: {
   cfg: OpenClawConfig;
@@ -415,13 +417,11 @@ type ChannelSetupPromotionSurface = {
 };
 
 function getChannelSetupPromotionSurface(channelKey: string): ChannelSetupPromotionSurface | null {
-  const entry = getBundledChannelContractSurfaceEntries().find(
-    (candidate) => candidate.pluginId === channelKey,
-  );
-  if (!entry || !entry.surface || typeof entry.surface !== "object") {
+  const setup = getChannelPlugin(channelKey)?.setup;
+  if (!setup || typeof setup !== "object") {
     return null;
   }
-  return entry.surface as ChannelSetupPromotionSurface;
+  return setup as ChannelSetupPromotionSurface;
 }
 
 export function shouldMoveSingleAccountChannelKey(params: {
@@ -473,14 +473,22 @@ export function resolveSingleAccountPromotionTarget(params: {
   channelKey: string;
   channel: ChannelSectionBase;
 }): string {
+  const accounts = params.channel.accounts ?? {};
+  const resolveExistingAccountId = (targetAccountId: string): string => {
+    const normalizedTargetAccountId = normalizeAccountId(targetAccountId);
+    const matchedAccountId = Object.keys(accounts).find(
+      (accountId) => normalizeAccountId(accountId) === normalizedTargetAccountId,
+    );
+    return matchedAccountId ?? normalizedTargetAccountId;
+  };
   const surface = getChannelSetupPromotionSurface(params.channelKey);
   const resolved = surface?.resolveSingleAccountPromotionTarget?.({
     channel: params.channel,
   });
   if (typeof resolved === "string" && resolved.trim()) {
-    return normalizeAccountId(resolved);
+    return resolveExistingAccountId(resolved);
   }
-  return DEFAULT_ACCOUNT_ID;
+  return resolveExistingAccountId(DEFAULT_ACCOUNT_ID);
 }
 
 function cloneIfObject<T>(value: T): T {
