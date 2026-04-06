@@ -70,6 +70,10 @@ import {
   setHeartbeatsEnabled,
   setHeartbeatWakeHandler,
 } from "./heartbeat-wake.js";
+import {
+  prepareMemoryPrependQueueDrain,
+  prependAssociativeRecallBlockToText,
+} from "./memory-prepend-queue.js";
 import type { OutboundSendDeps } from "./outbound/deliver.js";
 import { deliverOutboundPayloads } from "./outbound/deliver.js";
 import { buildOutboundSessionContext } from "./outbound/session-context.js";
@@ -654,8 +658,15 @@ export async function runHeartbeatOnce(opts: {
     canRelayToUser,
     workspaceDir,
   });
+  const preparedMemoryPrepend = await prepareMemoryPrependQueueDrain({
+    workspaceDir,
+  });
+  const promptWithMemoryPrepend = prependAssociativeRecallBlockToText({
+    body: prompt,
+    recallBlock: preparedMemoryPrepend.block,
+  });
   const ctx = {
-    Body: appendCronStyleCurrentTimeLine(prompt, cfg, startedAt),
+    Body: appendCronStyleCurrentTimeLine(promptWithMemoryPrepend, cfg, startedAt),
     From: sender,
     To: sender,
     OriginatingChannel: delivery.channel !== "none" ? delivery.channel : undefined,
@@ -738,6 +749,14 @@ export async function runHeartbeatOnce(opts: {
     const getReplyFromConfig =
       opts.deps?.getReplyFromConfig ?? (await loadHeartbeatRunnerRuntime()).getReplyFromConfig;
     const replyResult = await getReplyFromConfig(ctx, replyOpts, cfg);
+    if (preparedMemoryPrepend.block) {
+      const commitResult = await preparedMemoryPrepend.commit();
+      if (!commitResult.applied && commitResult.reason !== "noop") {
+        log.warn(
+          `heartbeat memory prepend queue commit skipped (${commitResult.reason}) path=${preparedMemoryPrepend.queuePath}`,
+        );
+      }
+    }
     const replyPayload = resolveHeartbeatReplyPayload(replyResult);
     const includeReasoning = heartbeat?.includeReasoning === true;
     const reasoningPayloads = includeReasoning
