@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  shouldAutoIsolateMainSessionHeartbeat,
   shouldSkipExpensiveMainSessionHeartbeat,
   shouldUseIsolatedHeartbeatSession,
 } from "./heartbeat-cost-guard.js";
@@ -42,8 +43,6 @@ describe("heartbeat cost guard", () => {
   it.each([
     { hasExecCompletion: true },
     { hasCronEvents: true },
-    { hasHeartbeatInstructions: true },
-    { hasTasks: true },
     { isCronEventReason: true },
     { isExecEventReason: true },
     { isManualReason: true },
@@ -54,11 +53,81 @@ describe("heartbeat cost guard", () => {
     expect(shouldSkipExpensiveMainSessionHeartbeat(baseParams(overrides))).toBeNull();
   });
 
+  it.each([{ hasHeartbeatInstructions: true }, { hasTasks: true }])(
+    "still skips large explicit main-session heartbeat with %#",
+    (overrides) => {
+      expect(shouldSkipExpensiveMainSessionHeartbeat(baseParams(overrides))).toEqual({
+        totalTokens: 80_000,
+        threshold: 50_000,
+        promptChars: "Read HEARTBEAT.md".length,
+      });
+    },
+  );
+
+  it("auto-isolates large routine heartbeats when isolation is not explicitly configured", () => {
+    expect(
+      shouldAutoIsolateMainSessionHeartbeat({
+        ...baseParams(),
+        configuredIsolated: undefined,
+      }),
+    ).toEqual({
+      totalTokens: 80_000,
+      threshold: 50_000,
+    });
+  });
+
   it.each([
-    { configuredIsolated: true, hasMemoryPrepend: false, expected: true },
-    { configuredIsolated: false, hasMemoryPrepend: true, expected: true },
-    { configuredIsolated: undefined, hasMemoryPrepend: true, expected: true },
-    { configuredIsolated: false, hasMemoryPrepend: false, expected: false },
+    { configuredIsolated: true },
+    { configuredIsolated: false },
+    { hasExecCompletion: true },
+    { hasCronEvents: true },
+    { isCronEventReason: true },
+    { isExecEventReason: true },
+    { isManualReason: true },
+    { isWakeReason: true },
+    { totalTokens: 49_999 },
+    { totalTokensFresh: false },
+  ])("does not auto-isolate explicit, actionable, or low-confidence heartbeat %#", (overrides) => {
+    expect(
+      shouldAutoIsolateMainSessionHeartbeat({
+        ...baseParams(),
+        configuredIsolated: undefined,
+        ...overrides,
+      }),
+    ).toBeNull();
+  });
+
+  it.each([
+    {
+      configuredIsolated: true,
+      hasMemoryPrepend: false,
+      autoIsolatedMainSession: false,
+      expected: true,
+    },
+    {
+      configuredIsolated: false,
+      hasMemoryPrepend: true,
+      autoIsolatedMainSession: false,
+      expected: true,
+    },
+    {
+      configuredIsolated: undefined,
+      hasMemoryPrepend: true,
+      autoIsolatedMainSession: false,
+      expected: true,
+    },
+    {
+      configuredIsolated: undefined,
+      hasMemoryPrepend: false,
+      autoIsolatedMainSession: true,
+      expected: true,
+    },
+    {
+      configuredIsolated: false,
+      hasMemoryPrepend: false,
+      autoIsolatedMainSession: false,
+      expected: false,
+    },
   ])("resolves heartbeat isolation %#", (params) => {
     expect(shouldUseIsolatedHeartbeatSession(params)).toBe(params.expected);
   });

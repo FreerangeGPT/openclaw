@@ -52,6 +52,7 @@ import { escapeRegExp } from "../utils.js";
 import { formatErrorMessage, hasErrnoCode } from "./errors.js";
 import { isWithinActiveHours } from "./heartbeat-active-hours.js";
 import {
+  shouldAutoIsolateMainSessionHeartbeat,
   shouldSkipExpensiveMainSessionHeartbeat,
   shouldUseIsolatedHeartbeatSession,
 } from "./heartbeat-cost-guard.js";
@@ -671,10 +672,33 @@ export async function runHeartbeatOnce(opts: {
   // a new session ID (empty transcript) each run, avoiding the cost of
   // sending the full conversation history (~100K tokens) to the LLM.
   // Delivery routing still uses the main session entry (lastChannel, lastTo).
+  const autoIsolatedMainSession = shouldAutoIsolateMainSessionHeartbeat({
+    configuredIsolated: heartbeat?.isolatedSession,
+    totalTokens: preflight.session.entry?.totalTokens,
+    totalTokensFresh: preflight.session.entry?.totalTokensFresh,
+    hasExecCompletion: preflight.pendingEventEntries.some((event) =>
+      isExecCompletionEvent(event.text),
+    ),
+    hasCronEvents:
+      preflight.hasTaggedCronEvents ||
+      preflight.pendingEventEntries.some((event) => isCronSystemEvent(event.text)),
+    isCronEventReason: preflight.isCronEventReason,
+    isExecEventReason: preflight.isExecEventReason,
+    isManualReason: preflight.isManualReason,
+    isWakeReason: preflight.isWakeReason,
+  });
   const useIsolatedSession = shouldUseIsolatedHeartbeatSession({
     configuredIsolated: heartbeat?.isolatedSession,
     hasMemoryPrepend: Boolean(preparedMemoryPrepend.block),
+    autoIsolatedMainSession: Boolean(autoIsolatedMainSession),
   });
+  if (autoIsolatedMainSession) {
+    log.info("heartbeat: auto-isolating large routine main-session run", {
+      sessionKey,
+      agentId,
+      ...autoIsolatedMainSession,
+    });
+  }
   if (preparedMemoryPrepend.block && heartbeat?.isolatedSession !== true) {
     log.info("heartbeat: using isolated session for memory prepend queue drain", {
       sessionKey,

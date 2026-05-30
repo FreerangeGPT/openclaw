@@ -11,6 +11,8 @@ import { heartbeatRunnerTelegramPlugin } from "./heartbeat-runner.test-channel-p
 
 export type HeartbeatSessionSeed = {
   sessionId?: string;
+  totalTokens?: number;
+  totalTokensFresh?: boolean;
   updatedAt?: number;
   lastChannel: string;
   lastProvider: string;

@@ -110,4 +110,50 @@ describe("heartbeat transcript pruning", () => {
       expectPruned: false,
     });
   });
+
+  it("auto-isolates large routine heartbeats before reading the main transcript", async () => {
+    await withTempTelegramHeartbeatSandbox(
+      async ({ tmpDir, storePath, replySpy }) => {
+        const sessionKey = resolveMainSessionKey(undefined);
+        await seedSessionStore(storePath, sessionKey, {
+          sessionId: "test-session-auto-isolate",
+          lastChannel: "telegram",
+          lastProvider: "telegram",
+          lastTo: "user123",
+          totalTokens: 90_000,
+          totalTokensFresh: true,
+        });
+
+        replySpy.mockResolvedValueOnce({
+          text: "HEARTBEAT_OK",
+          usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        });
+
+        const cfg = {
+          version: 1,
+          model: "test-model",
+          agent: { workspace: tmpDir },
+          session: { store: storePath },
+          sessionStore: storePath,
+          channels: { telegram: {} },
+          agents: { defaults: { heartbeat: { every: "5m" } } },
+        } as unknown as OpenClawConfig;
+
+        const result = await runHeartbeatOnce({
+          agentId: undefined,
+          reason: "test",
+          cfg,
+          deps: {
+            sendTelegram: vi.fn(),
+            getReplyFromConfig: replySpy,
+          },
+        });
+
+        expect(result.status).toBe("ran");
+        expect(replySpy).toHaveBeenCalled();
+        expect(replySpy.mock.calls[0]?.[0]?.SessionKey).toBe(`${sessionKey}:heartbeat`);
+      },
+      { prefix: "openclaw-hb-auto-isolate-" },
+    );
+  });
 });
