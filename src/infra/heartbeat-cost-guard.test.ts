@@ -46,7 +46,6 @@ describe("heartbeat cost guard", () => {
     { isCronEventReason: true },
     { isExecEventReason: true },
     { isManualReason: true },
-    { isWakeReason: true },
     { totalTokens: 49_999 },
     { totalTokensFresh: false },
   ])("allows actionable or low-confidence heartbeat %#", (overrides) => {
@@ -63,6 +62,20 @@ describe("heartbeat cost guard", () => {
       });
     },
   );
+
+  it("skips high-token wake heartbeat when no actionable event is pending", () => {
+    expect(
+      shouldSkipExpensiveMainSessionHeartbeat(
+        baseParams({
+          isWakeReason: true,
+        }),
+      ),
+    ).toEqual({
+      totalTokens: 80_000,
+      threshold: 50_000,
+      promptChars: "Read HEARTBEAT.md".length,
+    });
+  });
 
   it("auto-isolates large routine heartbeats when isolation is not explicitly configured", () => {
     expect(
@@ -84,7 +97,6 @@ describe("heartbeat cost guard", () => {
     { isCronEventReason: true },
     { isExecEventReason: true },
     { isManualReason: true },
-    { isWakeReason: true },
     { totalTokens: 49_999 },
     { totalTokensFresh: false },
   ])("does not auto-isolate explicit, actionable, or low-confidence heartbeat %#", (overrides) => {
@@ -95,6 +107,20 @@ describe("heartbeat cost guard", () => {
         ...overrides,
       }),
     ).toBeNull();
+  });
+
+  it("auto-isolates high-token wake heartbeat when no actionable event is pending", () => {
+    expect(
+      shouldAutoIsolateMainSessionHeartbeat({
+        ...baseParams({
+          isWakeReason: true,
+        }),
+        configuredIsolated: undefined,
+      }),
+    ).toEqual({
+      totalTokens: 80_000,
+      threshold: 50_000,
+    });
   });
 
   it.each([

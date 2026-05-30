@@ -11,6 +11,7 @@ import {
 import {
   extractPlanningOnlyPlanDetails,
   isLikelyExecutionAckPrompt,
+  resolveIncompleteTurnPayloadText,
   resolveAckExecutionFastPathInstruction,
   resolvePlanningOnlyRetryInstruction,
 } from "./run/incomplete-turn.js";
@@ -53,6 +54,49 @@ describe("runEmbeddedPiAgent incomplete-turn safety", () => {
     expect(mockedClassifyFailoverReason).toHaveBeenCalledTimes(1);
     expect(result.payloads?.[0]?.isError).toBe(true);
     expect(result.payloads?.[0]?.text).toContain("verify before retrying");
+  });
+
+  it("surfaces thinking-only stop turns instead of silently completing", async () => {
+    mockedClassifyFailoverReason.mockReturnValue(null);
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({
+        assistantTexts: [],
+        toolMetas: [],
+        lastAssistant: {
+          stopReason: "stop",
+          provider: "anthropic",
+          model: "claude-opus-4-8",
+          content: [{ type: "thinking", thinking: "", thinkingSignature: "signed" }],
+        } as unknown as EmbeddedRunAttemptResult["lastAssistant"],
+      }),
+    );
+
+    const result = await runEmbeddedPiAgent({
+      ...overflowBaseRunParams,
+      runId: "run-incomplete-turn-thinking-only-stop",
+    });
+
+    expect(result.payloads?.[0]?.isError).toBe(true);
+    expect(result.payloads?.[0]?.text).toContain("couldn't generate a response");
+  });
+
+  it("does not treat intentional silent stop text as incomplete", () => {
+    const text = resolveIncompleteTurnPayloadText({
+      payloadCount: 0,
+      aborted: false,
+      timedOut: false,
+      attempt: makeAttemptResult({
+        assistantTexts: ["NO_REPLY"],
+        lastAssistant: {
+          stopReason: "stop",
+          provider: "anthropic",
+          model: "claude-opus-4-8",
+          content: [{ type: "text", text: "NO_REPLY" }],
+        } as unknown as EmbeddedRunAttemptResult["lastAssistant"],
+      }),
+    });
+
+    expect(text).toBeNull();
   });
 
   it("detects replay-safe planning-only GPT turns", () => {

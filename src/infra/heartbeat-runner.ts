@@ -913,7 +913,7 @@ export async function runHeartbeatOnce(opts: {
     const heartbeatModelOverride = heartbeat?.model?.trim() || undefined;
     const suppressToolErrorWarnings = heartbeat?.suppressToolErrorWarnings === true;
     const bootstrapContextMode: "lightweight" | undefined =
-      heartbeat?.lightContext === true ? "lightweight" : undefined;
+      heartbeat?.lightContext === false ? undefined : "lightweight";
     const replyOpts = heartbeatModelOverride
       ? {
           isHeartbeat: true,

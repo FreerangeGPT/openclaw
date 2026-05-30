@@ -8,6 +8,7 @@ type ReplayMetadataAttempt = Pick<
 
 type IncompleteTurnAttempt = Pick<
   EmbeddedRunAttemptResult,
+  | "assistantTexts"
   | "clientToolCall"
   | "yieldDetected"
   | "didSendDeterministicApprovalPrompt"
@@ -117,7 +118,9 @@ export function resolveIncompleteTurnPayloadText(params: {
   }
 
   const stopReason = params.attempt.lastAssistant?.stopReason;
-  if (stopReason !== "toolUse" && stopReason !== "error") {
+  const hasAssistantText = params.attempt.assistantTexts.some((text) => text.trim().length > 0);
+  const isThinkingOnlyStop = stopReason === "stop" && !hasAssistantText;
+  if (stopReason !== "toolUse" && stopReason !== "error" && !isThinkingOnlyStop) {
     return null;
   }
 

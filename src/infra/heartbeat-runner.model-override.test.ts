@@ -132,6 +132,26 @@ describe("runHeartbeatOnce – heartbeat model override", () => {
     );
   });
 
+  it("passes lightweight bootstrapContextMode by default", async () => {
+    const replyOpts = await runDefaultsHeartbeat({});
+    expect(replyOpts).toEqual(
+      expect.objectContaining({
+        isHeartbeat: true,
+        bootstrapContextMode: "lightweight",
+      }),
+    );
+  });
+
+  it("omits bootstrapContextMode when heartbeat lightContext is disabled", async () => {
+    const replyOpts = await runDefaultsHeartbeat({ lightContext: false });
+    expect(replyOpts).toEqual(
+      expect.objectContaining({
+        isHeartbeat: true,
+        bootstrapContextMode: undefined,
+      }),
+    );
+  });
+
   it("passes bootstrapContextMode when heartbeat lightContext is enabled", async () => {
     const replyOpts = await runDefaultsHeartbeat({ lightContext: true });
     expect(replyOpts).toEqual(

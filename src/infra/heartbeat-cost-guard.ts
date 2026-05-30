@@ -55,8 +55,7 @@ export function shouldAutoIsolateMainSessionHeartbeat(params: {
     params.hasCronEvents ||
     params.isExecEventReason ||
     params.isCronEventReason ||
-    params.isManualReason ||
-    params.isWakeReason
+    params.isManualReason
   ) {
     return null;
   }
@@ -92,8 +91,7 @@ export function shouldSkipExpensiveMainSessionHeartbeat(params: {
     params.hasCronEvents ||
     params.isExecEventReason ||
     params.isCronEventReason ||
-    params.isManualReason ||
-    params.isWakeReason
+    params.isManualReason
   ) {
     return null;
   }
