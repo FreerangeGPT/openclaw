@@ -111,9 +111,11 @@ import { getDmHistoryLimitFromSessionKey, limitHistoryTurns } from "../history.j
 import { log } from "../logger.js";
 import { buildEmbeddedMessageActionDiscoveryInput } from "../message-action-discovery-input.js";
 import {
-  collectPromptCacheToolNames,
   beginPromptCacheObservation,
+  collectPromptCacheToolNames,
+  collectPromptCacheToolShapes,
   completePromptCacheObservation,
+  detectPromptCacheAnomaly,
   type PromptCacheChange,
 } from "../prompt-cache-observability.js";
 import { resolveCacheRetention } from "../prompt-cache-retention.js";
@@ -1033,7 +1035,18 @@ export async function runEmbeddedAttempt(
         ...builtInTools,
         ...allCustomTools,
       ] as Array<{ name?: string }>);
+      const promptCacheToolShapes = collectPromptCacheToolShapes([
+        ...builtInTools,
+        ...allCustomTools,
+      ]);
       let promptCacheChangesForTurn: PromptCacheChange[] | null = null;
+      let previousCacheReadForTurn: number | null = null;
+      const effectiveCacheRetention = resolveCacheRetention(
+        effectiveExtraParams,
+        params.provider,
+        params.model.api,
+        params.modelId,
+      );
 
       if (cacheTrace) {
         cacheTrace.recordStage("session:loaded", {
@@ -1512,8 +1525,17 @@ export async function runEmbeddedAttempt(
       let promptError: unknown = null;
       let promptErrorSource: "prompt" | "compaction" | null = null;
       const prePromptMessageCount = activeSession.messages.length;
+      const previousAssistantBeforePrompt = activeSession.messages
+        .slice()
+        .toReversed()
+        .find((message) => message.role === "assistant");
+      const previousAssistantTimestamp =
+        typeof previousAssistantBeforePrompt?.timestamp === "number"
+          ? previousAssistantBeforePrompt.timestamp
+          : null;
+      let promptStartedAt = Date.now();
       try {
-        const promptStartedAt = Date.now();
+        promptStartedAt = Date.now();
 
         // Run before_prompt_build hooks to allow plugins to inject prompt context.
         // Legacy compatibility: before_agent_start is also checked for context fields.
@@ -1584,18 +1606,15 @@ export async function runEmbeddedAttempt(
             provider: params.provider,
             modelId: params.modelId,
             modelApi: params.model.api,
-            cacheRetention: resolveCacheRetention(
-              effectiveExtraParams,
-              params.provider,
-              params.model.api,
-              params.modelId,
-            ),
+            cacheRetention: effectiveCacheRetention,
             streamStrategy,
             transport: effectiveAgentTransport,
             systemPrompt: systemPromptText,
             toolNames: promptCacheToolNames,
+            toolShapes: promptCacheToolShapes,
           });
           promptCacheChangesForTurn = cacheObservation.changes;
+          previousCacheReadForTurn = cacheObservation.previousCacheRead;
           cacheTrace?.recordStage("cache:state", {
             options: {
               snapshot: cacheObservation.snapshot,
@@ -1858,6 +1877,15 @@ export async function runEmbeddedAttempt(
           provider: params.provider,
           modelId: params.modelId,
           modelApi: params.model.api,
+          baseUrl: params.model.baseUrl,
+          cacheRetention: effectiveCacheRetention,
+          streamStrategy,
+          transport: effectiveAgentTransport,
+          systemPrompt: systemPromptText,
+          toolNames: promptCacheToolNames,
+          toolShapes: promptCacheToolShapes,
+          promptCacheChanges: promptCacheChangesForTurn,
+          previousCacheRead: previousCacheReadForTurn,
           isCacheTtlEligibleProvider,
         });
 
@@ -2025,6 +2053,10 @@ export async function runEmbeddedAttempt(
         )
         .map((entry) => ({ toolName: entry.toolName, meta: entry.meta }));
       const attemptUsage = getUsageTotals();
+      const secondsSincePreviousAssistant =
+        previousAssistantTimestamp !== null
+          ? Math.max(0, Math.floor((promptStartedAt - previousAssistantTimestamp) / 1000))
+          : null;
       if (cacheObservabilityEnabled) {
         const cacheBreak = completePromptCacheObservation({
           sessionId: params.sessionId,
@@ -2069,6 +2101,52 @@ export async function runEmbeddedAttempt(
             },
           });
         }
+      }
+      const cacheAnomaly = detectPromptCacheAnomaly({
+        assistantTexts,
+        secondsSincePreviousAssistant,
+        usage: attemptUsage,
+      });
+      if (cacheAnomaly) {
+        log.warn(
+          `[prompt-cache] large cache-write anomaly for ${params.provider}/${params.modelId} ` +
+            `via ${streamStrategy}: ${cacheAnomaly.reasons.join(", ")}`,
+          {
+            runId: params.runId,
+            sessionId: params.sessionId,
+            sessionKey: params.sessionKey,
+            ...cacheAnomaly,
+          },
+        );
+        sessionManager.appendCustomEntry("openclaw:cache-anomaly", {
+          timestamp: Date.now(),
+          runId: params.runId,
+          sessionId: params.sessionId,
+          provider: params.provider,
+          modelId: params.modelId,
+          modelApi: params.model.api,
+          streamStrategy,
+          transport: effectiveAgentTransport,
+          ...cacheAnomaly,
+          ...(promptCacheChangesForTurn?.length
+            ? {
+                promptCacheChanges: promptCacheChangesForTurn.map((change) => ({
+                  code: change.code,
+                  detail: change.detail,
+                })),
+              }
+            : {}),
+        });
+        cacheTrace?.recordStage("cache:anomaly", {
+          options: {
+            ...cacheAnomaly,
+            changes:
+              promptCacheChangesForTurn?.map((change) => ({
+                code: change.code,
+                detail: change.detail,
+              })) ?? undefined,
+          },
+        });
       }
 
       if (hookRunner?.hasHooks("llm_output")) {

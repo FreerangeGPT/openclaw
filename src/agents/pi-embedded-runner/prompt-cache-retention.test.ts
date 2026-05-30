@@ -30,6 +30,28 @@ describe("prompt cache retention", () => {
     ).toBeUndefined();
   });
 
+  it("passes explicit cacheRetention through for opaque Bedrock application profiles", () => {
+    expect(
+      resolveCacheRetention(
+        { cacheRetention: "long" },
+        "amazon-bedrock",
+        "bedrock-converse-stream",
+        "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/prod-main",
+      ),
+    ).toBe("long");
+  });
+
+  it("does not infer cacheRetention for opaque Bedrock application profiles without config", () => {
+    expect(
+      resolveCacheRetention(
+        undefined,
+        "amazon-bedrock",
+        "bedrock-converse-stream",
+        "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/prod-main",
+      ),
+    ).toBeUndefined();
+  });
+
   it("identifies supported direct Google cache families", () => {
     expect(
       isGooglePromptCacheEligible({

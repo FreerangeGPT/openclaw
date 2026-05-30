@@ -348,6 +348,30 @@ describe("applyMediaUnderstanding", () => {
     expect((ctx as unknown as { BodyForAgent?: string }).BodyForAgent).toBe(ctx.Body);
   });
 
+  it("caps long audio transcripts before they become prompt body", async () => {
+    const ctx = await createAudioCtx();
+    const providers = createGroqProviders("t".repeat(1_500));
+
+    await withEnvAsync(
+      {
+        OPENCLAW_INBOUND_MEDIA_OUTPUT_ENTRY_MAX_CHARS: "1000",
+        OPENCLAW_INBOUND_MEDIA_OUTPUT_TOTAL_MAX_CHARS: "1000",
+      },
+      async () => {
+        const result = await applyMediaUnderstanding({
+          ctx,
+          cfg: createGroqAudioConfig(),
+          providers,
+        });
+
+        expect(result.appliedAudio).toBe(true);
+        expect(ctx.Transcript).toContain("OpenClaw truncated");
+        expect(ctx.Body).toContain("OpenClaw truncated");
+        expect(ctx.Body?.length).toBeLessThan(1_300);
+      },
+    );
+  });
+
   it("skips file blocks for text-like audio when transcription succeeds", async () => {
     const ctx = await createAudioCtx({
       fileName: "data.mp3",
@@ -1040,6 +1064,66 @@ describe("applyMediaUnderstanding", () => {
     expect(result.appliedFile).toBe(true);
     expect(ctx.Body).toContain('<file name="data.bin" mime="text/csv">');
     expect(ctx.Body).toContain('"a","b"\t"c"');
+  });
+
+  it("caps extracted file context before appending it to the prompt body", async () => {
+    const filePath = await createTempMediaFile({
+      fileName: "large.txt",
+      content: "f".repeat(1_500),
+    });
+
+    await withEnvAsync(
+      {
+        OPENCLAW_INBOUND_FILE_CONTEXT_ENTRY_MAX_CHARS: "1000",
+        OPENCLAW_INBOUND_FILE_CONTEXT_TOTAL_MAX_CHARS: "1000",
+      },
+      async () => {
+        const { ctx, result } = await applyWithDisabledMedia({
+          body: "<media:file>",
+          mediaPath: filePath,
+        });
+
+        expect(result.appliedFile).toBe(true);
+        expect(ctx.Body).toContain('<file name="large.txt" mime="text/plain">');
+        expect(ctx.Body).toContain("OpenClaw truncated");
+        expect(ctx.Body?.length).toBeLessThan(1_400);
+      },
+    );
+  });
+
+  it("keeps newer file attachments when the aggregate file context budget is exhausted", async () => {
+    const oldPath = await createTempMediaFile({
+      fileName: "old.txt",
+      content: "old-content ".repeat(140),
+    });
+    const newPath = await createTempMediaFile({
+      fileName: "new.txt",
+      content: "new-content",
+    });
+    const ctx: MsgContext = {
+      Body: "<media:file>",
+      MediaPaths: [oldPath, newPath],
+      MediaTypes: ["text/plain", "text/plain"],
+    };
+
+    await withEnvAsync(
+      {
+        OPENCLAW_INBOUND_FILE_CONTEXT_ENTRY_MAX_CHARS: "1000",
+        OPENCLAW_INBOUND_FILE_CONTEXT_TOTAL_MAX_CHARS: "1000",
+      },
+      async () => {
+        const result = await applyMediaUnderstanding({
+          ctx,
+          cfg: createMediaDisabledConfig(),
+        });
+
+        expect(result.appliedFile).toBe(true);
+        expect(ctx.Body).toContain("older file attachment context blocks");
+        expect(ctx.Body).toContain('name="new.txt"');
+        expect(ctx.Body).toContain("new-content");
+        expect(ctx.Body).not.toContain('name="old.txt"');
+      },
+    );
   });
 
   it("infers TSV when tabs are present without commas", async () => {

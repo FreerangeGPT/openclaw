@@ -363,6 +363,25 @@ describe("context-pruning", () => {
     expect(second).toBeUndefined();
   });
 
+  it("cache-ttl can prune before the first cache touch is recorded", () => {
+    const sessionManager = {};
+
+    setContextPruningRuntime(sessionManager, {
+      settings: makeAggressiveSettings(),
+      contextWindowTokens: 1000,
+      isToolPrunable: () => true,
+      dropThinkingBlocks: false,
+    });
+
+    const handler = createContextHandler();
+    const result = runContextHandler(handler, makeSimpleToolPruningMessages(), sessionManager);
+    if (!result) {
+      throw new Error("expected first prune");
+    }
+    expect(toolText(findToolResult(result.messages, "t1"))).toBe("[cleared]");
+    expect(getContextPruningRuntime(sessionManager)?.lastCacheTouchAt).toBeGreaterThan(0);
+  });
+
   it("respects tools allow/deny (deny wins; wildcards supported)", () => {
     const messages: AgentMessage[] = [
       makeUser("u1"),

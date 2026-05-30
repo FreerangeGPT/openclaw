@@ -89,6 +89,12 @@ import {
 } from "./run/incomplete-turn.js";
 import type { RunEmbeddedPiAgentParams } from "./run/params.js";
 import { buildEmbeddedRunPayloads } from "./run/payloads.js";
+import {
+  type ExpensiveReplayDecision,
+  type ExpensiveReplayKind,
+  formatExpensiveReplayMessage,
+  shouldDampenExpensiveReplay,
+} from "./run/replay-dampening.js";
 import { handleRetryLimitExhaustion } from "./run/retry-limit.js";
 import { resolveEffectiveRuntimeModel, resolveHookModelSelection } from "./run/setup.js";
 import {
@@ -657,6 +663,72 @@ export async function runEmbeddedPiAgent(
             lastAssistant?.stopReason === "error"
               ? lastAssistant.errorMessage?.trim() || formattedAssistantErrorText
               : undefined;
+          const promptTokensForReplay = derivePromptTokens(lastRunPromptUsage);
+          const maybeDampenExpensiveReplay = (
+            retryKind: ExpensiveReplayKind,
+            failoverReason?: FailoverReason | null,
+          ): ExpensiveReplayDecision | null => {
+            const decision = shouldDampenExpensiveReplay({
+              retryKind,
+              failoverReason,
+              usage: attemptUsage,
+              promptTokens: promptTokensForReplay,
+              contextWindowTokens: ctxInfo.tokens,
+            });
+            if (!decision.dampen) {
+              return null;
+            }
+            log.warn(
+              `[prompt-cache] suppressed automatic ${retryKind} replay for ${provider}/${modelId}: ` +
+                decision.reasons.join(", "),
+              {
+                runId: params.runId,
+                sessionId: params.sessionId,
+                sessionKey: params.sessionKey,
+                retryKind,
+                failoverReason,
+                cacheWriteTokens: decision.cacheWriteTokens,
+                cacheReadTokens: decision.cacheReadTokens,
+                promptTokens: decision.promptTokens,
+                contextWindowTokens: decision.contextWindowTokens,
+              },
+            );
+            return decision;
+          };
+          const hasNextAuthProfile = profileIndex < profileCandidates.length - 1;
+          const buildExpensiveReplayDampenedResult = (
+            decision: ExpensiveReplayDecision,
+          ): EmbeddedPiRunResult => {
+            const message = formatExpensiveReplayMessage(decision);
+            return {
+              payloads: [
+                {
+                  text: message,
+                  isError: true,
+                },
+              ],
+              meta: {
+                durationMs: Date.now() - started,
+                agentMeta: buildErrorAgentMeta({
+                  sessionId: sessionIdUsed,
+                  provider,
+                  model: model.id,
+                  usageAccumulator,
+                  lastRunPromptUsage,
+                  lastAssistant,
+                  lastTurnTotal,
+                }),
+                systemPromptReport: attempt.systemPromptReport,
+                error: { kind: "expensive_replay_dampened", message },
+              },
+              didSendViaMessagingTool: attempt.didSendViaMessagingTool,
+              didSendDeterministicApprovalPrompt: attempt.didSendDeterministicApprovalPrompt,
+              messagingToolSentTexts: attempt.messagingToolSentTexts,
+              messagingToolSentMediaUrls: attempt.messagingToolSentMediaUrls,
+              messagingToolSentTargets: attempt.messagingToolSentTargets,
+              successfulCronAdds: attempt.successfulCronAdds,
+            };
+          };
           const canRestartForLiveSwitch =
             !attempt.didSendViaMessagingTool &&
             !attempt.didSendDeterministicApprovalPrompt &&
@@ -1029,6 +1101,10 @@ export async function runEmbeddedPiAgent(
               : describeFailoverError(promptError);
             const errorText = promptErrorDetails.message || describeUnknownError(promptError);
             if (await maybeRefreshRuntimeAuthForAuthError(errorText, runtimeAuthRetry)) {
+              const dampened = maybeDampenExpensiveReplay("auth-refresh", "auth");
+              if (dampened) {
+                return buildExpensiveReplayDampenedResult(dampened);
+              }
               authRetryPending = true;
               continue;
             }
@@ -1131,17 +1207,24 @@ export async function runEmbeddedPiAgent(
               failoverReason: promptFailoverReason,
               profileRotated: false,
             });
-            if (
-              promptFailoverDecision.action === "rotate_profile" &&
-              (await advanceAuthProfile())
-            ) {
-              lastRetryFailoverReason = mergeRetryFailoverReason({
-                previous: lastRetryFailoverReason,
-                failoverReason: promptFailoverReason,
-              });
-              logPromptFailoverDecision("rotate_profile");
-              await maybeBackoffBeforeOverloadFailover(promptFailoverReason);
-              continue;
+            if (promptFailoverDecision.action === "rotate_profile" && hasNextAuthProfile) {
+              const dampened = maybeDampenExpensiveReplay(
+                "prompt-profile-rotation",
+                promptFailoverReason,
+              );
+              if (dampened) {
+                logPromptFailoverDecision("surface_error");
+                return buildExpensiveReplayDampenedResult(dampened);
+              }
+              if (await advanceAuthProfile()) {
+                lastRetryFailoverReason = mergeRetryFailoverReason({
+                  previous: lastRetryFailoverReason,
+                  failoverReason: promptFailoverReason,
+                });
+                logPromptFailoverDecision("rotate_profile");
+                await maybeBackoffBeforeOverloadFailover(promptFailoverReason);
+                continue;
+              }
             }
             if (promptFailoverDecision.action === "rotate_profile") {
               promptFailoverDecision = resolveRunFailoverDecision({
@@ -1158,6 +1241,10 @@ export async function runEmbeddedPiAgent(
               attempted: attemptedThinking,
             });
             if (fallbackThinking) {
+              const dampened = maybeDampenExpensiveReplay("thinking-level", promptFailoverReason);
+              if (dampened) {
+                return buildExpensiveReplayDampenedResult(dampened);
+              }
               log.warn(
                 `unsupported thinking level for ${provider}/${modelId}; retrying with ${fallbackThinking}`,
               );
@@ -1170,6 +1257,11 @@ export async function runEmbeddedPiAgent(
             if (promptFailoverDecision.action === "fallback_model") {
               const fallbackReason = promptFailoverDecision.reason ?? "unknown";
               const status = resolveFailoverStatus(fallbackReason);
+              const dampened = maybeDampenExpensiveReplay("model-fallback", fallbackReason);
+              if (dampened) {
+                logPromptFailoverDecision("surface_error");
+                return buildExpensiveReplayDampenedResult(dampened);
+              }
               logPromptFailoverDecision("fallback_model", { status });
               await maybeBackoffBeforeOverloadFailover(promptFailoverReason);
               throw (
@@ -1194,6 +1286,10 @@ export async function runEmbeddedPiAgent(
             attempted: attemptedThinking,
           });
           if (fallbackThinking && !aborted) {
+            const dampened = maybeDampenExpensiveReplay("thinking-level");
+            if (dampened) {
+              return buildExpensiveReplayDampenedResult(dampened);
+            }
             log.warn(
               `unsupported thinking level for ${provider}/${modelId}; retrying with ${fallbackThinking}`,
             );
@@ -1238,6 +1334,10 @@ export async function runEmbeddedPiAgent(
               runtimeAuthRetry,
             ))
           ) {
+            const dampened = maybeDampenExpensiveReplay("auth-refresh", "auth");
+            if (dampened) {
+              return buildExpensiveReplayDampenedResult(dampened);
+            }
             authRetryPending = true;
             continue;
           }
@@ -1270,6 +1370,25 @@ export async function runEmbeddedPiAgent(
             timedOutDuringCompaction,
             profileRotated: false,
           });
+          if (assistantFailoverDecision.action === "rotate_profile" && hasNextAuthProfile) {
+            const dampened = maybeDampenExpensiveReplay(
+              "assistant-profile-rotation",
+              assistantFailoverReason,
+            );
+            if (dampened) {
+              logAssistantFailoverDecision("surface_error");
+              return buildExpensiveReplayDampenedResult(dampened);
+            }
+          } else if (assistantFailoverDecision.action === "fallback_model") {
+            const dampened = maybeDampenExpensiveReplay(
+              "model-fallback",
+              assistantFailoverDecision.reason,
+            );
+            if (dampened) {
+              logAssistantFailoverDecision("surface_error");
+              return buildExpensiveReplayDampenedResult(dampened);
+            }
+          }
           const assistantFailoverOutcome = await handleAssistantFailover({
             initialDecision: assistantFailoverDecision,
             aborted,
@@ -1307,6 +1426,15 @@ export async function runEmbeddedPiAgent(
             continue;
           }
           if (assistantFailoverOutcome.action === "throw") {
+            const dampened = maybeDampenExpensiveReplay(
+              "model-fallback",
+              assistantFailoverDecision.action === "fallback_model"
+                ? assistantFailoverDecision.reason
+                : assistantFailoverReason,
+            );
+            if (dampened) {
+              return buildExpensiveReplayDampenedResult(dampened);
+            }
             throw assistantFailoverOutcome.error;
           }
 
@@ -1393,6 +1521,10 @@ export async function runEmbeddedPiAgent(
             nextPlanningOnlyRetryInstruction &&
             planningOnlyRetryAttempts < 1
           ) {
+            const dampened = maybeDampenExpensiveReplay("planning-only");
+            if (dampened) {
+              return buildExpensiveReplayDampenedResult(dampened);
+            }
             const planningOnlyText = attempt.assistantTexts.join("\n\n").trim();
             const planDetails = extractPlanningOnlyPlanDetails(planningOnlyText);
             if (planDetails) {

@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { resolveBootstrapWarningSignaturesSeen } from "../../agents/bootstrap-budget.js";
 import { estimateMessagesTokens } from "../../agents/compaction.js";
@@ -39,7 +40,7 @@ import {
   shouldRunPreflightCompaction,
 } from "./memory-flush.js";
 import { readPostCompactionContext } from "./post-compaction-context.js";
-import { refreshQueuedFollowupSession, type FollowupRun } from "./queue.js";
+import type { FollowupRun } from "./queue.js";
 import type { ReplyOperation } from "./reply-run-registry.js";
 import { incrementCompactionCount } from "./session-updates.js";
 
@@ -78,6 +79,145 @@ export type SessionTranscriptUsageSnapshot = {
 // transcript reads in time to flip memory-flush gating when needed.
 const TRANSCRIPT_OUTPUT_READ_BUFFER_TOKENS = 8192;
 const TRANSCRIPT_TAIL_CHUNK_BYTES = 64 * 1024;
+const MEMORY_FLUSH_TAIL_MAX_CHARS = 20_000;
+const MEMORY_FLUSH_MESSAGE_MAX_CHARS = 4_000;
+
+function truncateForMemoryFlush(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+  const headChars = Math.max(0, Math.floor(maxChars * 0.4));
+  const tailChars = Math.max(0, maxChars - headChars - 32);
+  return `${value.slice(0, headChars)}\n...[truncated for memory flush]...\n${value.slice(-tailChars)}`;
+}
+
+function stringifyMemoryFlushContent(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") {
+          return part;
+        }
+        if (part && typeof part === "object") {
+          const record = part as Record<string, unknown>;
+          if (typeof record.text === "string") {
+            return record.text;
+          }
+          if (typeof record.content === "string") {
+            return record.content;
+          }
+          if (typeof record.type === "string") {
+            return `[${record.type}]`;
+          }
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (content && typeof content === "object") {
+    const record = content as Record<string, unknown>;
+    if (typeof record.text === "string") {
+      return record.text;
+    }
+    if (typeof record.content === "string") {
+      return record.content;
+    }
+  }
+  return "";
+}
+
+function buildMemoryFlushTranscriptTail(params: {
+  sessionFile?: string;
+  sessionId?: string;
+  storePath?: string;
+}): string | undefined {
+  const sessionId = params.sessionId?.trim();
+  if (!sessionId) {
+    return undefined;
+  }
+  let messages: AgentMessage[];
+  try {
+    messages = readSessionMessages(
+      sessionId,
+      params.storePath,
+      params.sessionFile,
+    ) as AgentMessage[];
+  } catch {
+    return undefined;
+  }
+  const chunks: string[] = [];
+  let totalChars = 0;
+  for (const message of messages.toReversed()) {
+    if (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult") {
+      continue;
+    }
+    const text = truncateForMemoryFlush(
+      stringifyMemoryFlushContent(message.content).trim(),
+      MEMORY_FLUSH_MESSAGE_MAX_CHARS,
+    );
+    if (!text) {
+      continue;
+    }
+    const chunk = `${message.role}: ${text}`;
+    const nextTotal = totalChars + chunk.length + 2;
+    if (nextTotal > MEMORY_FLUSH_TAIL_MAX_CHARS && chunks.length > 0) {
+      break;
+    }
+    chunks.push(
+      nextTotal > MEMORY_FLUSH_TAIL_MAX_CHARS
+        ? truncateForMemoryFlush(chunk, MEMORY_FLUSH_TAIL_MAX_CHARS - totalChars)
+        : chunk,
+    );
+    totalChars += Math.min(chunk.length, MEMORY_FLUSH_TAIL_MAX_CHARS - totalChars) + 2;
+    if (totalChars >= MEMORY_FLUSH_TAIL_MAX_CHARS) {
+      break;
+    }
+  }
+  if (chunks.length === 0) {
+    return undefined;
+  }
+  return chunks.toReversed().join("\n\n");
+}
+
+function buildMemoryFlushPrompt(params: {
+  basePrompt: string;
+  mainSessionFile?: string;
+  mainSessionId?: string;
+  storePath?: string;
+}): string {
+  const tail = buildMemoryFlushTranscriptTail({
+    sessionFile: params.mainSessionFile,
+    sessionId: params.mainSessionId,
+    storePath: params.storePath,
+  });
+  if (!tail) {
+    return params.basePrompt;
+  }
+  return [
+    params.basePrompt,
+    "Recent transcript tail for memory flush (bounded; use only for extracting durable memory, not for replying to the user):",
+    tail,
+  ].join("\n\n");
+}
+
+function buildMemoryFlushSidecarRun(
+  run: FollowupRun["run"],
+  flushRunId: string,
+): FollowupRun["run"] {
+  const sidecarSessionId = `memory-flush-${flushRunId}`;
+  const sidecarSessionKey = run.sessionKey ? `${run.sessionKey}:memory-flush` : undefined;
+  const sessionDir = path.dirname(run.sessionFile);
+  return {
+    ...run,
+    sessionId: sidecarSessionId,
+    ...(sidecarSessionKey ? { sessionKey: sidecarSessionKey } : {}),
+    sessionFile: path.join(sessionDir, `${sidecarSessionId}.jsonl`),
+  };
+}
 
 function parseUsageFromTranscriptLine(line: string): ReturnType<typeof normalizeUsage> | undefined {
   const trimmed = line.trim();
@@ -659,12 +799,6 @@ export async function runMemoryFlushIfNeeded(params: {
       (params.sessionKey ? activeSessionStore?.[params.sessionKey]?.systemPromptReport : undefined),
   );
   const flushRunId = crypto.randomUUID();
-  if (params.sessionKey) {
-    registerAgentRunContext(flushRunId, {
-      sessionKey: params.sessionKey,
-      verboseLevel: params.resolvedVerboseLevel,
-    });
-  }
   let memoryCompactionCompleted = false;
   const memoryFlushNowMs = Date.now();
   const activeMemoryFlushPlan =
@@ -679,14 +813,26 @@ export async function runMemoryFlushIfNeeded(params: {
   ]
     .filter(Boolean)
     .join("\n\n");
-  let postCompactionSessionId: string | undefined;
+  const memoryFlushRun = buildMemoryFlushSidecarRun(params.followupRun.run, flushRunId);
+  if (memoryFlushRun.sessionKey) {
+    registerAgentRunContext(flushRunId, {
+      sessionKey: memoryFlushRun.sessionKey,
+      verboseLevel: params.resolvedVerboseLevel,
+    });
+  }
+  const memoryFlushPrompt = buildMemoryFlushPrompt({
+    basePrompt: activeMemoryFlushPlan.prompt,
+    mainSessionFile: params.followupRun.run.sessionFile,
+    mainSessionId: params.followupRun.run.sessionId,
+    storePath: params.storePath,
+  });
   try {
     await runWithModelFallback({
-      ...resolveModelFallbackOptions(params.followupRun.run),
+      ...resolveModelFallbackOptions(memoryFlushRun),
       runId: flushRunId,
       run: async (provider, model, runOptions) => {
         const { embeddedContext, senderContext, runBaseParams } = buildEmbeddedRunExecutionParams({
-          run: params.followupRun.run,
+          run: memoryFlushRun,
           sessionCtx: params.sessionCtx,
           hasRepliedRef: params.opts?.hasRepliedRef,
           provider,
@@ -702,7 +848,7 @@ export async function runMemoryFlushIfNeeded(params: {
           silentExpected: true,
           trigger: "memory",
           memoryFlushWritePath,
-          prompt: activeMemoryFlushPlan.prompt,
+          prompt: memoryFlushPrompt,
           extraSystemPrompt: flushSystemPrompt,
           bootstrapPromptWarningSignaturesSeen,
           bootstrapPromptWarningSignature:
@@ -718,9 +864,6 @@ export async function runMemoryFlushIfNeeded(params: {
             }
           },
         });
-        if (result.meta?.agentMeta?.sessionId) {
-          postCompactionSessionId = result.meta.agentMeta.sessionId;
-        }
         bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
           result.meta?.systemPromptReport,
         );
@@ -732,36 +875,7 @@ export async function runMemoryFlushIfNeeded(params: {
       (params.sessionKey ? activeSessionStore?.[params.sessionKey]?.compactionCount : 0) ??
       0;
     if (memoryCompactionCompleted) {
-      const previousSessionId = activeSessionEntry?.sessionId ?? params.followupRun.run.sessionId;
-      const nextCount = await incrementCompactionCount({
-        cfg: params.cfg,
-        sessionEntry: activeSessionEntry,
-        sessionStore: activeSessionStore,
-        sessionKey: params.sessionKey,
-        storePath: params.storePath,
-        newSessionId: postCompactionSessionId,
-      });
-      const updatedEntry = params.sessionKey ? activeSessionStore?.[params.sessionKey] : undefined;
-      if (updatedEntry) {
-        activeSessionEntry = updatedEntry;
-        params.followupRun.run.sessionId = updatedEntry.sessionId;
-        params.replyOperation.updateSessionId(updatedEntry.sessionId);
-        if (updatedEntry.sessionFile) {
-          params.followupRun.run.sessionFile = updatedEntry.sessionFile;
-        }
-        const queueKey = params.followupRun.run.sessionKey ?? params.sessionKey;
-        if (queueKey) {
-          refreshQueuedFollowupSession({
-            key: queueKey,
-            previousSessionId,
-            nextSessionId: updatedEntry.sessionId,
-            nextSessionFile: updatedEntry.sessionFile,
-          });
-        }
-      }
-      if (typeof nextCount === "number") {
-        memoryFlushCompactionCount = nextCount;
-      }
+      logVerbose("memoryFlush sidecar compacted its isolated transcript; main session unchanged");
     }
     if (params.storePath && params.sessionKey) {
       try {

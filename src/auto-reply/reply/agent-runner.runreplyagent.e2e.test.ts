@@ -33,6 +33,7 @@ type EmbeddedRunParams = {
   memoryFlushWritePath?: string;
   sessionId?: string;
   sessionFile?: string;
+  sessionKey?: string;
   silentExpected?: boolean;
   bootstrapPromptWarningSignaturesSeen?: string[];
   bootstrapPromptWarningSignature?: string;
@@ -1937,6 +1938,12 @@ describe("runReplyAgent memory flush", () => {
       expect(flushCall?.extraSystemPrompt).toContain("memory/YYYY-MM-DD.md");
       expect(flushCall?.extraSystemPrompt).toContain("MEMORY.md");
       expect(flushCall?.silentExpected).toBe(true);
+      expect(flushCall?.sessionId).toMatch(/^memory-flush-/);
+      expect(flushCall?.sessionKey).toBe("main:memory-flush");
+      expect(flushCall?.sessionFile).toMatch(/memory-flush-.*\.jsonl$/);
+      expect(calls[1]?.sessionId).toBe("session");
+      expect(calls[1]?.sessionKey).toBe("main");
+      expect(calls[1]?.sessionFile).toBe("/tmp/session.jsonl");
       expect(calls[1]?.prompt).toBe("hello");
     });
   });

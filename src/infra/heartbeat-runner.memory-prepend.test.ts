@@ -72,6 +72,9 @@ describe("runHeartbeatOnce memory prepend", () => {
       expect(calledCtx?.Body).toContain("[Associative recall]");
       expect(calledCtx?.Body).toContain("Remember the launch checklist.");
       expect(calledCtx?.Body).toContain("Current time:");
+      expect(
+        (replySpy.mock.calls[0]?.[0] as { SessionKey?: string } | undefined)?.SessionKey,
+      ).toMatch(/:heartbeat$/);
       await expect(fs.stat(queuePath)).rejects.toMatchObject({ code: "ENOENT" });
     });
   });

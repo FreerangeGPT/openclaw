@@ -10,6 +10,14 @@ export function isAnthropicModelRef(modelId: string): boolean {
 /** Matches Application Inference Profile ARNs across all AWS partitions with Bedrock. */
 const BEDROCK_APP_INFERENCE_PROFILE_ARN_RE = /^arn:aws(-cn|-us-gov)?:bedrock:/;
 
+export function isBedrockApplicationInferenceProfileArn(modelId: string): boolean {
+  const normalized = modelId.trim().toLowerCase();
+  return (
+    BEDROCK_APP_INFERENCE_PROFILE_ARN_RE.test(normalized) &&
+    normalized.includes(":application-inference-profile/")
+  );
+}
+
 export function isAnthropicBedrockModel(modelId: string): boolean {
   const normalized = modelId.trim().toLowerCase();
 
@@ -29,10 +37,7 @@ export function isAnthropicBedrockModel(modelId: string): boolean {
   // profile ID itself — resolving this would require a GetInferenceProfile call, which
   // is too expensive for a per-request check. System-defined profiles (us., eu., global.)
   // always contain "anthropic.claude" and are matched above.
-  if (
-    BEDROCK_APP_INFERENCE_PROFILE_ARN_RE.test(normalized) &&
-    normalized.includes(":application-inference-profile/")
-  ) {
+  if (isBedrockApplicationInferenceProfileArn(normalized)) {
     const profileId = normalized.split(":application-inference-profile/")[1] ?? "";
     return profileId.includes("claude");
   }
@@ -73,7 +78,8 @@ export function resolveAnthropicCacheRetentionFamily(params: {
     normalizedProvider === "amazon-bedrock" &&
     params.hasExplicitCacheConfig &&
     typeof params.modelId === "string" &&
-    isAnthropicBedrockModel(params.modelId)
+    (isAnthropicBedrockModel(params.modelId) ||
+      isBedrockApplicationInferenceProfileArn(params.modelId))
   ) {
     return "anthropic-bedrock";
   }

@@ -386,44 +386,26 @@ describe("timeout-triggered compaction", () => {
     expect(mockedRunPostCompactionSideEffects).toHaveBeenCalledTimes(1);
   });
 
-  it("counts compacted:false timeout compactions against the retry cap across profile rotation", async () => {
+  it("dampens profile rotation after compacted:false timeout compaction on a large prompt", async () => {
     useTwoAuthProfiles();
-    // Attempt 1 (profile-a): timeout → compaction #1 fails → rotate to profile-b
-    mockedRunEmbeddedAttempt
-      .mockResolvedValueOnce(
-        makeAttemptResult({
-          timedOut: true,
-          aborted: true,
-          lastAssistant: {
-            usage: { input: 150000 },
-          } as never,
-        }),
-      )
-      // Attempt 2 (profile-b): timeout → compaction #2 fails → cap exhausted → rotation
-      .mockResolvedValueOnce(
-        makeAttemptResult({
-          timedOut: true,
-          aborted: true,
-          lastAssistant: {
-            usage: { input: 150000 },
-          } as never,
-        }),
-      );
-    mockedCompactDirect
-      .mockResolvedValueOnce({
-        ok: false,
-        compacted: false,
-        reason: "nothing to compact",
-      })
-      .mockResolvedValueOnce({
-        ok: false,
-        compacted: false,
-        reason: "nothing to compact",
-      });
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({
+        timedOut: true,
+        aborted: true,
+        lastAssistant: {
+          usage: { input: 150000 },
+        } as never,
+      }),
+    );
+    mockedCompactDirect.mockResolvedValueOnce({
+      ok: false,
+      compacted: false,
+      reason: "nothing to compact",
+    });
 
     const result = await runEmbeddedPiAgent(overflowBaseRunParams);
 
-    expect(mockedCompactDirect).toHaveBeenCalledTimes(2);
+    expect(mockedCompactDirect).toHaveBeenCalledTimes(1);
     expect(mockedCompactDirect).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
@@ -434,62 +416,36 @@ describe("timeout-triggered compaction", () => {
         }),
       }),
     );
-    expect(mockedCompactDirect).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        runtimeContext: expect.objectContaining({
-          authProfileId: "profile-b",
-          attempt: 2,
-          maxAttempts: 2,
-        }),
-      }),
-    );
-    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(2);
+    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(1);
     expect(result.payloads?.[0]?.isError).toBe(true);
-    expect(result.payloads?.[0]?.text).toContain("timed out");
+    expect(result.payloads?.[0]?.text).toContain("Automatic retry suppressed");
+    expect(result.meta.error?.kind).toBe("expensive_replay_dampened");
   });
 
-  it("counts thrown timeout compactions against the retry cap across profile rotation", async () => {
+  it("dampens profile rotation after thrown timeout compaction on a large prompt", async () => {
     useTwoAuthProfiles();
-    // Attempt 1 (profile-a): timeout → compaction #1 throws → rotate to profile-b
-    mockedRunEmbeddedAttempt
-      .mockResolvedValueOnce(
-        makeAttemptResult({
-          timedOut: true,
-          aborted: true,
-          lastAssistant: {
-            usage: { input: 150000 },
-          } as never,
-        }),
-      )
-      // Attempt 2 (profile-b): timeout → compaction #2 throws → cap exhausted → rotation
-      .mockResolvedValueOnce(
-        makeAttemptResult({
-          timedOut: true,
-          aborted: true,
-          lastAssistant: {
-            usage: { input: 150000 },
-          } as never,
-        }),
-      );
-    mockedCompactDirect
-      .mockRejectedValueOnce(new Error("engine crashed"))
-      .mockRejectedValueOnce(new Error("engine crashed again"));
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({
+        timedOut: true,
+        aborted: true,
+        lastAssistant: {
+          usage: { input: 150000 },
+        } as never,
+      }),
+    );
+    mockedCompactDirect.mockRejectedValueOnce(new Error("engine crashed"));
 
     const result = await runEmbeddedPiAgent(overflowBaseRunParams);
 
-    expect(mockedCompactDirect).toHaveBeenCalledTimes(2);
-    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(2);
+    expect(mockedCompactDirect).toHaveBeenCalledTimes(1);
+    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(1);
     expect(mockedRunEmbeddedAttempt).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({ authProfileId: "profile-a" }),
     );
-    expect(mockedRunEmbeddedAttempt).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({ authProfileId: "profile-b" }),
-    );
     expect(result.payloads?.[0]?.isError).toBe(true);
-    expect(result.payloads?.[0]?.text).toContain("timed out");
+    expect(result.payloads?.[0]?.text).toContain("Automatic retry suppressed");
+    expect(result.meta.error?.kind).toBe("expensive_replay_dampened");
   });
 
   it("uses prompt/input tokens for ratio, not total tokens", async () => {

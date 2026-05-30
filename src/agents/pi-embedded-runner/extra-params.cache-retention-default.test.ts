@@ -238,6 +238,25 @@ describe("cacheRetention default behavior", () => {
     ).toBe("long");
   });
 
+  it("keeps explicit cacheRetention for opaque Bedrock application profile ARNs", () => {
+    expect(
+      resolveCacheRetention(
+        { cacheRetention: "long" },
+        "amazon-bedrock",
+        "bedrock-converse-stream",
+        "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/prod-main",
+      ),
+    ).toBe("long");
+    expect(
+      resolveCacheRetention(
+        undefined,
+        "amazon-bedrock",
+        "bedrock-converse-stream",
+        "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/prod-main",
+      ),
+    ).toBeUndefined();
+  });
+
   it("defaults to 'short' for anthropic-vertex without explicit config", () => {
     expect(
       resolveCacheRetention(

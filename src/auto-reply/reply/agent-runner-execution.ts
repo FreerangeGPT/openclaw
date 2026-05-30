@@ -5,6 +5,7 @@ import {
   resolveSendableOutboundReplyParts,
 } from "openclaw/plugin-sdk/reply-payload";
 import { resolveBootstrapWarningSignaturesSeen } from "../../agents/bootstrap-budget.js";
+import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
 import { LiveSessionModelSwitchError } from "../../agents/live-model-switch-error.js";
 import { runWithModelFallback, isFallbackSummaryError } from "../../agents/model-fallback.js";
 import {
@@ -19,6 +20,10 @@ import {
   sanitizeUserFacingText,
 } from "../../agents/pi-embedded-helpers.js";
 import { isLikelyExecutionAckPrompt } from "../../agents/pi-embedded-runner/run/incomplete-turn.js";
+import {
+  formatExpensiveReplayMessage,
+  shouldDampenExpensiveReplay,
+} from "../../agents/pi-embedded-runner/run/replay-dampening.js";
 import { runEmbeddedPiAgent } from "../../agents/pi-embedded.js";
 import {
   resolveGroupSessionKey,
@@ -275,6 +280,50 @@ function buildExternalRunFailureText(message: string): string {
     return "⚠️ Session history got out of sync. Please try again, or use /new to start a fresh session.";
   }
   return "⚠️ Something went wrong while processing your request. Please try again, or use /new to start a fresh session.";
+}
+
+function estimatePromptTokensFromText(...values: Array<string | undefined>): number | undefined {
+  const chars = values.reduce((total, value) => total + (value?.length ?? 0), 0);
+  if (chars <= 0) {
+    return undefined;
+  }
+  return Math.ceil(chars / 4);
+}
+
+function estimateSystemPromptTokensFromReport(entry?: SessionEntry): number | undefined {
+  const report = entry?.systemPromptReport;
+  if (!report) {
+    return undefined;
+  }
+  const chars =
+    (report.systemPrompt?.chars ?? 0) +
+    (report.skills?.promptChars ?? 0) +
+    (report.tools?.schemaChars ?? 0);
+  if (chars <= 0) {
+    return undefined;
+  }
+  return Math.ceil(chars / 4);
+}
+
+function resolvePromptTokensForRetryDampening(params: {
+  commandBody: string;
+  extraSystemPrompt?: string;
+  sessionEntry?: SessionEntry;
+}): number | undefined {
+  const freshSessionTokens =
+    typeof params.sessionEntry?.totalTokens === "number" &&
+    params.sessionEntry.totalTokensFresh !== false
+      ? params.sessionEntry.totalTokens
+      : undefined;
+  const estimatedPromptTokens = estimatePromptTokensFromText(
+    params.commandBody,
+    params.extraSystemPrompt,
+  );
+  const estimatedSystemPromptTokens = estimateSystemPromptTokensFromReport(params.sessionEntry);
+  return (
+    Math.max(freshSessionTokens ?? 0, estimatedPromptTokens ?? 0, estimatedSystemPromptTokens ?? 0) ||
+    undefined
+  );
 }
 
 function shouldApplyOpenAIGptChatGuard(params: { provider?: string; model?: string }): boolean {
@@ -1205,6 +1254,31 @@ export async function runAgentTurnWithFallback(params: {
       }
 
       if (isTransientHttp && !didRetryTransientHttpError) {
+        const activeSessionEntry = params.getActiveSessionEntry();
+        const retryPromptTokens = resolvePromptTokensForRetryDampening({
+          commandBody: params.commandBody,
+          extraSystemPrompt: params.followupRun.run.extraSystemPrompt,
+          sessionEntry: activeSessionEntry,
+        });
+        const retryDampening = shouldDampenExpensiveReplay({
+          retryKind: "transient-http",
+          promptTokens: retryPromptTokens,
+          contextWindowTokens: activeSessionEntry?.contextTokens ?? DEFAULT_CONTEXT_TOKENS,
+        });
+        if (retryDampening.dampen) {
+          const dampenedMessage = formatExpensiveReplayMessage(retryDampening);
+          defaultRuntime.error(
+            `Transient HTTP provider retry suppressed after expensive prompt replay risk (${message}).`,
+          );
+          params.replyOperation?.fail("run_failed", err);
+          return {
+            kind: "final",
+            payload: {
+              text: dampenedMessage,
+              isError: true,
+            },
+          };
+        }
         didRetryTransientHttpError = true;
         // Retry the full runWithModelFallback() cycle — transient errors
         // (502/521/etc.) typically affect the whole provider, so falling

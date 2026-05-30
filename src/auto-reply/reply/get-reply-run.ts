@@ -34,6 +34,11 @@ import type { buildCommandContext } from "./commands.js";
 import type { InlineDirectives } from "./directive-handling.js";
 import { buildGroupChatContext, buildGroupIntro } from "./groups.js";
 import { buildInboundMetaSystemPrompt, buildInboundUserContextPrefix } from "./inbound-meta.js";
+import {
+  DEFAULT_INBOUND_CONTEXT_BLOCK_MAX_CHARS,
+  resolvePromptContextLimit,
+  truncatePromptContextText,
+} from "./inbound-context-budget.js";
 import type { createModelSelectionState } from "./model-selection.js";
 import { resolveOriginMessageProvider } from "./origin-routing.js";
 import { resolveActiveRunQueueAction } from "./queue-policy.js";
@@ -302,10 +307,24 @@ export async function runPreparedReply(
   const prefixedBodyCore = prefixedBodyBase;
   const threadStarterBody = ctx.ThreadStarterBody?.trim();
   const threadHistoryBody = ctx.ThreadHistoryBody?.trim();
+  const threadContextMaxChars = resolvePromptContextLimit(
+    "OPENCLAW_THREAD_CONTEXT_MAX_CHARS",
+    DEFAULT_INBOUND_CONTEXT_BLOCK_MAX_CHARS,
+  );
   const threadContextNote = threadHistoryBody
-    ? `[Thread history - for context]\n${threadHistoryBody}`
+    ? `[Thread history - for context]\n${
+        truncatePromptContextText(threadHistoryBody, {
+          maxChars: threadContextMaxChars,
+          label: "thread history",
+        }).text
+      }`
     : threadStarterBody
-      ? `[Thread starter - for context]\n${threadStarterBody}`
+      ? `[Thread starter - for context]\n${
+          truncatePromptContextText(threadStarterBody, {
+            maxChars: threadContextMaxChars,
+            label: "thread starter",
+          }).text
+        }`
       : undefined;
   const drainedSystemEventBlocks: string[] = [];
   const rebuildPromptBodies = async (): Promise<{

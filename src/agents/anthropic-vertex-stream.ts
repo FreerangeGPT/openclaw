@@ -8,6 +8,8 @@ import {
 import {
   applyAnthropicPayloadPolicyToParams,
   resolveAnthropicPayloadPolicy,
+  restoreAnthropicPayloadCacheControls,
+  snapshotAnthropicPayloadCacheControls,
 } from "./anthropic-payload-policy.js";
 
 type AnthropicVertexEffort = NonNullable<AnthropicOptions["effort"]>;
@@ -57,8 +59,10 @@ function createAnthropicVertexOnPayload(params: {
 
   return async (payload, model) => {
     const shapedPayload = applyPolicy(payload);
+    const cacheControlSnapshot = snapshotAnthropicPayloadCacheControls(shapedPayload);
     const nextPayload = await params.onPayload?.(shapedPayload, model);
     if (nextPayload === undefined || nextPayload === shapedPayload) {
+      restoreAnthropicPayloadCacheControls(shapedPayload, cacheControlSnapshot);
       return shapedPayload;
     }
     return applyPolicy(nextPayload);
@@ -80,6 +84,7 @@ export function createAnthropicVertexStreamFn(
     region,
     ...(baseURL ? { baseURL } : {}),
     ...(projectId ? { projectId } : {}),
+    maxRetries: 0,
   });
 
   return (model, context, options) => {

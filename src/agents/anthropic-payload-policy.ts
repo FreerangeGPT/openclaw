@@ -26,6 +26,77 @@ export type AnthropicPayloadPolicy = {
   serviceTier: AnthropicServiceTier | undefined;
 };
 
+type CacheControlSnapshotEntry = {
+  cacheControl: unknown;
+  path: Array<number | string>;
+};
+
+export type AnthropicPayloadCacheControlSnapshot = CacheControlSnapshotEntry[];
+
+function cloneCacheControl(value: unknown): unknown {
+  if (value === undefined) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(JSON.stringify(value)) as unknown;
+  } catch {
+    return value;
+  }
+}
+
+function readPath(root: unknown, path: Array<number | string>): unknown {
+  let current = root;
+  for (const segment of path) {
+    if (current === null || typeof current !== "object") {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+export function snapshotAnthropicPayloadCacheControls(
+  payload: unknown,
+): AnthropicPayloadCacheControlSnapshot {
+  const snapshot: AnthropicPayloadCacheControlSnapshot = [];
+  const visit = (value: unknown, path: Array<number | string>) => {
+    if (value === null || typeof value !== "object") {
+      return;
+    }
+    if (Object.prototype.hasOwnProperty.call(value, "cache_control")) {
+      snapshot.push({
+        path: [...path],
+        cacheControl: cloneCacheControl((value as Record<string, unknown>).cache_control),
+      });
+    }
+    if (Array.isArray(value)) {
+      value.forEach((item, index) => visit(item, [...path, index]));
+      return;
+    }
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      visit(child, [...path, key]);
+    }
+  };
+  visit(payload, []);
+  return snapshot;
+}
+
+export function restoreAnthropicPayloadCacheControls(
+  payload: unknown,
+  snapshot: AnthropicPayloadCacheControlSnapshot,
+): void {
+  for (const entry of snapshot) {
+    const target = readPath(payload, entry.path);
+    if (target === null || typeof target !== "object") {
+      continue;
+    }
+    const record = target as Record<string, unknown>;
+    if (record.cache_control === undefined) {
+      record.cache_control = cloneCacheControl(entry.cacheControl);
+    }
+  }
+}
+
 function resolveBaseUrlHostname(baseUrl: string): string | undefined {
   try {
     return new URL(baseUrl).hostname;

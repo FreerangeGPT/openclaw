@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   beginPromptCacheObservation,
   collectPromptCacheToolNames,
+  collectPromptCacheToolShapes,
   completePromptCacheObservation,
+  detectPromptCacheAnomaly,
   resetPromptCacheObservabilityForTest,
 } from "./prompt-cache-observability.js";
 
@@ -15,6 +17,54 @@ describe("prompt cache observability", () => {
     expect(
       collectPromptCacheToolNames([{ name: " read " }, { name: "" }, {}, { name: "write" }]),
     ).toEqual(["read", "write"]);
+  });
+
+  it("detects tool schema changes even when names are unchanged", () => {
+    const firstTools = collectPromptCacheToolShapes([
+      {
+        name: "read",
+        description: "read a file",
+        parameters: { properties: { path: { type: "string" } }, required: ["path"] },
+      },
+    ]);
+    const nextTools = collectPromptCacheToolShapes([
+      {
+        name: "read",
+        description: "read a file",
+        parameters: {
+          properties: { path: { type: "string" }, offset: { type: "number" } },
+          required: ["path"],
+        },
+      },
+    ]);
+
+    beginPromptCacheObservation({
+      sessionId: "session-1",
+      provider: "anthropic",
+      modelId: "claude-opus-4-6",
+      modelApi: "anthropic-messages",
+      streamStrategy: "boundary-aware:anthropic-messages",
+      systemPrompt: "stable system",
+      toolNames: ["read"],
+      toolShapes: firstTools,
+    });
+    completePromptCacheObservation({
+      sessionId: "session-1",
+      usage: { cacheRead: 8_000 },
+    });
+
+    const second = beginPromptCacheObservation({
+      sessionId: "session-1",
+      provider: "anthropic",
+      modelId: "claude-opus-4-6",
+      modelApi: "anthropic-messages",
+      streamStrategy: "boundary-aware:anthropic-messages",
+      systemPrompt: "stable system",
+      toolNames: ["read"],
+      toolShapes: nextTools,
+    });
+
+    expect(second.changes).toEqual([{ code: "tools", detail: "tool set changed with same count" }]);
   });
 
   it("tracks cache-relevant changes and reports a real cache-read drop", () => {
@@ -244,5 +294,44 @@ describe("prompt cache observability", () => {
       cacheRead: 2_000,
       changes: null,
     });
+  });
+
+  it("flags cold and recent large cache writes", () => {
+    expect(
+      detectPromptCacheAnomaly({
+        usage: { cacheRead: 0, cacheWrite: 80_000, total: 81_000 },
+        secondsSincePreviousAssistant: 42,
+      }),
+    ).toEqual({
+      reasons: ["cold-large-cache-write", "recent-large-cache-write"],
+      cacheRead: 0,
+      cacheWrite: 80_000,
+      secondsSincePreviousAssistant: 42,
+      totalTokens: 81_000,
+    });
+  });
+
+  it("flags wasted no-reply and heartbeat cache writes", () => {
+    expect(
+      detectPromptCacheAnomaly({
+        assistantTexts: ['{"action":"NO_REPLY"}'],
+        usage: { cacheRead: 0, cacheWrite: 80_000 },
+      })?.reasons,
+    ).toEqual(["cold-large-cache-write", "wasted-no-reply-cache-write"]);
+    expect(
+      detectPromptCacheAnomaly({
+        assistantTexts: ["<b>HEARTBEAT_OK</b>"],
+        usage: { cacheRead: 20_000, cacheWrite: 80_000 },
+      })?.reasons,
+    ).toEqual(["wasted-heartbeat-cache-write"]);
+  });
+
+  it("does not flag small cache writes", () => {
+    expect(
+      detectPromptCacheAnomaly({
+        assistantTexts: ["NO_REPLY"],
+        usage: { cacheRead: 0, cacheWrite: 49_999 },
+      }),
+    ).toBeNull();
   });
 });

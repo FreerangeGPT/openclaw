@@ -94,6 +94,7 @@ describe("anthropic transport stream", () => {
         apiKey: "sk-ant-api",
         baseURL: "https://api.anthropic.com",
         fetch: guardedFetchMock,
+        maxRetries: 0,
         defaultHeaders: expect.objectContaining({
           accept: "application/json",
           "anthropic-dangerous-direct-browser-access": "true",
@@ -106,6 +107,141 @@ describe("anthropic transport stream", () => {
       expect.objectContaining({
         model: "claude-sonnet-4-6",
         stream: true,
+      }),
+      undefined,
+    );
+  });
+
+  it("reapplies Anthropic cache policy after onPayload replaces params", async () => {
+    const model = attachModelProviderRequestTransport(
+      {
+        id: "claude-sonnet-4-6",
+        name: "Claude Sonnet 4.6",
+        api: "anthropic-messages",
+        provider: "anthropic",
+        baseUrl: "https://api.anthropic.com",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200000,
+        maxTokens: 8192,
+      } satisfies Model<"anthropic-messages">,
+      {},
+    );
+    const streamFn = createAnthropicMessagesTransportStreamFn();
+    const onPayload = vi.fn(async (payload: unknown) => ({
+      ...(payload as Record<string, unknown>),
+      messages: [{ role: "user", content: "mutated user" }],
+      system: [{ type: "text", text: "mutated system" }],
+    }));
+
+    const stream = await Promise.resolve(
+      streamFn(
+        model,
+        {
+          systemPrompt: "Follow policy.",
+          messages: [{ role: "user", content: "hello" }],
+        } as Parameters<typeof streamFn>[1],
+        {
+          apiKey: "sk-ant-api",
+          cacheRetention: "long",
+          onPayload,
+        } as Parameters<typeof streamFn>[2],
+      ),
+    );
+    await stream.result();
+
+    expect(onPayload).toHaveBeenCalled();
+    expect(anthropicMessagesStreamMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "mutated user",
+                cache_control: { type: "ephemeral", ttl: "1h" },
+              },
+            ],
+          },
+        ],
+        system: [
+          {
+            type: "text",
+            text: "mutated system",
+            cache_control: { type: "ephemeral", ttl: "1h" },
+          },
+        ],
+      }),
+      undefined,
+    );
+  });
+
+  it("reapplies Anthropic cache policy after onPayload mutates params in place", async () => {
+    const model = attachModelProviderRequestTransport(
+      {
+        id: "claude-sonnet-4-6",
+        name: "Claude Sonnet 4.6",
+        api: "anthropic-messages",
+        provider: "anthropic",
+        baseUrl: "https://api.anthropic.com",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200000,
+        maxTokens: 8192,
+      } satisfies Model<"anthropic-messages">,
+      {},
+    );
+    const streamFn = createAnthropicMessagesTransportStreamFn();
+    const onPayload = vi.fn(async (payload: unknown) => {
+      const record = payload as {
+        messages?: Array<{ content?: Array<Record<string, unknown>> }>;
+        system?: Array<Record<string, unknown>>;
+      };
+      delete record.system?.[0]?.cache_control;
+      delete record.messages?.[0]?.content?.[0]?.cache_control;
+      return undefined;
+    });
+
+    const stream = await Promise.resolve(
+      streamFn(
+        model,
+        {
+          systemPrompt: "Follow policy.",
+          messages: [{ role: "user", content: "hello" }],
+        } as Parameters<typeof streamFn>[1],
+        {
+          apiKey: "sk-ant-api",
+          cacheRetention: "long",
+          onPayload,
+        } as Parameters<typeof streamFn>[2],
+      ),
+    );
+    await stream.result();
+
+    expect(anthropicMessagesStreamMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "hello",
+                cache_control: { type: "ephemeral", ttl: "1h" },
+              },
+            ],
+          },
+        ],
+        system: [
+          {
+            type: "text",
+            text: "Follow policy.",
+            cache_control: { type: "ephemeral", ttl: "1h" },
+          },
+        ],
       }),
       undefined,
     );
@@ -191,6 +327,7 @@ describe("anthropic transport stream", () => {
         apiKey: null,
         authToken: "sk-ant-oat-example",
         fetch: guardedFetchMock,
+        maxRetries: 0,
         defaultHeaders: expect.objectContaining({
           "x-app": "cli",
           "user-agent": expect.stringContaining("claude-cli/"),

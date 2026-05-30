@@ -4,6 +4,16 @@ import { resolveSenderLabel } from "../../channels/sender-label.js";
 import type { EnvelopeFormatOptions } from "../envelope.js";
 import { formatEnvelopeTimestamp } from "../envelope.js";
 import type { TemplateContext } from "../templating.js";
+import {
+  DEFAULT_INBOUND_CONTEXT_BLOCK_MAX_CHARS,
+  DEFAULT_INBOUND_HISTORY_ENTRY_MAX_CHARS,
+  DEFAULT_INBOUND_HISTORY_MAX_ENTRIES,
+  DEFAULT_INBOUND_HISTORY_TOTAL_MAX_CHARS,
+  resolvePromptContextLimit,
+  truncatePromptContextEntries,
+  truncatePromptContextText,
+  type PromptContextText,
+} from "./inbound-context-budget.js";
 
 function safeTrim(value: unknown): string | undefined {
   if (typeof value !== "string") {
@@ -48,6 +58,75 @@ function resolveInboundFormattingHints(ctx: TemplateContext):
   return getChannelPlugin(normalizedChannel)?.agentPrompt?.inboundFormattingHints?.({
     accountId: safeTrim(ctx.AccountId) ?? undefined,
   });
+}
+
+function resolveContextBlockMaxChars(): number {
+  return resolvePromptContextLimit(
+    "OPENCLAW_INBOUND_CONTEXT_BLOCK_MAX_CHARS",
+    DEFAULT_INBOUND_CONTEXT_BLOCK_MAX_CHARS,
+  );
+}
+
+function truncationJsonFields(prefix: string, result: PromptContextText): Record<string, unknown> {
+  if (!result.truncated) {
+    return {};
+  }
+  return {
+    [`${prefix}_truncated`]: true,
+    [`${prefix}_original_chars`]: result.originalChars,
+    [`${prefix}_omitted_chars`]: result.omittedChars,
+    [`${prefix}_max_chars`]: result.maxChars,
+  };
+}
+
+function budgetContextBody(value: string, label: string): PromptContextText {
+  return truncatePromptContextText(value, {
+    maxChars: resolveContextBlockMaxChars(),
+    label,
+  });
+}
+
+function buildBudgetedInboundHistory(ctx: TemplateContext):
+  | {
+      payload: Array<Record<string, unknown>>;
+      omittedOlderMessages: number;
+      omittedChars: number;
+    }
+  | undefined {
+  if (!Array.isArray(ctx.InboundHistory) || ctx.InboundHistory.length === 0) {
+    return undefined;
+  }
+
+  const selected = ctx.InboundHistory.slice(-DEFAULT_INBOUND_HISTORY_MAX_ENTRIES);
+  const omittedByCount = Math.max(0, ctx.InboundHistory.length - selected.length);
+  const budgeted = truncatePromptContextEntries(
+    selected.map((entry) => (typeof entry.body === "string" ? entry.body : "")),
+    {
+      entryMaxChars: resolvePromptContextLimit(
+        "OPENCLAW_INBOUND_HISTORY_ENTRY_MAX_CHARS",
+        DEFAULT_INBOUND_HISTORY_ENTRY_MAX_CHARS,
+      ),
+      totalMaxChars: resolvePromptContextLimit(
+        "OPENCLAW_INBOUND_HISTORY_TOTAL_MAX_CHARS",
+        DEFAULT_INBOUND_HISTORY_TOTAL_MAX_CHARS,
+      ),
+      label: "inbound history message",
+    },
+  );
+  const retained = selected.slice(selected.length - budgeted.entries.length);
+  return {
+    payload: retained.map((entry, index) => {
+      const body = budgeted.entries[index];
+      return {
+        sender: entry.sender,
+        timestamp_ms: entry.timestamp,
+        body: body?.text ?? "",
+        ...(body ? truncationJsonFields("body", body) : {}),
+      };
+    }),
+    omittedOlderMessages: omittedByCount + budgeted.omittedEntries,
+    omittedChars: budgeted.totalOmittedChars,
+  };
 }
 
 export function buildInboundMetaSystemPrompt(ctx: TemplateContext): string {
@@ -169,18 +248,21 @@ export function buildInboundUserContextPrefix(
     );
   }
 
-  if (safeTrim(ctx.ThreadStarterBody)) {
+  const threadStarterBody = safeTrim(ctx.ThreadStarterBody);
+  if (threadStarterBody) {
+    const body = budgetContextBody(threadStarterBody, "thread starter");
     blocks.push(
       [
         "Thread starter (untrusted, for context):",
         "```json",
-        JSON.stringify({ body: ctx.ThreadStarterBody }, null, 2),
+        JSON.stringify({ body: body.text, ...truncationJsonFields("body", body) }, null, 2),
         "```",
       ].join("\n"),
     );
   }
 
   if (ctx.ReplyToBody) {
+    const body = budgetContextBody(ctx.ReplyToBody, "replied message");
     blocks.push(
       [
         "Replied message (untrusted, for context):",
@@ -189,7 +271,8 @@ export function buildInboundUserContextPrefix(
           {
             sender_label: safeTrim(ctx.ReplyToSender),
             is_quote: ctx.ReplyToIsQuote === true ? true : undefined,
-            body: ctx.ReplyToBody,
+            body: body.text,
+            ...truncationJsonFields("body", body),
           },
           null,
           2,
@@ -222,17 +305,22 @@ export function buildInboundUserContextPrefix(
     );
   }
 
-  if (Array.isArray(ctx.InboundHistory) && ctx.InboundHistory.length > 0) {
+  const inboundHistory = buildBudgetedInboundHistory(ctx);
+  if (inboundHistory && inboundHistory.payload.length > 0) {
     blocks.push(
       [
         "Chat history since last reply (untrusted, for context):",
         "```json",
         JSON.stringify(
-          ctx.InboundHistory.map((entry) => ({
-            sender: entry.sender,
-            timestamp_ms: entry.timestamp,
-            body: entry.body,
-          })),
+          {
+            entries: inboundHistory.payload,
+            omitted_older_messages:
+              inboundHistory.omittedOlderMessages > 0
+                ? inboundHistory.omittedOlderMessages
+                : undefined,
+            omitted_chars:
+              inboundHistory.omittedChars > 0 ? inboundHistory.omittedChars : undefined,
+          },
           null,
           2,
         ),

@@ -1,4 +1,13 @@
 import path from "node:path";
+import {
+  DEFAULT_INBOUND_FILE_CONTEXT_ENTRY_MAX_CHARS,
+  DEFAULT_INBOUND_FILE_CONTEXT_TOTAL_MAX_CHARS,
+  DEFAULT_INBOUND_MEDIA_OUTPUT_ENTRY_MAX_CHARS,
+  DEFAULT_INBOUND_MEDIA_OUTPUT_TOTAL_MAX_CHARS,
+  resolvePromptContextLimit,
+  truncatePromptContextEntries,
+  truncatePromptContextText,
+} from "../auto-reply/reply/inbound-context-budget.js";
 import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
 import type { MsgContext } from "../auto-reply/templating.js";
 import type { OpenClawConfig } from "../config/config.js";
@@ -108,6 +117,43 @@ function wrapUntrustedAttachmentContent(content: string): string {
     source: "unknown",
     includeWarning: false,
   });
+}
+
+function budgetMediaOutputs(outputs: MediaUnderstandingOutput[]): MediaUnderstandingOutput[] {
+  if (outputs.length === 0) {
+    return outputs;
+  }
+  const budgeted = truncatePromptContextEntries(
+    outputs.map((output) => output.text),
+    {
+      entryMaxChars: resolvePromptContextLimit(
+        "OPENCLAW_INBOUND_MEDIA_OUTPUT_ENTRY_MAX_CHARS",
+        DEFAULT_INBOUND_MEDIA_OUTPUT_ENTRY_MAX_CHARS,
+      ),
+      totalMaxChars: resolvePromptContextLimit(
+        "OPENCLAW_INBOUND_MEDIA_OUTPUT_TOTAL_MAX_CHARS",
+        DEFAULT_INBOUND_MEDIA_OUTPUT_TOTAL_MAX_CHARS,
+      ),
+      label: "media understanding output",
+    },
+  );
+  const retained = outputs.slice(outputs.length - budgeted.entries.length);
+  const capped = retained.map((output, index) => ({
+    ...output,
+    text: budgeted.entries[index]?.text ?? "",
+  }));
+  if (budgeted.omittedEntries > 0 && capped.length > 0) {
+    capped[0] = {
+      ...capped[0],
+      text: [
+        `[OpenClaw omitted ${budgeted.omittedEntries.toLocaleString()} older media outputs to keep the prompt cache bounded.]`,
+        capped[0].text,
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+    };
+  }
+  return capped.filter((output) => output.text.trim());
 }
 
 function resolveUtf16Charset(buffer?: Buffer): "utf-16le" | "utf-16be" | undefined {
@@ -332,7 +378,20 @@ async function extractFileBlocks(params: {
   if (!attachments || attachments.length === 0) {
     return [];
   }
-  const blocks: string[] = [];
+  const fileEntryMaxChars = resolvePromptContextLimit(
+    "OPENCLAW_INBOUND_FILE_CONTEXT_ENTRY_MAX_CHARS",
+    DEFAULT_INBOUND_FILE_CONTEXT_ENTRY_MAX_CHARS,
+  );
+  const fileTotalMaxChars = resolvePromptContextLimit(
+    "OPENCLAW_INBOUND_FILE_CONTEXT_TOTAL_MAX_CHARS",
+    DEFAULT_INBOUND_FILE_CONTEXT_TOTAL_MAX_CHARS,
+  );
+  const candidates: Array<{
+    filename?: string;
+    fallbackName: string;
+    mimeType: string;
+    content: string;
+  }> = [];
   for (const attachment of attachments) {
     if (!attachment) {
       continue;
@@ -442,12 +501,53 @@ async function extractFileBlocks(params: {
         blockText = "[No extractable text]";
       }
     }
-    blocks.push(
+    candidates.push({
+      filename: bufferResult.fileName,
+      fallbackName: `file-${attachment.index + 1}`,
+      mimeType,
+      content: blockText,
+    });
+  }
+  const retainedReversed: Array<{
+    candidate: (typeof candidates)[number];
+    content: string;
+  }> = [];
+  let remainingFileChars = fileTotalMaxChars;
+  let omittedFileBlocks = 0;
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const candidate = candidates[index];
+    if (!candidate || remainingFileChars <= 0) {
+      omittedFileBlocks += 1;
+      continue;
+    }
+    if (candidate.content.length > remainingFileChars && retainedReversed.length > 0) {
+      omittedFileBlocks += 1;
+      continue;
+    }
+    const budgetedContent = truncatePromptContextText(candidate.content, {
+      maxChars: Math.min(fileEntryMaxChars, remainingFileChars),
+      label: `file attachment ${index + 1}`,
+    });
+    retainedReversed.push({
+      candidate,
+      content: budgetedContent.text,
+    });
+    remainingFileChars = Math.max(0, remainingFileChars - budgetedContent.text.length);
+  }
+  const blocks = retainedReversed.toReversed().map(({ candidate, content }) =>
+    renderFileContextBlock({
+      filename: candidate.filename,
+      fallbackName: candidate.fallbackName,
+      mimeType: candidate.mimeType,
+      content,
+    }),
+  );
+  if (omittedFileBlocks > 0) {
+    blocks.unshift(
       renderFileContextBlock({
-        filename: bufferResult.fileName,
-        fallbackName: `file-${attachment.index + 1}`,
-        mimeType,
-        content: blockText,
+        filename: "openclaw-file-context-budget.txt",
+        mimeType: "text/plain",
+        content: `[OpenClaw omitted ${omittedFileBlocks.toLocaleString()} older file attachment context blocks to keep the prompt cache bounded.]`,
       }),
     );
   }
@@ -507,9 +607,10 @@ export async function applyMediaUnderstanding(params: {
       ctx.MediaUnderstandingDecisions = [...(ctx.MediaUnderstandingDecisions ?? []), ...decisions];
     }
 
-    if (outputs.length > 0) {
-      ctx.Body = formatMediaUnderstandingBody({ body: ctx.Body, outputs });
-      const audioOutputs = outputs.filter((output) => output.kind === "audio.transcription");
+    const promptOutputs = budgetMediaOutputs(outputs);
+    if (promptOutputs.length > 0) {
+      ctx.Body = formatMediaUnderstandingBody({ body: ctx.Body, outputs: promptOutputs });
+      const audioOutputs = promptOutputs.filter((output) => output.kind === "audio.transcription");
       if (audioOutputs.length > 0) {
         const transcript = formatAudioTranscripts(audioOutputs);
         ctx.Transcript = transcript;
@@ -534,7 +635,7 @@ export async function applyMediaUnderstanding(params: {
         ctx.CommandBody = originalUserText;
         ctx.RawBody = originalUserText;
       }
-      ctx.MediaUnderstanding = [...(ctx.MediaUnderstanding ?? []), ...outputs];
+      ctx.MediaUnderstanding = [...(ctx.MediaUnderstanding ?? []), ...promptOutputs];
     }
     const audioAttachmentIndexes = new Set(
       outputs

@@ -8,8 +8,18 @@ export const CACHE_TTL_CUSTOM_TYPE = "openclaw.cache-ttl";
 
 export type CacheTtlEntryData = {
   timestamp: number;
+  anthropic?: Record<string, unknown>;
+  baseUrlHost?: string;
+  cacheRetention?: "none" | "short" | "long";
   provider?: string;
+  modelApi?: string;
   modelId?: string;
+  previousCacheRead?: number;
+  promptCache?: Record<string, unknown>;
+  promptCacheChanges?: Array<{ code: string; detail: string }>;
+  streamStrategy?: string;
+  tools?: Record<string, unknown>;
+  transport?: string;
 };
 
 export function isCacheTtlEligibleProvider(

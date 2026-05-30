@@ -41,7 +41,8 @@ export type EmbeddedPiRunMeta = {
       | "compaction_failure"
       | "role_ordering"
       | "image_size"
-      | "retry_limit";
+      | "retry_limit"
+      | "expensive_replay_dampened";
     message: string;
   };
   /** Stop reason for the agent run (e.g., "completed", "tool_calls"). */
@@ -67,6 +68,9 @@ export type EmbeddedPiRunResult = {
   // True if a messaging tool (telegram, whatsapp, discord, slack, sessions_send)
   // successfully sent a message. Used to suppress agent's confirmation text.
   didSendViaMessagingTool?: boolean;
+  // True if a deterministic approval prompt was sent. Used to suppress
+  // assistant artifacts that would duplicate the approval request.
+  didSendDeterministicApprovalPrompt?: boolean;
   // Texts successfully sent via messaging tools during the run.
   messagingToolSentTexts?: string[];
   // Media URLs successfully sent via messaging tools during the run.

@@ -11,6 +11,7 @@ import { getQueuedFileWriter, type QueuedFileWriter } from "./queued-file-writer
 import { buildAgentTraceBase } from "./trace-base.js";
 
 export type CacheTraceStage =
+  | "cache:anomaly"
   | "cache:result"
   | "cache:state"
   | "session:loaded"

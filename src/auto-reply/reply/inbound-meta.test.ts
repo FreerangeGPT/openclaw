@@ -366,6 +366,43 @@ describe("buildInboundUserContextPrefix", () => {
     expect(conversationInfo["history_count"]).toBe(1);
   });
 
+  it("truncates large reply context blocks before prompt insertion", () => {
+    withEnv({ OPENCLAW_INBOUND_CONTEXT_BLOCK_MAX_CHARS: "1000" }, () => {
+      const text = buildInboundUserContextPrefix({
+        ChatType: "group",
+        ReplyToBody: "x".repeat(1_500),
+      } as TemplateContext);
+
+      expect(text).toContain('"body_truncated": true');
+      expect(text).toContain('"body_original_chars": 1500');
+      expect(text).toContain("OpenClaw truncated");
+    });
+  });
+
+  it("keeps only recent inbound history within the history prompt budget", () => {
+    withEnv(
+      {
+        OPENCLAW_INBOUND_HISTORY_ENTRY_MAX_CHARS: "1000",
+        OPENCLAW_INBOUND_HISTORY_TOTAL_MAX_CHARS: "2000",
+      },
+      () => {
+        const text = buildInboundUserContextPrefix({
+          ChatType: "group",
+          InboundHistory: Array.from({ length: 14 }, (_, index) => ({
+            sender: `user-${index}`,
+            body: index === 13 ? "z".repeat(1_500) : `message-${index}`,
+            timestamp: index,
+          })),
+        } as TemplateContext);
+
+        expect(text).not.toContain('"sender": "user-0"');
+        expect(text).toContain('"sender": "user-13"');
+        expect(text).toContain('"omitted_older_messages": 2');
+        expect(text).toContain('"body_truncated": true');
+      },
+    );
+  });
+
   it("trims sender_id in conversation info", () => {
     const text = buildInboundUserContextPrefix({
       ChatType: "group",

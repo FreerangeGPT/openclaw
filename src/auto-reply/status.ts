@@ -65,6 +65,21 @@ type QueueStatus = {
   showDetails?: boolean;
 };
 
+type CacheHealthUsageEntry = {
+  cacheRead: number;
+  cacheWrite: number;
+  timestamp?: number;
+};
+
+type CacheHealthSummary = {
+  anomalyCountLastHour: number;
+  coldWritesLastHour: number;
+  largestCacheWrite: number;
+  observedOneHourTtl: boolean;
+  recentUsage: CacheHealthUsageEntry[];
+  retention?: string;
+};
+
 type StatusArgs = {
   config?: OpenClawConfig;
   agent: AgentConfig;
@@ -237,6 +252,7 @@ const readUsageFromSessionLog = (
   agentId?: string,
   sessionKey?: string,
   storePath?: string,
+  now: number = Date.now(),
 ):
   | {
       input: number;
@@ -246,6 +262,7 @@ const readUsageFromSessionLog = (
       promptTokens: number;
       total: number;
       model?: string;
+      cacheHealth?: CacheHealthSummary;
     }
   | undefined => {
   // Transcripts are stored at the session file path (fallback: ~/.openclaw/sessions/<SessionId>.jsonl)
@@ -270,7 +287,7 @@ const readUsageFromSessionLog = (
 
   try {
     // Read the tail only; we only need the most recent usage entries.
-    const TAIL_BYTES = 8192;
+    const TAIL_BYTES = 256 * 1024;
     const stat = fs.statSync(logPath);
     const offset = Math.max(0, stat.size - TAIL_BYTES);
     const buf = Buffer.alloc(Math.min(TAIL_BYTES, stat.size));
@@ -288,6 +305,11 @@ const readUsageFromSessionLog = (
     let promptTokens = 0;
     let model: string | undefined;
     let lastUsage: ReturnType<typeof normalizeUsage> | undefined;
+    const usageEntries: CacheHealthUsageEntry[] = [];
+    let anomalyCountLastHour = 0;
+    let largestCacheWrite = 0;
+    let observedOneHourTtl = false;
+    let retention: string | undefined;
 
     for (const line of lines) {
       if (!line.trim()) {
@@ -295,10 +317,15 @@ const readUsageFromSessionLog = (
       }
       try {
         const parsed = JSON.parse(line) as {
+          customType?: string;
+          data?: Record<string, unknown>;
           message?: {
+            timestamp?: number;
             usage?: UsageLike;
             model?: string;
           };
+          timestamp?: number;
+          type?: string;
           usage?: UsageLike;
           model?: string;
         };
@@ -306,8 +333,37 @@ const readUsageFromSessionLog = (
         const usage = normalizeUsage(usageRaw);
         if (usage) {
           lastUsage = usage;
+          const cacheRead = usage.cacheRead ?? 0;
+          const cacheWrite = usage.cacheWrite ?? 0;
+          largestCacheWrite = Math.max(largestCacheWrite, cacheWrite);
+          usageEntries.push({
+            cacheRead,
+            cacheWrite,
+            ...(typeof parsed.message?.timestamp === "number"
+              ? { timestamp: parsed.message.timestamp }
+              : typeof parsed.timestamp === "number"
+                ? { timestamp: parsed.timestamp }
+                : {}),
+          });
         }
         model = parsed.message?.model ?? parsed.model ?? model;
+        if (parsed.type === "custom" && parsed.customType === "openclaw.cache-ttl") {
+          const data = parsed.data;
+          const nextRetention =
+            typeof data?.cacheRetention === "string" ? data.cacheRetention : undefined;
+          retention = nextRetention ?? retention;
+          const anthropic = data?.anthropic as Record<string, unknown> | undefined;
+          const cacheControl = anthropic?.cacheControl as Record<string, unknown> | undefined;
+          if (cacheControl?.ttl === "1h") {
+            observedOneHourTtl = true;
+          }
+        }
+        if (parsed.type === "custom" && parsed.customType === "openclaw:cache-anomaly") {
+          const timestamp = typeof parsed.data?.timestamp === "number" ? parsed.data.timestamp : 0;
+          if (timestamp > 0 && now - timestamp <= 60 * 60 * 1000) {
+            anomalyCountLastHour += 1;
+          }
+        }
       } catch {
         // ignore bad lines (including a truncated first tail line)
       }
@@ -323,6 +379,29 @@ const readUsageFromSessionLog = (
     if (promptTokens === 0 && total === 0) {
       return undefined;
     }
+    const coldWritesLastHour = usageEntries.filter(
+      (entry) =>
+        entry.timestamp !== undefined &&
+        now - entry.timestamp <= 60 * 60 * 1000 &&
+        entry.cacheRead <= 0 &&
+        entry.cacheWrite >= 50_000,
+    ).length;
+    const recentUsage = usageEntries.slice(-10);
+    const cacheHealth =
+      recentUsage.length > 0 ||
+      largestCacheWrite > 0 ||
+      anomalyCountLastHour > 0 ||
+      retention ||
+      observedOneHourTtl
+        ? {
+            anomalyCountLastHour,
+            coldWritesLastHour,
+            largestCacheWrite,
+            observedOneHourTtl,
+            recentUsage,
+            ...(retention ? { retention } : {}),
+          }
+        : undefined;
     return {
       input,
       output,
@@ -331,6 +410,7 @@ const readUsageFromSessionLog = (
       promptTokens,
       total,
       model,
+      cacheHealth,
     };
   } catch {
     return undefined;
@@ -374,6 +454,54 @@ const formatCacheLine = (
       : 0;
 
   return `🗄️ Cache: ${hitRate}% hit · ${cachedLabel} cached, ${newLabel} new`;
+};
+
+const formatCacheHealthLine = (summary?: CacheHealthSummary) => {
+  if (!summary) {
+    return null;
+  }
+  const parts: string[] = [];
+  if (summary.recentUsage.length > 1) {
+    const recent = summary.recentUsage
+      .map((entry) => `${formatTokenCount(entry.cacheRead)}/${formatTokenCount(entry.cacheWrite)}`)
+      .join(", ");
+    parts.push(`last${summary.recentUsage.length} r/w ${recent}`);
+  }
+  if (summary.largestCacheWrite > 0) {
+    parts.push(`max write ${formatTokenCount(summary.largestCacheWrite)}`);
+  }
+  if (summary.coldWritesLastHour > 0) {
+    parts.push(`cold ${summary.coldWritesLastHour}/h`);
+  }
+  if (summary.anomalyCountLastHour > 0) {
+    parts.push(`alerts ${summary.anomalyCountLastHour}/h`);
+  }
+  if (summary.retention || summary.observedOneHourTtl) {
+    parts.push(
+      `retention ${summary.retention ?? "unknown"}${summary.observedOneHourTtl ? " ttl=1h" : ""}`,
+    );
+  }
+  if (parts.length === 0) {
+    return null;
+  }
+  return `🔎 Cache health: ${parts.join(" · ")}`;
+};
+
+const formatHeartbeatModeLine = (agent: AgentConfig): string | null => {
+  const heartbeat = agent.heartbeat;
+  if (!heartbeat) {
+    return null;
+  }
+  const contextLabel = heartbeat.lightContext === true ? "light" : "full";
+  const sessionLabel = heartbeat.isolatedSession === true ? "isolated" : "main";
+  const parts = [`${contextLabel} ${sessionLabel}`];
+  if (typeof heartbeat.every === "string" && heartbeat.every.trim()) {
+    parts.push(`every ${heartbeat.every.trim()}`);
+  }
+  if (typeof heartbeat.target === "string" && heartbeat.target.trim()) {
+    parts.push(`target ${heartbeat.target.trim()}`);
+  }
+  return `💓 Heartbeat: ${parts.join(" · ")}`;
 };
 
 const formatMediaUnderstandingLine = (decisions?: ReadonlyArray<MediaUnderstandingDecision>) => {
@@ -518,6 +646,7 @@ export function buildStatusMessage(args: StatusArgs): string {
   let outputTokens = entry?.outputTokens;
   let cacheRead = entry?.cacheRead;
   let cacheWrite = entry?.cacheWrite;
+  let cacheHealth: CacheHealthSummary | undefined;
   let totalTokens = entry?.totalTokens ?? (entry?.inputTokens ?? 0) + (entry?.outputTokens ?? 0);
 
   // Prefer prompt-size tokens from the session transcript when it looks larger
@@ -529,8 +658,10 @@ export function buildStatusMessage(args: StatusArgs): string {
       args.agentId,
       args.sessionKey,
       args.sessionStorePath,
+      now,
     );
     if (logUsage) {
+      cacheHealth = logUsage.cacheHealth;
       const candidate = logUsage.promptTokens || logUsage.total;
       if (!totalTokens || totalTokens === 0 || candidate > totalTokens) {
         totalTokens = candidate;
@@ -822,11 +953,13 @@ export function buildStatusMessage(args: StatusArgs): string {
   const versionLine = `🦞 OpenClaw ${VERSION}${commit ? ` (${commit})` : ""}`;
   const usagePair = formatUsagePair(inputTokens, outputTokens);
   const cacheLine = formatCacheLine(inputTokens, cacheRead, cacheWrite);
+  const cacheHealthLine = formatCacheHealthLine(cacheHealth);
   const costLine = costLabel ? `💵 Cost: ${costLabel}` : null;
   const usageCostLine =
     usagePair && costLine ? `${usagePair} · ${costLine}` : (usagePair ?? costLine);
   const mediaLine = formatMediaUnderstandingLine(args.mediaDecisions);
   const voiceLine = formatVoiceModeLine(args.config, args.sessionEntry);
+  const heartbeatLine = formatHeartbeatModeLine(args.agent);
 
   return [
     versionLine,
@@ -835,6 +968,7 @@ export function buildStatusMessage(args: StatusArgs): string {
     fallbackLine,
     usageCostLine,
     cacheLine,
+    cacheHealthLine,
     `📚 ${contextLine}`,
     mediaLine,
     args.usageLine,
@@ -842,6 +976,7 @@ export function buildStatusMessage(args: StatusArgs): string {
     args.subagentsLine,
     args.taskLine,
     `⚙️ ${optionsLine}`,
+    heartbeatLine,
     voiceLine,
     activationLine,
   ]

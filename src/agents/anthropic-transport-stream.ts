@@ -13,6 +13,8 @@ import {
 import {
   applyAnthropicPayloadPolicyToParams,
   resolveAnthropicPayloadPolicy,
+  restoreAnthropicPayloadCacheControls,
+  snapshotAnthropicPayloadCacheControls,
 } from "./anthropic-payload-policy.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./copilot-dynamic-headers.js";
 import { buildGuardedModelFetch } from "./provider-transport-fetch.js";
@@ -404,6 +406,7 @@ function createAnthropicTransportClient(params: {
         authToken: apiKey,
         baseURL: model.baseUrl,
         dangerouslyAllowBrowser: true,
+        maxRetries: 0,
         defaultHeaders: mergeTransportHeaders(
           {
             accept: "application/json",
@@ -433,6 +436,7 @@ function createAnthropicTransportClient(params: {
         authToken: apiKey,
         baseURL: model.baseUrl,
         dangerouslyAllowBrowser: true,
+        maxRetries: 0,
         defaultHeaders: mergeTransportHeaders(
           {
             accept: "application/json",
@@ -454,6 +458,7 @@ function createAnthropicTransportClient(params: {
       apiKey,
       baseURL: model.baseUrl,
       dangerouslyAllowBrowser: true,
+      maxRetries: 0,
       defaultHeaders: mergeTransportHeaders(
         {
           accept: "application/json",
@@ -546,6 +551,22 @@ function buildAnthropicParams(
   return params;
 }
 
+function reapplyAnthropicPayloadPolicy(
+  params: Record<string, unknown>,
+  model: AnthropicTransportModel,
+  options: AnthropicTransportOptions | undefined,
+): Record<string, unknown> {
+  const payloadPolicy = resolveAnthropicPayloadPolicy({
+    provider: model.provider,
+    api: model.api,
+    baseUrl: model.baseUrl,
+    cacheRetention: options?.cacheRetention,
+    enableCacheControl: true,
+  });
+  applyAnthropicPayloadPolicyToParams(params, payloadPolicy);
+  return params;
+}
+
 function resolveAnthropicTransportOptions(
   model: AnthropicTransportModel,
   options: AnthropicTransportOptions | undefined,
@@ -618,9 +639,16 @@ export function createAnthropicMessagesTransportStreamFn(): StreamFn {
           options: transportOptions,
         });
         let params = buildAnthropicParams(model, context, isOAuthToken, transportOptions);
+        const cacheControlSnapshot = snapshotAnthropicPayloadCacheControls(params);
         const nextParams = await transportOptions.onPayload?.(params, model);
-        if (nextParams !== undefined) {
-          params = nextParams as Record<string, unknown>;
+        if (nextParams === undefined || nextParams === params) {
+          restoreAnthropicPayloadCacheControls(params, cacheControlSnapshot);
+        } else {
+          params = reapplyAnthropicPayloadPolicy(
+            nextParams as Record<string, unknown>,
+            model,
+            transportOptions,
+          );
         }
         const anthropicStream = client.messages.stream(
           { ...params, stream: true } as never,

@@ -52,6 +52,10 @@ import { escapeRegExp } from "../utils.js";
 import { formatErrorMessage, hasErrnoCode } from "./errors.js";
 import { isWithinActiveHours } from "./heartbeat-active-hours.js";
 import {
+  shouldSkipExpensiveMainSessionHeartbeat,
+  shouldUseIsolatedHeartbeatSession,
+} from "./heartbeat-cost-guard.js";
+import {
   buildExecEventPrompt,
   buildCronEventPrompt,
   isCronSystemEvent,
@@ -403,6 +407,7 @@ function normalizeHeartbeatReply(
 type HeartbeatReasonFlags = {
   isExecEventReason: boolean;
   isCronEventReason: boolean;
+  isManualReason: boolean;
   isWakeReason: boolean;
 };
 
@@ -424,6 +429,7 @@ function resolveHeartbeatReasonFlags(reason?: string): HeartbeatReasonFlags {
   return {
     isExecEventReason: reasonKind === "exec-event",
     isCronEventReason: reasonKind === "cron",
+    isManualReason: reasonKind === "manual",
     isWakeReason: reasonKind === "wake" || reasonKind === "hook",
   };
 }
@@ -655,13 +661,26 @@ export async function runHeartbeatOnce(opts: {
   }
 
   const previousUpdatedAt = entry?.updatedAt;
+  const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
+  const preparedMemoryPrepend = await prepareMemoryPrependQueueDrain({
+    workspaceDir,
+  });
 
   // When isolatedSession is enabled, create a fresh session via the same
   // pattern as cron sessionTarget: "isolated". This gives the heartbeat
   // a new session ID (empty transcript) each run, avoiding the cost of
   // sending the full conversation history (~100K tokens) to the LLM.
   // Delivery routing still uses the main session entry (lastChannel, lastTo).
-  const useIsolatedSession = heartbeat?.isolatedSession === true;
+  const useIsolatedSession = shouldUseIsolatedHeartbeatSession({
+    configuredIsolated: heartbeat?.isolatedSession,
+    hasMemoryPrepend: Boolean(preparedMemoryPrepend.block),
+  });
+  if (preparedMemoryPrepend.block && heartbeat?.isolatedSession !== true) {
+    log.info("heartbeat: using isolated session for memory prepend queue drain", {
+      sessionKey,
+      agentId,
+    });
+  }
   const delivery = resolveHeartbeatDeliveryTarget({
     cfg,
     entry,
@@ -702,7 +721,6 @@ export async function runHeartbeatOnce(opts: {
   const canRelayToUser = Boolean(
     delivery.channel !== "none" && delivery.to && visibility.showAlerts,
   );
-  const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
   const { prompt, hasExecCompletion, hasCronEvents } = resolveHeartbeatRunPrompt({
     cfg,
     heartbeat,
@@ -716,6 +734,37 @@ export async function runHeartbeatOnce(opts: {
   // If no tasks are due, skip heartbeat entirely
   if (prompt === null) {
     return { status: "skipped", reason: "no-tasks-due" };
+  }
+  const expensiveMainSessionHeartbeat = shouldSkipExpensiveMainSessionHeartbeat({
+    prompt,
+    totalTokens: preflight.session.entry?.totalTokens,
+    totalTokensFresh: preflight.session.entry?.totalTokensFresh,
+    hasExecCompletion,
+    hasCronEvents,
+    hasHeartbeatInstructions: Boolean(
+      preflight.heartbeatFileContent?.trim() && !preflight.tasks?.length,
+    ),
+    hasTasks: Boolean(preflight.tasks?.length),
+    isCronEventReason: preflight.isCronEventReason,
+    isExecEventReason: preflight.isExecEventReason,
+    isManualReason: preflight.isManualReason,
+    isWakeReason: preflight.isWakeReason,
+    useIsolatedSession,
+  });
+  if (expensiveMainSessionHeartbeat) {
+    log.warn("heartbeat: skipped full-context main-session run", {
+      sessionKey,
+      agentId,
+      ...expensiveMainSessionHeartbeat,
+    });
+    emitHeartbeatEvent({
+      status: "skipped",
+      reason: "full-context-heartbeat-guard",
+      durationMs: Date.now() - startedAt,
+      channel: delivery.channel !== "none" ? delivery.channel : undefined,
+      accountId: delivery.accountId,
+    });
+    return { status: "skipped", reason: "full-context-heartbeat-guard" };
   }
 
   let runSessionKey = sessionKey;
@@ -764,9 +813,6 @@ export async function runHeartbeatOnce(opts: {
     store[sessionKey] = { ...base, heartbeatTaskState: taskState };
     await saveSessionStore(storePath, store);
   };
-  const preparedMemoryPrepend = await prepareMemoryPrependQueueDrain({
-    workspaceDir,
-  });
   const promptWithMemoryPrepend = prependAssociativeRecallBlockToText({
     body: prompt,
     recallBlock: preparedMemoryPrepend.block,

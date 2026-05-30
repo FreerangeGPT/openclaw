@@ -81,6 +81,7 @@ describe("createAnthropicVertexStreamFn", () => {
 
     expect(hoisted.anthropicVertexCtorMock).toHaveBeenCalledWith({
       region: "global",
+      maxRetries: 0,
     });
   });
 
@@ -97,6 +98,7 @@ describe("createAnthropicVertexStreamFn", () => {
       projectId: "vertex-project",
       region: "us-east5",
       baseURL: "https://proxy.example.test/vertex/v1",
+      maxRetries: 0,
     });
   });
 
@@ -302,6 +304,74 @@ describe("createAnthropicVertexStreamFn", () => {
     });
   });
 
+  it("reapplies Anthropic cache-boundary shaping after in-place payload hook mutation", async () => {
+    const streamFn = createAnthropicVertexStreamFn("vertex-project", "us-east5");
+    const model = makeModel({ id: "claude-sonnet-4-6", maxTokens: 64000 });
+    const onPayload = vi.fn(async (payload: unknown) => {
+      const record = payload as {
+        messages?: Array<{ content?: Array<Record<string, unknown>> }>;
+        system?: Array<Record<string, unknown>>;
+      };
+      delete record.system?.[0]?.cache_control;
+      delete record.messages?.[0]?.content?.[0]?.cache_control;
+      return undefined;
+    });
+
+    void streamFn(
+      model,
+      {
+        systemPrompt: `Stable prefix${SYSTEM_PROMPT_CACHE_BOUNDARY}Dynamic suffix`,
+        messages: [{ role: "user", content: "Hello" }],
+      } as never,
+      {
+        cacheRetention: "short",
+        onPayload,
+      } as never,
+    );
+
+    const transportOptions = hoisted.streamAnthropicMock.mock.calls[0]?.[2] as {
+      onPayload?: (payload: unknown, payloadModel: unknown) => Promise<unknown>;
+    };
+    const nextPayload = await transportOptions.onPayload?.(
+      {
+        system: [
+          {
+            type: "text",
+            text: `Stable prefix${SYSTEM_PROMPT_CACHE_BOUNDARY}Dynamic suffix`,
+          },
+        ],
+        messages: [{ role: "user", content: "Hello" }],
+      },
+      model,
+    );
+
+    expect(nextPayload).toEqual({
+      system: [
+        {
+          type: "text",
+          text: "Stable prefix",
+          cache_control: { type: "ephemeral" },
+        },
+        {
+          type: "text",
+          text: "Dynamic suffix",
+        },
+      ],
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "Hello",
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+        },
+      ],
+    });
+  });
+
   it("omits maxTokens when neither the model nor request provide a finite limit", () => {
     const streamFn = createAnthropicVertexStreamFn("vertex-project", "us-east5");
     const model = makeModel({ id: "claude-sonnet-4-6" });
@@ -340,6 +410,7 @@ describe("createAnthropicVertexStreamFnForModel", () => {
       projectId: "vertex-project",
       region: "europe-west4",
       baseURL: "https://europe-west4-aiplatform.googleapis.com/v1",
+      maxRetries: 0,
     });
   });
 
@@ -355,6 +426,7 @@ describe("createAnthropicVertexStreamFnForModel", () => {
       projectId: "vertex-project",
       region: "global",
       baseURL: "https://proxy.example.test/custom-root/v1",
+      maxRetries: 0,
     });
   });
 
@@ -370,6 +442,7 @@ describe("createAnthropicVertexStreamFnForModel", () => {
       projectId: "vertex-project",
       region: "global",
       baseURL: "https://proxy.example.test/custom-root/v1",
+      maxRetries: 0,
     });
   });
 });
