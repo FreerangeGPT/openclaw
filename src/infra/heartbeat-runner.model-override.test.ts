@@ -138,6 +138,7 @@ describe("runHeartbeatOnce – heartbeat model override", () => {
       expect.objectContaining({
         isHeartbeat: true,
         bootstrapContextMode: undefined,
+        bootstrapContextRunKind: "default",
       }),
     );
   });
@@ -148,6 +149,7 @@ describe("runHeartbeatOnce – heartbeat model override", () => {
       expect.objectContaining({
         isHeartbeat: true,
         bootstrapContextMode: undefined,
+        bootstrapContextRunKind: "default",
       }),
     );
   });
@@ -158,6 +160,7 @@ describe("runHeartbeatOnce – heartbeat model override", () => {
       expect.objectContaining({
         isHeartbeat: true,
         bootstrapContextMode: "lightweight",
+        bootstrapContextRunKind: "heartbeat",
       }),
     );
   });
@@ -304,6 +307,7 @@ describe("runHeartbeatOnce – heartbeat model override", () => {
         expect.objectContaining({
           isHeartbeat: true,
           bootstrapContextMode: "lightweight",
+          bootstrapContextRunKind: "heartbeat",
         }),
         cfg,
       );
