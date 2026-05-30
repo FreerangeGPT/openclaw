@@ -672,8 +672,11 @@ export async function runHeartbeatOnce(opts: {
   // a new session ID (empty transcript) each run, avoiding the cost of
   // sending the full conversation history (~100K tokens) to the LLM.
   // Delivery routing still uses the main session entry (lastChannel, lastTo).
+  const preserveMainSessionCache =
+    heartbeat?.isolatedSession !== true && heartbeat?.lightContext !== true;
   const autoIsolatedMainSession = shouldAutoIsolateMainSessionHeartbeat({
     configuredIsolated: heartbeat?.isolatedSession,
+    preserveMainSessionCache,
     totalTokens: preflight.session.entry?.totalTokens,
     totalTokensFresh: preflight.session.entry?.totalTokensFresh,
     hasExecCompletion: preflight.pendingEventEntries.some((event) =>
@@ -761,6 +764,7 @@ export async function runHeartbeatOnce(opts: {
   }
   const expensiveMainSessionHeartbeat = shouldSkipExpensiveMainSessionHeartbeat({
     prompt,
+    preserveMainSessionCache,
     totalTokens: preflight.session.entry?.totalTokens,
     totalTokensFresh: preflight.session.entry?.totalTokensFresh,
     hasExecCompletion,
@@ -913,7 +917,7 @@ export async function runHeartbeatOnce(opts: {
     const heartbeatModelOverride = heartbeat?.model?.trim() || undefined;
     const suppressToolErrorWarnings = heartbeat?.suppressToolErrorWarnings === true;
     const bootstrapContextMode: "lightweight" | undefined =
-      heartbeat?.lightContext === false ? undefined : "lightweight";
+      heartbeat?.lightContext === true ? "lightweight" : undefined;
     const replyOpts = heartbeatModelOverride
       ? {
           isHeartbeat: true,

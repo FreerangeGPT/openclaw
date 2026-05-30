@@ -38,6 +38,7 @@ function resolveFreshPromptTokens(params: {
 
 export function shouldAutoIsolateMainSessionHeartbeat(params: {
   configuredIsolated?: boolean;
+  preserveMainSessionCache: boolean;
   totalTokens?: number;
   totalTokensFresh?: boolean;
   hasExecCompletion: boolean;
@@ -48,6 +49,9 @@ export function shouldAutoIsolateMainSessionHeartbeat(params: {
   isWakeReason: boolean;
 }): AutoIsolatedMainSessionHeartbeat | null {
   if (params.configuredIsolated !== undefined) {
+    return null;
+  }
+  if (params.preserveMainSessionCache) {
     return null;
   }
   if (
@@ -71,6 +75,7 @@ export function shouldAutoIsolateMainSessionHeartbeat(params: {
 
 export function shouldSkipExpensiveMainSessionHeartbeat(params: {
   prompt: string;
+  preserveMainSessionCache: boolean;
   totalTokens?: number;
   totalTokensFresh?: boolean;
   hasExecCompletion: boolean;
@@ -84,6 +89,9 @@ export function shouldSkipExpensiveMainSessionHeartbeat(params: {
   useIsolatedSession: boolean;
 }): ExpensiveMainSessionHeartbeatSkip | null {
   if (params.useIsolatedSession) {
+    return null;
+  }
+  if (params.preserveMainSessionCache) {
     return null;
   }
   if (

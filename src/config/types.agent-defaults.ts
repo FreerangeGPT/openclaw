@@ -196,9 +196,10 @@ export type AgentDefaultsConfig = {
     /** Suppress tool error warning payloads during heartbeat runs. */
     suppressToolErrorWarnings?: boolean;
     /**
-     * Defaults to true for heartbeat turns. Lightweight mode keeps only
-     * HEARTBEAT.md from workspace bootstrap files. Set false only when the
-     * heartbeat truly needs full bootstrap files.
+     * If true, run heartbeat turns with lightweight bootstrap context.
+     * Lightweight mode keeps only HEARTBEAT.md from workspace bootstrap files.
+     * Leave false or unset for main-session cache-keeper heartbeats so they
+     * preserve the same prefix shape as normal turns.
      */
     lightContext?: boolean;
     /**

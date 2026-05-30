@@ -492,7 +492,7 @@ const formatHeartbeatModeLine = (agent: AgentConfig): string | null => {
   if (!heartbeat) {
     return null;
   }
-  const contextLabel = heartbeat.lightContext === false ? "full" : "light";
+  const contextLabel = heartbeat.lightContext === true ? "light" : "full";
   const sessionLabel = heartbeat.isolatedSession === true ? "isolated" : "main";
   const parts = [`${contextLabel} ${sessionLabel}`];
   if (typeof heartbeat.every === "string" && heartbeat.every.trim()) {

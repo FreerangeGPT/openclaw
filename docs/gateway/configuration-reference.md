@@ -1097,7 +1097,7 @@ Periodic heartbeat runs.
         every: "30m", // 0m disables
         model: "openai/gpt-5.4-mini",
         includeReasoning: false,
-        lightContext: true, // default: true; false allows full workspace bootstrap files
+        lightContext: false, // default: false; true keeps only HEARTBEAT.md from workspace bootstrap files
         isolatedSession: false, // default: false; true runs each heartbeat in a fresh session (no conversation history)
         session: "main",
         to: "+15555550123",
@@ -1115,9 +1115,9 @@ Periodic heartbeat runs.
 - `every`: duration string (ms/s/m/h). Default: `30m` (API-key auth) or `1h` (OAuth auth). Set to `0m` to disable.
 - `suppressToolErrorWarnings`: when true, suppresses tool error warning payloads during heartbeat runs.
 - `directPolicy`: direct/DM delivery policy. `allow` (default) permits direct-target delivery. `block` suppresses direct-target delivery and emits `reason=dm-blocked`.
-- `lightContext`: defaults to true for heartbeat runs. Lightweight bootstrap context keeps only `HEARTBEAT.md` from workspace bootstrap files. Set false only when a heartbeat truly needs full bootstrap files.
+- `lightContext`: when true, heartbeat runs use lightweight bootstrap context and keep only `HEARTBEAT.md` from workspace bootstrap files. Leave false or unset for main-session cache-keeper heartbeats so they preserve the same prefix shape as normal turns.
 - `isolatedSession`: when true, each heartbeat runs in a fresh session with no prior conversation history. Same isolation pattern as cron `sessionTarget: "isolated"`. Reduces per-heartbeat token cost from ~100K to ~2-5K tokens.
-- Large routine main-session heartbeats are auto-isolated unless `isolatedSession: false` is explicitly configured.
+- Large lightweight main-session heartbeats are auto-isolated unless `isolatedSession: false` is explicitly configured.
 - Per-agent: set `agents.list[].heartbeat`. When any agent defines `heartbeat`, **only those agents** run heartbeats.
 - Heartbeats run full agent turns — shorter intervals burn more tokens.
 

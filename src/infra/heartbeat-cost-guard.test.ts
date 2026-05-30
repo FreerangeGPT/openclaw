@@ -20,13 +20,14 @@ function baseParams(
     isExecEventReason: false,
     isManualReason: false,
     isWakeReason: false,
+    preserveMainSessionCache: false,
     useIsolatedSession: false,
     ...overrides,
   };
 }
 
 describe("heartbeat cost guard", () => {
-  it("skips high-token main-session heartbeat when no actionable work is pending", () => {
+  it("skips high-token lightweight main-session heartbeat when no actionable work is pending", () => {
     expect(shouldSkipExpensiveMainSessionHeartbeat(baseParams())).toEqual({
       totalTokens: 80_000,
       threshold: 50_000,
@@ -37,6 +38,12 @@ describe("heartbeat cost guard", () => {
   it("allows isolated heartbeat even when the main session is large", () => {
     expect(
       shouldSkipExpensiveMainSessionHeartbeat(baseParams({ useIsolatedSession: true })),
+    ).toBeNull();
+  });
+
+  it("allows cache-keeper main-session heartbeat even when the main session is large", () => {
+    expect(
+      shouldSkipExpensiveMainSessionHeartbeat(baseParams({ preserveMainSessionCache: true })),
     ).toBeNull();
   });
 
@@ -53,7 +60,7 @@ describe("heartbeat cost guard", () => {
   });
 
   it.each([{ hasHeartbeatInstructions: true }, { hasTasks: true }])(
-    "still skips large explicit main-session heartbeat with %#",
+    "still skips large lightweight main-session heartbeat with %#",
     (overrides) => {
       expect(shouldSkipExpensiveMainSessionHeartbeat(baseParams(overrides))).toEqual({
         totalTokens: 80_000,
@@ -87,6 +94,15 @@ describe("heartbeat cost guard", () => {
       totalTokens: 80_000,
       threshold: 50_000,
     });
+  });
+
+  it("does not auto-isolate cache-keeper heartbeats", () => {
+    expect(
+      shouldAutoIsolateMainSessionHeartbeat({
+        ...baseParams({ preserveMainSessionCache: true }),
+        configuredIsolated: undefined,
+      }),
+    ).toBeNull();
   });
 
   it.each([

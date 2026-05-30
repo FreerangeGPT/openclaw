@@ -111,7 +111,7 @@ describe("heartbeat transcript pruning", () => {
     });
   });
 
-  it("auto-isolates large routine heartbeats before reading the main transcript", async () => {
+  it("auto-isolates large lightweight routine heartbeats before reading the main transcript", async () => {
     await withTempTelegramHeartbeatSandbox(
       async ({ tmpDir, storePath, replySpy }) => {
         const sessionKey = resolveMainSessionKey(undefined);
@@ -136,7 +136,7 @@ describe("heartbeat transcript pruning", () => {
           session: { store: storePath },
           sessionStore: storePath,
           channels: { telegram: {} },
-          agents: { defaults: { heartbeat: { every: "5m" } } },
+          agents: { defaults: { heartbeat: { every: "5m", lightContext: true } } },
         } as unknown as OpenClawConfig;
 
         const result = await runHeartbeatOnce({
