@@ -235,6 +235,7 @@ agents:
 - Set baseline `cacheRetention: "short"`.
 - Enable `contextPruning.mode: "cache-ttl"`.
 - Keep heartbeat below your TTL only for agents that benefit from warm caches.
+- Large routine heartbeats preserve the main session only when OpenClaw can resolve cache retention and the interval is below that TTL. Otherwise they are auto-isolated/lightweight, or skipped when `isolatedSession: false` is explicitly set.
 
 ## Cache diagnostics
 
@@ -320,13 +321,41 @@ Defaults:
 - `OPENCLAW_CACHE_TRACE_PROMPT=0|1` toggles prompt text capture.
 - `OPENCLAW_CACHE_TRACE_SYSTEM=0|1` toggles system prompt capture.
 
+### Exact provider payload logging
+
+For provider-level audits, enable the provider payload JSONL log temporarily:
+
+```yaml
+diagnostics:
+  providerPayloadLog:
+    enabled: true
+    filePath: "~/.openclaw/logs/provider-payload.jsonl" # optional
+    includeRequest: true
+    includeResponse: true
+    includeUsage: true
+```
+
+This records final provider request payloads from the transport `onPayload`
+hook plus the final assistant response message and usage snapshot. It redacts
+credential-like fields and image bytes, but prompt/response text is still
+sensitive.
+
+One-off env toggles:
+
+- `OPENCLAW_PROVIDER_PAYLOAD_LOG=1`
+- `OPENCLAW_PROVIDER_PAYLOAD_LOG_FILE=/path/to/provider-payload.jsonl`
+- `OPENCLAW_PROVIDER_PAYLOAD_LOG_REQUEST=0|1`
+- `OPENCLAW_PROVIDER_PAYLOAD_LOG_RESPONSE=0|1`
+- `OPENCLAW_PROVIDER_PAYLOAD_LOG_USAGE=0|1`
+- Legacy Anthropic-only: `OPENCLAW_ANTHROPIC_PAYLOAD_LOG=1`
+
 ### What to inspect
 
 - Cache trace events are JSONL and include staged snapshots like `session:loaded`, `prompt:before`, `stream:context`, and `session:after`.
 - Per-turn cache token impact is visible in normal usage surfaces via `cacheRead` and `cacheWrite` (for example `/usage full` and session usage summaries).
 - For Anthropic, expect both `cacheRead` and `cacheWrite` when caching is active.
 - For OpenAI, expect `cacheRead` on cache hits and `cacheWrite` to remain `0`; OpenAI does not publish a separate cache-write token field.
-- If you need request tracing, log request IDs and rate-limit headers separately from cache metrics. OpenClaw's current cache-trace output is focused on prompt/session shape and normalized token usage rather than raw provider response headers.
+- If you need exact request/response tracing, use `diagnostics.providerPayloadLog`; cache trace is focused on prompt/session shape and normalized token usage rather than raw provider response headers.
 
 ## Quick troubleshooting
 

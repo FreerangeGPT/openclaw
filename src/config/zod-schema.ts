@@ -303,6 +303,16 @@ export const OpenClawSchema = z
           })
           .strict()
           .optional(),
+        providerPayloadLog: z
+          .object({
+            enabled: z.boolean().optional(),
+            filePath: z.string().optional(),
+            includeRequest: z.boolean().optional(),
+            includeResponse: z.boolean().optional(),
+            includeUsage: z.boolean().optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),

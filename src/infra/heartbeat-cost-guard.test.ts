@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  resolveCacheKeeperCacheViable,
   shouldAutoIsolateMainSessionHeartbeat,
   shouldSkipExpensiveMainSessionHeartbeat,
   shouldUseIsolatedHeartbeatSession,
@@ -41,10 +42,42 @@ describe("heartbeat cost guard", () => {
     ).toBeNull();
   });
 
-  it("allows cache-keeper main-session heartbeat even when the main session is large", () => {
+  it("allows viable cache-keeper main-session heartbeat even when the main session is large", () => {
     expect(
-      shouldSkipExpensiveMainSessionHeartbeat(baseParams({ preserveMainSessionCache: true })),
+      shouldSkipExpensiveMainSessionHeartbeat(
+        baseParams({ preserveMainSessionCache: true, cacheKeeperCacheViable: true }),
+      ),
     ).toBeNull();
+  });
+
+  it("skips large cache-keeper heartbeat when cache retention cannot keep it warm", () => {
+    expect(
+      shouldSkipExpensiveMainSessionHeartbeat(
+        baseParams({
+          preserveMainSessionCache: true,
+          cacheKeeperCacheViable: false,
+        }),
+      ),
+    ).toEqual({
+      totalTokens: 80_000,
+      threshold: 50_000,
+      promptChars: "Read HEARTBEAT.md".length,
+      cacheKeeperCacheViable: false,
+    });
+  });
+
+  it("skips large cache-keeper heartbeat when cache viability is unknown", () => {
+    expect(
+      shouldSkipExpensiveMainSessionHeartbeat(
+        baseParams({
+          preserveMainSessionCache: true,
+        }),
+      ),
+    ).toEqual({
+      totalTokens: 80_000,
+      threshold: 50_000,
+      promptChars: "Read HEARTBEAT.md".length,
+    });
   });
 
   it.each([
@@ -96,13 +129,59 @@ describe("heartbeat cost guard", () => {
     });
   });
 
-  it("does not auto-isolate cache-keeper heartbeats", () => {
+  it("does not auto-isolate viable cache-keeper heartbeats", () => {
     expect(
       shouldAutoIsolateMainSessionHeartbeat({
-        ...baseParams({ preserveMainSessionCache: true }),
+        ...baseParams({ preserveMainSessionCache: true, cacheKeeperCacheViable: true }),
         configuredIsolated: undefined,
       }),
     ).toBeNull();
+  });
+
+  it("auto-isolates large cache-keeper heartbeat when cache retention cannot keep it warm", () => {
+    expect(
+      shouldAutoIsolateMainSessionHeartbeat({
+        ...baseParams({
+          preserveMainSessionCache: true,
+          cacheKeeperCacheViable: false,
+        }),
+        configuredIsolated: undefined,
+      }),
+    ).toEqual({
+      totalTokens: 80_000,
+      threshold: 50_000,
+      cacheKeeperCacheViable: false,
+    });
+  });
+
+  it("auto-isolates large cache-keeper heartbeat when cache viability is unknown", () => {
+    expect(
+      shouldAutoIsolateMainSessionHeartbeat({
+        ...baseParams({
+          preserveMainSessionCache: true,
+        }),
+        configuredIsolated: undefined,
+      }),
+    ).toEqual({
+      totalTokens: 80_000,
+      threshold: 50_000,
+    });
+  });
+
+  it.each([
+    { cacheRetention: undefined, intervalMs: 30 * 60_000, expected: false },
+    { cacheRetention: "none" as const, intervalMs: 30 * 60_000, expected: false },
+    { cacheRetention: "short" as const, intervalMs: 4 * 60_000 + 59_000, expected: true },
+    { cacheRetention: "short" as const, intervalMs: 5 * 60_000, expected: false },
+    { cacheRetention: "long" as const, intervalMs: 59 * 60_000 + 59_000, expected: true },
+    { cacheRetention: "long" as const, intervalMs: 60 * 60_000, expected: false },
+  ])("resolves cache-keeper cache viability %#", (params) => {
+    expect(
+      resolveCacheKeeperCacheViable({
+        cacheRetention: params.cacheRetention,
+        intervalMs: params.intervalMs,
+      }),
+    ).toBe(params.expected);
   });
 
   it.each([

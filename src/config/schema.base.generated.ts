@@ -274,6 +274,45 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
             description:
               "Cache-trace logging settings for observing cache decisions and payload context in embedded runs. Enable this temporarily for debugging and disable afterward to reduce sensitive log footprint.",
           },
+          providerPayloadLog: {
+            type: "object",
+            properties: {
+              enabled: {
+                type: "boolean",
+                title: "Provider Payload Log Enabled",
+                description:
+                  "Enable provider payload JSONL logging for embedded agent runs (default: false).",
+              },
+              filePath: {
+                type: "string",
+                title: "Provider Payload Log File Path",
+                description:
+                  "JSONL output path for provider payload logs (default: $OPENCLAW_STATE_DIR/logs/provider-payload.jsonl).",
+              },
+              includeRequest: {
+                type: "boolean",
+                title: "Provider Payload Log Include Request",
+                description:
+                  "Include final provider request payloads in provider payload logs (default: true).",
+              },
+              includeResponse: {
+                type: "boolean",
+                title: "Provider Payload Log Include Response",
+                description:
+                  "Include final assistant response messages in provider payload logs (default: true).",
+              },
+              includeUsage: {
+                type: "boolean",
+                title: "Provider Payload Log Include Usage",
+                description:
+                  "Include provider usage records in provider payload logs (default: true).",
+              },
+            },
+            additionalProperties: false,
+            title: "Provider Payload Log",
+            description:
+              "Provider payload logging settings for recording final provider request payloads, assistant responses, and usage in embedded runs. Enable temporarily only in secure environments because prompts and responses can contain private data.",
+          },
         },
         additionalProperties: false,
         title: "Diagnostics",
@@ -22315,6 +22354,11 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
       help: "Cache-trace logging settings for observing cache decisions and payload context in embedded runs. Enable this temporarily for debugging and disable afterward to reduce sensitive log footprint.",
       tags: ["observability", "storage"],
     },
+    "diagnostics.providerPayloadLog": {
+      label: "Provider Payload Log",
+      help: "Provider payload logging settings for recording final provider request payloads, assistant responses, and usage in embedded runs. Enable temporarily only in secure environments because prompts and responses can contain private data.",
+      tags: ["observability"],
+    },
     "logging.level": {
       label: "Log Level",
       help: 'Primary log level threshold for runtime logger output: "silent", "fatal", "error", "warn", "info", "debug", or "trace". Keep "info" or "warn" for production, and use debug/trace only during investigation.',
@@ -22474,6 +22518,31 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
       label: "Cache Trace Include System",
       help: "Include system prompt in trace output (default: true).",
       tags: ["observability", "storage"],
+    },
+    "diagnostics.providerPayloadLog.enabled": {
+      label: "Provider Payload Log Enabled",
+      help: "Enable provider payload JSONL logging for embedded agent runs (default: false).",
+      tags: ["observability"],
+    },
+    "diagnostics.providerPayloadLog.filePath": {
+      label: "Provider Payload Log File Path",
+      help: "JSONL output path for provider payload logs (default: $OPENCLAW_STATE_DIR/logs/provider-payload.jsonl).",
+      tags: ["observability", "storage"],
+    },
+    "diagnostics.providerPayloadLog.includeRequest": {
+      label: "Provider Payload Log Include Request",
+      help: "Include final provider request payloads in provider payload logs (default: true).",
+      tags: ["observability"],
+    },
+    "diagnostics.providerPayloadLog.includeResponse": {
+      label: "Provider Payload Log Include Response",
+      help: "Include final assistant response messages in provider payload logs (default: true).",
+      tags: ["observability"],
+    },
+    "diagnostics.providerPayloadLog.includeUsage": {
+      label: "Provider Payload Log Include Usage",
+      help: "Include provider usage records in provider payload logs (default: true).",
+      tags: ["observability"],
     },
     "agents.list.*.identity.avatar": {
       label: "Identity Avatar",
@@ -26584,6 +26653,6 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
       tags: ["advanced", "url-secret"],
     },
   },
-  version: "2026.4.5",
+  version: "2026.4.6",
   generatedAt: "2026-03-22T21:17:33.302Z",
 };

@@ -11,7 +11,9 @@ import {
 } from "../agents/agent-scope.js";
 import { appendCronStyleCurrentTimeLine } from "../agents/current-time.js";
 import { resolveEffectiveMessagesConfig } from "../agents/identity.js";
+import { modelKey, parseModelRef, resolveDefaultModelForAgent } from "../agents/model-selection.js";
 import { resolveEmbeddedSessionLane } from "../agents/pi-embedded-runner.js";
+import { resolveCacheRetention } from "../agents/pi-embedded-runner/prompt-cache-retention.js";
 import { DEFAULT_HEARTBEAT_FILENAME } from "../agents/workspace.js";
 import { resolveHeartbeatReplyPayload } from "../auto-reply/heartbeat-reply-payload.js";
 import {
@@ -52,6 +54,7 @@ import { escapeRegExp } from "../utils.js";
 import { formatErrorMessage, hasErrnoCode } from "./errors.js";
 import { isWithinActiveHours } from "./heartbeat-active-hours.js";
 import {
+  resolveCacheKeeperCacheViable,
   shouldAutoIsolateMainSessionHeartbeat,
   shouldSkipExpensiveMainSessionHeartbeat,
   shouldUseIsolatedHeartbeatSession,
@@ -107,6 +110,36 @@ let heartbeatRunnerRuntimePromise: Promise<typeof import("./heartbeat-runner.run
 function loadHeartbeatRunnerRuntime() {
   heartbeatRunnerRuntimePromise ??= import("./heartbeat-runner.runtime.js");
   return heartbeatRunnerRuntimePromise;
+}
+
+function resolveHeartbeatCacheRetention(params: {
+  cfg: OpenClawConfig;
+  agentId?: string;
+  heartbeat?: HeartbeatConfig;
+}): "none" | "short" | "long" | undefined {
+  const defaultModel = resolveDefaultModelForAgent({ cfg: params.cfg, agentId: params.agentId });
+  const heartbeatModel =
+    typeof params.heartbeat?.model === "string" && params.heartbeat.model.trim()
+      ? (parseModelRef(params.heartbeat.model, defaultModel.provider) ?? defaultModel)
+      : defaultModel;
+  const exactModelKey = `${heartbeatModel.provider}/${heartbeatModel.model}`;
+  const canonicalModelKey = modelKey(heartbeatModel.provider, heartbeatModel.model);
+  const defaultParams = params.cfg.agents?.defaults?.params;
+  const modelParams =
+    params.cfg.agents?.defaults?.models?.[exactModelKey]?.params ??
+    params.cfg.agents?.defaults?.models?.[canonicalModelKey]?.params;
+  const agentParams =
+    params.agentId && params.cfg.agents?.list
+      ? params.cfg.agents.list.find((agent) => normalizeAgentId(agent.id) === params.agentId)
+          ?.params
+      : undefined;
+  const extraParams = Object.assign({}, defaultParams, modelParams, agentParams);
+  return resolveCacheRetention(
+    Object.keys(extraParams).length > 0 ? extraParams : undefined,
+    heartbeatModel.provider,
+    undefined,
+    heartbeatModel.model,
+  );
 }
 
 export { areHeartbeatsEnabled, setHeartbeatsEnabled };
@@ -615,7 +648,8 @@ export async function runHeartbeatOnce(opts: {
   if (!isHeartbeatEnabledForAgent(cfg, agentId)) {
     return { status: "skipped", reason: "disabled" };
   }
-  if (!resolveHeartbeatIntervalMs(cfg, undefined, heartbeat)) {
+  const heartbeatIntervalMs = resolveHeartbeatIntervalMs(cfg, undefined, heartbeat);
+  if (!heartbeatIntervalMs) {
     return { status: "skipped", reason: "disabled" };
   }
 
@@ -674,9 +708,19 @@ export async function runHeartbeatOnce(opts: {
   // Delivery routing still uses the main session entry (lastChannel, lastTo).
   const preserveMainSessionCache =
     heartbeat?.isolatedSession !== true && heartbeat?.lightContext !== true;
+  const heartbeatCacheRetention = preserveMainSessionCache
+    ? resolveHeartbeatCacheRetention({ cfg, agentId, heartbeat })
+    : undefined;
+  const cacheKeeperCacheViable = preserveMainSessionCache
+    ? resolveCacheKeeperCacheViable({
+        cacheRetention: heartbeatCacheRetention,
+        intervalMs: heartbeatIntervalMs,
+      })
+    : undefined;
   const autoIsolatedMainSession = shouldAutoIsolateMainSessionHeartbeat({
     configuredIsolated: heartbeat?.isolatedSession,
     preserveMainSessionCache,
+    cacheKeeperCacheViable,
     totalTokens: preflight.session.entry?.totalTokens,
     totalTokensFresh: preflight.session.entry?.totalTokensFresh,
     hasExecCompletion: preflight.pendingEventEntries.some((event) =>
@@ -699,6 +743,8 @@ export async function runHeartbeatOnce(opts: {
     log.info("heartbeat: auto-isolating large routine main-session run", {
       sessionKey,
       agentId,
+      cacheRetention: heartbeatCacheRetention,
+      heartbeatIntervalMs,
       ...autoIsolatedMainSession,
     });
   }
@@ -708,6 +754,8 @@ export async function runHeartbeatOnce(opts: {
       agentId,
     });
   }
+  const forceLightweightHeartbeatContext =
+    autoIsolatedMainSession?.cacheKeeperCacheViable === false;
   const delivery = resolveHeartbeatDeliveryTarget({
     cfg,
     entry,
@@ -765,6 +813,7 @@ export async function runHeartbeatOnce(opts: {
   const expensiveMainSessionHeartbeat = shouldSkipExpensiveMainSessionHeartbeat({
     prompt,
     preserveMainSessionCache,
+    cacheKeeperCacheViable,
     totalTokens: preflight.session.entry?.totalTokens,
     totalTokensFresh: preflight.session.entry?.totalTokensFresh,
     hasExecCompletion,
@@ -783,6 +832,8 @@ export async function runHeartbeatOnce(opts: {
     log.warn("heartbeat: skipped full-context main-session run", {
       sessionKey,
       agentId,
+      cacheRetention: heartbeatCacheRetention,
+      heartbeatIntervalMs,
       ...expensiveMainSessionHeartbeat,
     });
     emitHeartbeatEvent({
@@ -917,8 +968,11 @@ export async function runHeartbeatOnce(opts: {
     const heartbeatModelOverride = heartbeat?.model?.trim() || undefined;
     const suppressToolErrorWarnings = heartbeat?.suppressToolErrorWarnings === true;
     const bootstrapContextMode: "lightweight" | undefined =
-      heartbeat?.lightContext === true ? "lightweight" : undefined;
-    const bootstrapContextRunKind = preserveMainSessionCache ? "default" : "heartbeat";
+      heartbeat?.lightContext === true || forceLightweightHeartbeatContext
+        ? "lightweight"
+        : undefined;
+    const bootstrapContextRunKind: "default" | "heartbeat" =
+      preserveMainSessionCache && !forceLightweightHeartbeatContext ? "default" : "heartbeat";
     const replyOpts = heartbeatModelOverride
       ? {
           isHeartbeat: true,

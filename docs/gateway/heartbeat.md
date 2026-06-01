@@ -432,6 +432,7 @@ Heartbeats run full agent turns. Shorter intervals burn more tokens. To reduce c
 - For cache-keeper heartbeats, leave `isolatedSession` false/unset and `lightContext` false/unset, set the model `cacheRetention: "long"`, and keep `every` below one hour (for example `50m` or `55m`).
 - For maintenance-only heartbeats that should not warm the main session, use `isolatedSession: true` and `lightContext: true` to avoid sending full conversation history (~100K tokens down to ~2-5K per run).
 - Large lightweight main-session heartbeats are auto-isolated unless `isolatedSession: false` is explicitly configured.
+- Large cache-keeper heartbeats are also auto-isolated when cache retention is absent, unknown, or too short to keep the cache warm for the heartbeat interval (for example, Anthropic's default short cache with a 30m heartbeat).
 - Set a cheaper `model` (e.g. `ollama/llama3.2:1b`).
 - Keep `HEARTBEAT.md` small.
 - Use `target: "none"` if you only want internal state updates.

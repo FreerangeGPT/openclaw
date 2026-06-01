@@ -1118,6 +1118,7 @@ Periodic heartbeat runs.
 - `lightContext`: when true, heartbeat runs use lightweight bootstrap context and keep only `HEARTBEAT.md` from workspace bootstrap files. Leave false or unset for main-session cache-keeper heartbeats so they preserve the same prefix shape as normal turns.
 - `isolatedSession`: when true, each heartbeat runs in a fresh session with no prior conversation history. Same isolation pattern as cron `sessionTarget: "isolated"`. Reduces per-heartbeat token cost from ~100K to ~2-5K tokens.
 - Large lightweight main-session heartbeats are auto-isolated unless `isolatedSession: false` is explicitly configured.
+- Large cache-keeper heartbeats are auto-isolated when cache retention is absent, unknown, or too short to keep the cache warm for the heartbeat interval (for example, Anthropic's default short cache with a 30m heartbeat).
 - Per-agent: set `agents.list[].heartbeat`. When any agent defines `heartbeat`, **only those agents** run heartbeats.
 - Heartbeats run full agent turns — shorter intervals burn more tokens.
 
@@ -3292,6 +3293,13 @@ Notes:
       includePrompt: true,
       includeSystem: true,
     },
+    providerPayloadLog: {
+      enabled: false,
+      filePath: "~/.openclaw/logs/provider-payload.jsonl",
+      includeRequest: true,
+      includeResponse: true,
+      includeUsage: true,
+    },
   },
 }
 ```
@@ -3310,6 +3318,9 @@ Notes:
 - `cacheTrace.enabled`: log cache trace snapshots for embedded runs (default: `false`).
 - `cacheTrace.filePath`: output path for cache trace JSONL (default: `$OPENCLAW_STATE_DIR/logs/cache-trace.jsonl`).
 - `cacheTrace.includeMessages` / `includePrompt` / `includeSystem`: control what is included in cache trace output (all default: `true`).
+- `providerPayloadLog.enabled`: log final provider request payloads, assistant responses, and usage for embedded runs (default: `false`). This is sensitive and should only be enabled temporarily in secure environments.
+- `providerPayloadLog.filePath`: output path for provider payload JSONL (default: `$OPENCLAW_STATE_DIR/logs/provider-payload.jsonl`).
+- `providerPayloadLog.includeRequest` / `includeResponse` / `includeUsage`: control which provider-payload events are written (all default: `true`).
 
 ---
 

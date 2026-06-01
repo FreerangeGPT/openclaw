@@ -32,6 +32,8 @@ export const FIELD_HELP: Record<string, string> = {
     "OpenTelemetry export settings for traces, metrics, and logs emitted by gateway components. Use this when integrating with centralized observability backends and distributed tracing pipelines.",
   "diagnostics.cacheTrace":
     "Cache-trace logging settings for observing cache decisions and payload context in embedded runs. Enable this temporarily for debugging and disable afterward to reduce sensitive log footprint.",
+  "diagnostics.providerPayloadLog":
+    "Provider payload logging settings for recording final provider request payloads, assistant responses, and usage in embedded runs. Enable temporarily only in secure environments because prompts and responses can contain private data.",
   logging:
     "Logging behavior controls for severity, output destinations, formatting, and sensitive-data redaction. Keep levels and redaction strict enough for production while preserving useful diagnostics.",
   "logging.level":
@@ -524,6 +526,16 @@ export const FIELD_HELP: Record<string, string> = {
     "Include full message payloads in trace output (default: true).",
   "diagnostics.cacheTrace.includePrompt": "Include prompt text in trace output (default: true).",
   "diagnostics.cacheTrace.includeSystem": "Include system prompt in trace output (default: true).",
+  "diagnostics.providerPayloadLog.enabled":
+    "Enable provider payload JSONL logging for embedded agent runs (default: false).",
+  "diagnostics.providerPayloadLog.filePath":
+    "JSONL output path for provider payload logs (default: $OPENCLAW_STATE_DIR/logs/provider-payload.jsonl).",
+  "diagnostics.providerPayloadLog.includeRequest":
+    "Include final provider request payloads in provider payload logs (default: true).",
+  "diagnostics.providerPayloadLog.includeResponse":
+    "Include final assistant response messages in provider payload logs (default: true).",
+  "diagnostics.providerPayloadLog.includeUsage":
+    "Include provider usage records in provider payload logs (default: true).",
   "tools.exec.applyPatch.enabled":
     "Enable or disable apply_patch for OpenAI and OpenAI Codex models when allowed by tool policy (default: true).",
   "tools.exec.applyPatch.workspaceOnly":
