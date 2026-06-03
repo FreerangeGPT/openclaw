@@ -4,6 +4,8 @@ import type {
   ChannelMessageActionAdapter,
   ChannelMessageActionName,
 } from "openclaw/plugin-sdk/channel-contract";
+import { parseStrictNonNegativeInteger } from "openclaw/plugin-sdk/number-runtime";
+import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { removeReactionSignal, sendReactionSignal } from "../reaction-runtime-api.js";
 import { listEnabledSignalAccounts, resolveSignalAccount } from "./accounts.js";
 import { resolveSignalReactionLevel } from "./reaction-level.js";
@@ -20,7 +22,7 @@ function normalizeSignalReactionRecipient(raw: string): string {
   if (!withoutSignal) {
     return withoutSignal;
   }
-  if (withoutSignal.toLowerCase().startsWith("uuid:")) {
+  if (normalizeLowercaseStringOrEmpty(withoutSignal).startsWith("uuid:")) {
     return withoutSignal.slice("uuid:".length).trim();
   }
   return withoutSignal;
@@ -35,7 +37,7 @@ function resolveSignalReactionTarget(raw: string): { recipient?: string; groupId
   if (!withoutSignal) {
     return {};
   }
-  if (withoutSignal.toLowerCase().startsWith(GROUP_PREFIX)) {
+  if (normalizeLowercaseStringOrEmpty(withoutSignal).startsWith(GROUP_PREFIX)) {
     const groupId = withoutSignal.slice(GROUP_PREFIX.length).trim();
     return groupId ? { groupId } : {};
   }
@@ -145,8 +147,8 @@ export const signalMessageActions: ChannelMessageActionAdapter = {
       const emoji = readStringParam(params, "emoji", { allowEmpty: true });
       const remove = typeof params.remove === "boolean" ? params.remove : undefined;
 
-      const timestamp = parseInt(messageId, 10);
-      if (!Number.isFinite(timestamp)) {
+      const timestamp = parseStrictNonNegativeInteger(messageId);
+      if (timestamp === undefined) {
         throw new Error(`Invalid messageId: ${messageId}. Expected numeric timestamp.`);
       }
 

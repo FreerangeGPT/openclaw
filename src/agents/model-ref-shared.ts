@@ -1,12 +1,38 @@
+import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import {
-  normalizeGooglePreviewModelId,
-  normalizeNativeXaiModelId,
-} from "../plugin-sdk/provider-model-shared.js";
-import { normalizeProviderId } from "./provider-id.js";
+  collectManifestModelIdNormalizationPolicies,
+  normalizeBuiltInProviderModelId,
+  normalizeConfiguredProviderCatalogModelRef,
+  normalizeConfiguredProviderCatalogModelId as normalizeConfiguredProviderCatalogModelIdShared,
+  normalizeStaticProviderModelIdWithPolicies,
+} from "@openclaw/model-catalog-core/provider-model-id-normalization";
+import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
+import { normalizeProviderModelIdWithManifest } from "../plugins/manifest-model-id-normalization.js";
 
-export type StaticModelRef = {
+type StaticModelRef = {
   provider: string;
   model: string;
+};
+
+export type ProviderModelIdNormalizationOptions = {
+  allowManifestNormalization?: boolean;
+  manifestPlugins?: readonly ManifestModelIdNormalizationRecord[];
+};
+
+export type ManifestModelIdNormalizationProvider = {
+  aliases?: Record<string, string>;
+  stripPrefixes?: string[];
+  prefixWhenBare?: string;
+  prefixWhenBareAfterAliasStartsWith?: {
+    modelPrefix: string;
+    prefix: string;
+  }[];
+};
+
+export type ManifestModelIdNormalizationRecord = {
+  modelIdNormalization?: {
+    providers?: Record<string, ManifestModelIdNormalizationProvider>;
+  };
 };
 
 export function modelKey(provider: string, model: string): string {
@@ -18,65 +44,61 @@ export function modelKey(provider: string, model: string): string {
   if (!modelId) {
     return providerId;
   }
-  return modelId.toLowerCase().startsWith(`${providerId.toLowerCase()}/`)
+  return normalizeLowercaseStringOrEmpty(modelId).startsWith(
+    `${normalizeLowercaseStringOrEmpty(providerId)}/`,
+  )
     ? modelId
     : `${providerId}/${modelId}`;
 }
 
-export function normalizeAnthropicModelId(model: string): string {
-  const trimmed = model.trim();
-  if (!trimmed) {
-    return trimmed;
+export function normalizeStaticProviderModelId(
+  provider: string,
+  model: string,
+  options: ProviderModelIdNormalizationOptions = {},
+): string {
+  const normalizedProvider = normalizeProviderId(provider);
+  if (options.allowManifestNormalization === false) {
+    return normalizeBuiltInProviderModelId(normalizedProvider, model);
   }
-  switch (trimmed.toLowerCase()) {
-    case "opus-4.6":
-      return "claude-opus-4-6";
-    case "opus-4.5":
-      return "claude-opus-4-5";
-    case "sonnet-4.6":
-      return "claude-sonnet-4-6";
-    case "sonnet-4.5":
-      return "claude-sonnet-4-5";
-    default:
-      return trimmed;
+  if (options.manifestPlugins) {
+    return normalizeStaticProviderModelIdWithPolicies(
+      normalizedProvider,
+      model,
+      collectManifestModelIdNormalizationPolicies(options.manifestPlugins),
+    );
   }
+  const manifestModelId =
+    normalizeProviderModelIdWithManifest({
+      provider: normalizedProvider,
+      context: {
+        provider: normalizedProvider,
+        modelId: model,
+      },
+    }) ?? model;
+  return normalizeBuiltInProviderModelId(normalizedProvider, manifestModelId);
 }
 
-function normalizeHuggingfaceModelId(model: string): string {
-  const trimmed = model.trim();
-  if (!trimmed) {
-    return trimmed;
+export function normalizeConfiguredProviderCatalogModelId(
+  provider: string,
+  model: string,
+  options: ProviderModelIdNormalizationOptions = {},
+): string {
+  if (options.allowManifestNormalization === false) {
+    return normalizeConfiguredProviderCatalogModelIdShared(provider, model, new Map());
   }
-  const prefix = "huggingface/";
-  return trimmed.toLowerCase().startsWith(prefix) ? trimmed.slice(prefix.length) : trimmed;
+  if (options.manifestPlugins) {
+    return normalizeConfiguredProviderCatalogModelIdShared(
+      provider,
+      model,
+      collectManifestModelIdNormalizationPolicies(options.manifestPlugins),
+    );
+  }
+  return normalizeConfiguredProviderCatalogModelRef(
+    normalizeStaticProviderModelId(provider, model, options),
+  );
 }
 
-export function normalizeStaticProviderModelId(provider: string, model: string): string {
-  if (provider === "anthropic") {
-    return normalizeAnthropicModelId(model);
-  }
-  if (provider === "huggingface") {
-    return normalizeHuggingfaceModelId(model);
-  }
-  if (provider === "google" || provider === "google-vertex") {
-    return normalizeGooglePreviewModelId(model);
-  }
-  if (provider === "openrouter" && !model.includes("/")) {
-    return `openrouter/${model}`;
-  }
-  if (provider === "xai") {
-    return normalizeNativeXaiModelId(model);
-  }
-  if (provider === "vercel-ai-gateway" && !model.includes("/")) {
-    const normalizedAnthropicModel = normalizeAnthropicModelId(model);
-    if (normalizedAnthropicModel.startsWith("claude-")) {
-      return `anthropic/${normalizedAnthropicModel}`;
-    }
-  }
-  return model;
-}
-
-export function parseStaticModelRef(raw: string, defaultProvider: string): StaticModelRef | null {
+function parseStaticModelRef(raw: string, defaultProvider: string): StaticModelRef | null {
   const trimmed = raw.trim();
   if (!trimmed) {
     return null;
@@ -103,4 +125,18 @@ export function resolveStaticAllowlistModelKey(
     return null;
   }
   return modelKey(parsed.provider, parsed.model);
+}
+
+export function formatLiteralProviderPrefixedModelRef(provider: string, modelRef: string): string {
+  const providerId = normalizeProviderId(provider);
+  const trimmedRef = modelRef.trim();
+  if (!providerId || !trimmedRef) {
+    return trimmedRef;
+  }
+  const normalizedRef = normalizeLowercaseStringOrEmpty(trimmedRef);
+  const literalPrefix = `${providerId}/${providerId}/`;
+  if (normalizedRef.startsWith(literalPrefix)) {
+    return trimmedRef;
+  }
+  return normalizedRef.startsWith(`${providerId}/`) ? `${providerId}/${trimmedRef}` : trimmedRef;
 }

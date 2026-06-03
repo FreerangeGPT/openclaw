@@ -1,22 +1,21 @@
-import { Type } from "@sinclair/typebox";
 import {
   createUnionActionGate,
   listTokenSourcedAccounts,
   resolveReactionMessageId,
 } from "openclaw/plugin-sdk/channel-actions";
-import { createMessageToolButtonsSchema } from "openclaw/plugin-sdk/channel-actions";
 import type {
   ChannelMessageActionAdapter,
   ChannelMessageActionName,
   ChannelMessageToolDiscovery,
   ChannelMessageToolSchemaContribution,
 } from "openclaw/plugin-sdk/channel-contract";
-import type { TelegramActionConfig } from "openclaw/plugin-sdk/config-runtime";
+import type { TelegramActionConfig } from "openclaw/plugin-sdk/config-contracts";
+import { readStringValue } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { extractToolSend } from "openclaw/plugin-sdk/tool-send";
+import { inspectTelegramAccount } from "./account-inspect.js";
 import {
   createTelegramActionGate,
-  listEnabledTelegramAccounts,
-  resolveTelegramAccount,
+  listTelegramAccountIds,
   resolveTelegramPollActionGateState,
 } from "./accounts.js";
 import { isTelegramInlineButtonsEnabled } from "./inline-buttons.js";
@@ -54,8 +53,11 @@ function resolveTelegramMessageActionName(action: ChannelMessageActionName) {
   return TELEGRAM_MESSAGE_ACTION_MAP[action as keyof typeof TELEGRAM_MESSAGE_ACTION_MAP];
 }
 
-function resolveTelegramActionDiscovery(cfg: Parameters<typeof listEnabledTelegramAccounts>[0]) {
-  const accounts = listTokenSourcedAccounts(listEnabledTelegramAccounts(cfg));
+function resolveTelegramActionDiscovery(cfg: Parameters<typeof listTelegramAccountIds>[0]) {
+  const inspected = listTelegramAccountIds(cfg)
+    .map((accountId) => inspectTelegramAccount({ cfg, accountId }))
+    .filter((account) => account.enabled && account.configured);
+  const accounts = listTokenSourcedAccounts(inspected);
   if (accounts.length === 0) {
     return null;
   }
@@ -84,14 +86,14 @@ function resolveTelegramActionDiscovery(cfg: Parameters<typeof listEnabledTelegr
 }
 
 function resolveScopedTelegramActionDiscovery(params: {
-  cfg: Parameters<typeof listEnabledTelegramAccounts>[0];
+  cfg: Parameters<typeof listTelegramAccountIds>[0];
   accountId?: string | null;
 }) {
   if (!params.accountId) {
     return resolveTelegramActionDiscovery(params.cfg);
   }
-  const account = resolveTelegramAccount({ cfg: params.cfg, accountId: params.accountId });
-  if (!account.enabled || account.tokenSource === "none") {
+  const account = inspectTelegramAccount({ cfg: params.cfg, accountId: params.accountId });
+  if (!account.enabled || !account.configured || account.tokenSource === "none") {
     return null;
   }
   const gate = createTelegramActionGate({
@@ -146,13 +148,6 @@ function describeTelegramMessageTool({
     actions.add("topic-edit");
   }
   const schema: ChannelMessageToolSchemaContribution[] = [];
-  if (discovery.buttonsEnabled) {
-    schema.push({
-      properties: {
-        buttons: createMessageToolButtonsSchema(),
-      },
-    });
-  }
   if (discovery.pollEnabled) {
     schema.push({
       properties: createTelegramPollExtraToolSchemas(),
@@ -161,13 +156,14 @@ function describeTelegramMessageTool({
   }
   return {
     actions: Array.from(actions),
-    capabilities: discovery.buttonsEnabled ? ["interactive", "buttons"] : [],
+    capabilities: discovery.buttonsEnabled ? ["presentation", "delivery-pin"] : ["delivery-pin"],
     schema,
   };
 }
 
 export const telegramMessageActions: ChannelMessageActionAdapter = {
   describeMessageTool: describeTelegramMessageTool,
+  resolveExecutionMode: () => "gateway",
   resolveCliActionRequest: ({ action, args }) => {
     if (action !== "thread-create") {
       return { action, args };
@@ -177,14 +173,25 @@ export const telegramMessageActions: ChannelMessageActionAdapter = {
       action: "topic-create",
       args: {
         ...rest,
-        name: typeof threadName === "string" ? threadName : undefined,
+        name: readStringValue(threadName),
       },
     };
   },
   extractToolSend: ({ args }) => {
     return extractToolSend(args, "sendMessage");
   },
-  handleAction: async ({ action, params, cfg, accountId, mediaLocalRoots, toolContext }) => {
+  handleAction: async ({
+    action,
+    params,
+    cfg,
+    accountId,
+    mediaLocalRoots,
+    mediaReadFile,
+    sessionKey,
+    inboundEventKind,
+    toolContext,
+    gatewayClientScopes,
+  }) => {
     const telegramAction = resolveTelegramMessageActionName(action);
     if (!telegramAction) {
       throw new Error(`Unsupported Telegram action: ${action}`);
@@ -201,7 +208,7 @@ export const telegramMessageActions: ChannelMessageActionAdapter = {
           : {}),
       },
       cfg,
-      { mediaLocalRoots },
+      { mediaLocalRoots, mediaReadFile, sessionKey, inboundEventKind, gatewayClientScopes },
     );
   },
 };

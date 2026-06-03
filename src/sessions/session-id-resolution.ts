@@ -1,3 +1,4 @@
+import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import type { SessionEntry } from "../config/sessions.js";
 import { toAgentRequestSessionKey } from "../routing/session-key.js";
 
@@ -16,10 +17,6 @@ export type SessionIdMatchSelection =
   | { kind: "ambiguous"; sessionKeys: string[] }
   | { kind: "selected"; sessionKey: string };
 
-function normalizeLookupKey(value: string): string {
-  return value.trim().toLowerCase();
-}
-
 function compareNormalizedUpdatedAtDescending(
   a: NormalizedSessionIdMatch,
   b: NormalizedSessionIdMatch,
@@ -36,8 +33,8 @@ function normalizeSessionIdMatches(
   normalizedSessionId: string,
 ): NormalizedSessionIdMatch[] {
   return matches.map(([sessionKey, entry]) => {
-    const normalizedSessionKey = normalizeLookupKey(sessionKey);
-    const normalizedRequestKey = normalizeLookupKey(
+    const normalizedSessionKey = normalizeLowercaseStringOrEmpty(sessionKey);
+    const normalizedRequestKey = normalizeLowercaseStringOrEmpty(
       toAgentRequestSessionKey(sessionKey) ?? sessionKey,
     );
     return {
@@ -105,7 +102,7 @@ export function resolveSessionIdMatchSelection(
   }
 
   const canonicalMatches = collapseAliasMatches(
-    normalizeSessionIdMatches(matches, normalizeLookupKey(sessionId)),
+    normalizeSessionIdMatches(matches, normalizeLowercaseStringOrEmpty(sessionId)),
   );
   if (canonicalMatches.length === 1) {
     return { kind: "selected", sessionKey: canonicalMatches[0].sessionKey };

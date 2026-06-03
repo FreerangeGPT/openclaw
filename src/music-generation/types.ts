@@ -1,5 +1,6 @@
-import type { AuthProfileStore } from "../agents/auth-profiles.js";
-import type { OpenClawConfig } from "../config/config.js";
+import type { MediaNormalizationEntry } from "../../packages/media-generation-core/src/normalization.js";
+import type { AuthProfileStore } from "../agents/auth-profiles/types.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 
 export type MusicGenerationOutputFormat = "mp3" | "wav";
 
@@ -18,7 +19,7 @@ export type MusicGenerationSourceImage = {
   metadata?: Record<string, unknown>;
 };
 
-export type MusicGenerationProviderConfiguredContext = {
+type MusicGenerationProviderConfiguredContext = {
   cfg?: OpenClawConfig;
   agentDir?: string;
 };
@@ -50,16 +51,34 @@ export type MusicGenerationIgnoredOverride = {
   value: string | boolean | number;
 };
 
-export type MusicGenerationProviderCapabilities = {
+export type MusicGenerationMode = "generate" | "edit";
+
+export type MusicGenerationModeCapabilities = {
   maxTracks?: number;
-  maxInputImages?: number;
   maxDurationSeconds?: number;
   supportsLyrics?: boolean;
+  supportsLyricsByModel?: Readonly<Record<string, boolean>>;
   supportsInstrumental?: boolean;
+  supportsInstrumentalByModel?: Readonly<Record<string, boolean>>;
   supportsDuration?: boolean;
   supportsFormat?: boolean;
   supportedFormats?: readonly MusicGenerationOutputFormat[];
   supportedFormatsByModel?: Readonly<Record<string, readonly MusicGenerationOutputFormat[]>>;
+};
+
+export type MusicGenerationEditCapabilities = MusicGenerationModeCapabilities & {
+  enabled: boolean;
+  maxInputImages?: number;
+};
+
+export type MusicGenerationProviderCapabilities = MusicGenerationModeCapabilities & {
+  maxInputImages?: number;
+  generate?: MusicGenerationModeCapabilities;
+  edit?: MusicGenerationEditCapabilities;
+};
+
+export type MusicGenerationNormalization = {
+  durationSeconds?: MediaNormalizationEntry<number>;
 };
 
 export type MusicGenerationProvider = {

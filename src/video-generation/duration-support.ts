@@ -1,3 +1,5 @@
+import { uniqueValues } from "@openclaw/normalization-core/string-normalization";
+import { resolveVideoGenerationModeCapabilities } from "./capabilities.js";
 import type { VideoGenerationProvider } from "./types.js";
 
 function normalizeSupportedDurationValues(
@@ -6,7 +8,7 @@ function normalizeSupportedDurationValues(
   if (!Array.isArray(values) || values.length === 0) {
     return undefined;
   }
-  const normalized = [...new Set(values)]
+  const normalized = uniqueValues(values)
     .filter((value) => Number.isFinite(value) && value > 0)
     .map((value) => Math.round(value))
     .filter((value) => value > 0)
@@ -17,8 +19,15 @@ function normalizeSupportedDurationValues(
 export function resolveVideoGenerationSupportedDurations(params: {
   provider?: VideoGenerationProvider;
   model?: string;
+  inputImageCount?: number;
+  inputVideoCount?: number;
 }): number[] | undefined {
-  const caps = params.provider?.capabilities;
+  const { capabilities: caps } = resolveVideoGenerationModeCapabilities({
+    provider: params.provider,
+    model: params.model,
+    inputImageCount: params.inputImageCount,
+    inputVideoCount: params.inputVideoCount,
+  });
   const model = params.model?.trim();
   const modelSpecific =
     model && caps?.supportedDurationSecondsByModel
@@ -31,6 +40,8 @@ export function normalizeVideoGenerationDuration(params: {
   provider?: VideoGenerationProvider;
   model?: string;
   durationSeconds?: number;
+  inputImageCount?: number;
+  inputVideoCount?: number;
 }): number | undefined {
   if (typeof params.durationSeconds !== "number" || !Number.isFinite(params.durationSeconds)) {
     return undefined;

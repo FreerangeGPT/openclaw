@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import path from "node:path";
+import { formatErrorMessage } from "../src/infra/errors.ts";
 import { analyzeTopology } from "./lib/ts-topology/analyze.js";
 import { renderTextReport } from "./lib/ts-topology/reports.js";
 import {
@@ -7,6 +8,7 @@ import {
   createPluginSdkScope,
 } from "./lib/ts-topology/scope.js";
 import type { TopologyReportName, TopologyScope } from "./lib/ts-topology/types.js";
+import { parsePositiveInt } from "./lib/numeric-options.mjs";
 
 const VALID_REPORTS = new Set<TopologyReportName>([
   "public-surface-usage",
@@ -85,7 +87,7 @@ function parseArgs(argv: string[]): CliOptions {
         options.report = (value as TopologyReportName | undefined) ?? options.report;
         break;
       case "--limit":
-        options.limit = Math.max(1, Number.parseInt(value ?? "25", 10));
+        options.limit = parsePositiveInt(value, "--limit");
         break;
       case "--repo-root":
         options.repoRoot = path.resolve(value ?? options.repoRoot);
@@ -136,7 +138,7 @@ export async function main(argv: string[], io: IoLike = process): Promise<number
   try {
     options = parseArgs(argv);
   } catch (error) {
-    io.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    io.stderr.write(`${formatErrorMessage(error)}\n`);
     return 1;
   }
 
@@ -158,7 +160,7 @@ export async function main(argv: string[], io: IoLike = process): Promise<number
     io.stdout.write(`${renderTextReport(envelope, options.limit)}\n`);
     return 0;
   } catch (error) {
-    io.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    io.stderr.write(`${formatErrorMessage(error)}\n`);
     return 1;
   }
 }

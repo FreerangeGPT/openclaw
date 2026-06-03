@@ -1,8 +1,12 @@
 import { Command } from "commander";
-import type { OpenClawConfig } from "../../config/config.js";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { getPluginCliCommandDescriptors } from "../../plugins/cli.js";
 import type { PluginLoadOptions } from "../../plugins/loader.js";
 import { VERSION } from "../../version.js";
+import {
+  addCommandDescriptorsToProgram,
+  collectUniqueCommandDescriptors,
+} from "./command-descriptor-utils.js";
 import { getCoreCliCommandDescriptors } from "./core-command-descriptors.js";
 import { configureProgramHelp } from "./help.js";
 import { getSubCliEntries } from "./subcli-descriptors.js";
@@ -10,40 +14,42 @@ import { getSubCliEntries } from "./subcli-descriptors.js";
 export type RootHelpRenderOptions = Pick<PluginLoadOptions, "pluginSdkResolution"> & {
   config?: OpenClawConfig;
   env?: NodeJS.ProcessEnv;
+  includePluginDescriptors?: boolean;
 };
 
 async function buildRootHelpProgram(renderOptions?: RootHelpRenderOptions): Promise<Command> {
   const program = new Command();
-  configureProgramHelp(program, {
-    programVersion: VERSION,
-    channelOptions: [],
-    messageChannelOptions: "",
-    agentChannelOptions: "",
-  });
+  const pluginDescriptors =
+    renderOptions?.includePluginDescriptors === true || renderOptions?.config
+      ? await getPluginCliCommandDescriptors(renderOptions.config, renderOptions.env, {
+          pluginSdkResolution: renderOptions.pluginSdkResolution,
+        })
+      : [];
+  configureProgramHelp(
+    program,
+    {
+      programVersion: VERSION,
+      channelOptions: [],
+      messageChannelOptions: "",
+      agentChannelOptions: "",
+    },
+    {
+      commandsWithSubcommands: new Set(
+        pluginDescriptors
+          .filter((descriptor) => descriptor.hasSubcommands)
+          .map((descriptor) => descriptor.name),
+      ),
+    },
+  );
 
-  const existingCommands = new Set<string>();
-  for (const command of getCoreCliCommandDescriptors()) {
-    program.command(command.name).description(command.description);
-    existingCommands.add(command.name);
-  }
-  for (const command of getSubCliEntries()) {
-    if (existingCommands.has(command.name)) {
-      continue;
-    }
-    program.command(command.name).description(command.description);
-    existingCommands.add(command.name);
-  }
-  for (const command of await getPluginCliCommandDescriptors(
-    renderOptions?.config,
-    renderOptions?.env,
-    { pluginSdkResolution: renderOptions?.pluginSdkResolution },
-  )) {
-    if (existingCommands.has(command.name)) {
-      continue;
-    }
-    program.command(command.name).description(command.description);
-    existingCommands.add(command.name);
-  }
+  addCommandDescriptorsToProgram(
+    program,
+    collectUniqueCommandDescriptors([
+      getCoreCliCommandDescriptors(),
+      getSubCliEntries(),
+      pluginDescriptors,
+    ]),
+  );
 
   return program;
 }

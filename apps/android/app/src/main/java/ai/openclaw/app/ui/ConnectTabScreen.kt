@@ -1,7 +1,10 @@
 package ai.openclaw.app.ui
 
-import androidx.compose.foundation.BorderStroke
+import ai.openclaw.app.MainViewModel
+import ai.openclaw.app.gateway.GatewayEndpoint
+import ai.openclaw.app.ui.mobileCardSurface
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -47,20 +50,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import ai.openclaw.app.MainViewModel
-import ai.openclaw.app.gateway.GatewayEndpoint
-import ai.openclaw.app.ui.mobileCardSurface
 
 private enum class ConnectInputMode {
   SetupCode,
   Manual,
 }
 
+/** Gateway connection screen for setup-code and manual endpoint pairing. */
 @Composable
 fun ConnectTabScreen(viewModel: MainViewModel) {
   val context = LocalContext.current
@@ -100,8 +101,14 @@ fun ConnectTabScreen(viewModel: MainViewModel) {
       containerColor = mobileCardSurface,
       title = { Text("Trust this gateway?", style = mobileHeadline, color = mobileText) },
       text = {
+        val message =
+          if (prompt.previousFingerprintSha256.isNullOrBlank()) {
+            "First-time TLS connection.\n\nVerify this SHA-256 fingerprint before trusting:\n${prompt.fingerprintSha256}"
+          } else {
+            "The gateway TLS certificate changed. Only continue if you expected this.\n\nOld SHA-256 fingerprint:\n${prompt.previousFingerprintSha256}\n\nNew SHA-256 fingerprint:\n${prompt.fingerprintSha256}"
+          }
         Text(
-          "First-time TLS connection.\n\nVerify this SHA-256 fingerprint before trusting:\n${prompt.fingerprintSha256}",
+          message,
           style = mobileCallout,
           color = mobileText,
         )
@@ -126,9 +133,10 @@ fun ConnectTabScreen(viewModel: MainViewModel) {
   }
 
   val setupResolvedEndpoint = remember(setupCode) { decodeGatewaySetupCode(setupCode)?.url?.let { parseGatewayEndpoint(it)?.displayUrl } }
-  val manualResolvedEndpoint = remember(manualHostInput, manualPortInput, manualTlsInput) {
-    composeGatewayManualUrl(manualHostInput, manualPortInput, manualTlsInput)?.let { parseGatewayEndpoint(it)?.displayUrl }
-  }
+  val manualResolvedEndpoint =
+    remember(manualHostInput, manualPortInput, manualTlsInput) {
+      composeGatewayManualUrl(manualHostInput, manualPortInput, manualTlsInput)?.let { parseGatewayEndpoint(it)?.displayUrl }
+    }
 
   val activeEndpoint =
     remember(isConnected, remoteAddress, setupResolvedEndpoint, manualResolvedEndpoint, inputMode) {
@@ -140,7 +148,12 @@ fun ConnectTabScreen(viewModel: MainViewModel) {
     }
 
   val showDiagnostics = !isConnected && gatewayStatusHasDiagnostics(statusText)
+  val pairingRequired = !isConnected && gatewayStatusLooksLikePairing(statusText)
   val statusLabel = gatewayStatusForDisplay(statusText)
+
+  PairingAutoRetryEffect(enabled = pairingRequired) {
+    viewModel.refreshGatewayConnection()
+  }
 
   Column(
     modifier = Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 16.dp),
@@ -278,6 +291,11 @@ fun ConnectTabScreen(viewModel: MainViewModel) {
           }
 
           validationText = null
+          if (inputMode == ConnectInputMode.SetupCode) {
+            // Setup-code auth should replace old bootstrap/shared credentials;
+            // manual reconnects keep existing typed credentials.
+            viewModel.resetGatewaySetupAuth()
+          }
           viewModel.setManualEnabled(true)
           viewModel.setManualHost(config.host)
           viewModel.setManualPort(config.port)
@@ -319,8 +337,17 @@ fun ConnectTabScreen(viewModel: MainViewModel) {
           modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 14.dp),
           verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-          Text("Last gateway error", style = mobileHeadline, color = mobileWarning)
+          Text(if (pairingRequired) "Pairing required" else "Last gateway error", style = mobileHeadline, color = mobileWarning)
           Text(statusLabel, style = mobileBody.copy(fontFamily = FontFamily.Monospace), color = mobileText)
+          if (pairingRequired) {
+            Text(
+              "Approve this phone on the gateway. OpenClaw retries automatically while this screen stays open.",
+              style = mobileCallout,
+              color = mobileTextSecondary,
+            )
+            CommandBlock("openclaw devices list")
+            CommandBlock("openclaw devices approve <requestId>")
+          }
           Text("OpenClaw Android ${openClawAndroidVersionLabel()}", style = mobileCaption1, color = mobileTextSecondary)
           Button(
             onClick = {
@@ -464,14 +491,18 @@ fun ConnectTabScreen(viewModel: MainViewModel) {
               colors = outlinedColors(),
             )
 
-            Text("Port", style = mobileCaption1.copy(fontWeight = FontWeight.SemiBold), color = mobileTextSecondary)
+            Text(
+              if (manualTlsInput) "Port (optional, defaults to 443)" else "Port",
+              style = mobileCaption1.copy(fontWeight = FontWeight.SemiBold),
+              color = mobileTextSecondary,
+            )
             OutlinedTextField(
               value = manualPortInput,
               onValueChange = {
                 manualPortInput = it
                 validationText = null
               },
-              placeholder = { Text("18789", style = mobileBody, color = mobileTextTertiary) },
+              placeholder = { Text(if (manualTlsInput) "443" else "18789", style = mobileBody, color = mobileTextTertiary) },
               modifier = Modifier.fillMaxWidth(),
               singleLine = true,
               keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -522,7 +553,11 @@ fun ConnectTabScreen(viewModel: MainViewModel) {
               colors = outlinedColors(),
             )
 
-            Text("Password (optional)", style = mobileCaption1.copy(fontWeight = FontWeight.SemiBold), color = mobileTextSecondary)
+            Text(
+              "Password (optional)",
+              style = mobileCaption1.copy(fontWeight = FontWeight.SemiBold),
+              color = mobileTextSecondary,
+            )
             OutlinedTextField(
               value = passwordInput,
               onValueChange = { passwordInput = it },
@@ -556,7 +591,11 @@ fun ConnectTabScreen(viewModel: MainViewModel) {
 }
 
 @Composable
-private fun MethodChip(label: String, active: Boolean, onClick: () -> Unit) {
+private fun MethodChip(
+  label: String,
+  active: Boolean,
+  onClick: () -> Unit,
+) {
   Button(
     onClick = onClick,
     modifier = Modifier.height(40.dp),
@@ -574,7 +613,10 @@ private fun MethodChip(label: String, active: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun QuickFillChip(label: String, onClick: () -> Unit) {
+private fun QuickFillChip(
+  label: String,
+  onClick: () -> Unit,
+) {
   Button(
     onClick = onClick,
     shape = RoundedCornerShape(999.dp),

@@ -1,33 +1,28 @@
-import type { OpenClawConfig } from "../../config/config.js";
-import {
-  isCommandEnabled,
-  maybeResolveTextAlias,
-  shouldHandleTextCommands,
-} from "../commands-registry.js";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { hasControlCommand } from "../command-detection.js";
+import { isCommandEnabled } from "../commands-registry-list.js";
+import { maybeResolveTextAlias } from "../commands-registry-normalize.js";
+import { shouldHandleTextCommands } from "../commands-text-routing.js";
 import type { FinalizedMsgContext } from "../templating.js";
+import { resolveCommandContextText } from "./context-text.js";
 
-function resolveFirstContextText(
-  ctx: FinalizedMsgContext,
-  keys: Array<"BodyForAgent" | "BodyForCommands" | "CommandBody" | "RawBody" | "Body">,
-): string {
-  for (const key of keys) {
-    const value = ctx[key];
-    if (typeof value === "string") {
-      return value;
-    }
-  }
-  return "";
+function isResetCommandCandidate(text: string): boolean {
+  return /^\/(?:new|reset)(?:\s|$)/i.test(text);
 }
 
-function resolveCommandCandidateText(ctx: FinalizedMsgContext): string {
-  return resolveFirstContextText(ctx, ["CommandBody", "BodyForCommands", "RawBody", "Body"]).trim();
+function isAcpCommandCandidate(text: string): boolean {
+  return /^\/acp(?:\s|$)/i.test(text);
+}
+
+function isLocalCommandCandidate(text: string, cfg: OpenClawConfig): boolean {
+  return hasControlCommand(text, cfg);
 }
 
 export function shouldBypassAcpDispatchForCommand(
   ctx: FinalizedMsgContext,
   cfg: OpenClawConfig,
 ): boolean {
-  const candidate = resolveCommandCandidateText(ctx);
+  const candidate = resolveCommandContextText(ctx);
   if (!candidate) {
     return false;
   }
@@ -38,6 +33,18 @@ export function shouldBypassAcpDispatchForCommand(
     commandSource: ctx.CommandSource,
   });
   if (!normalized.startsWith("/") && maybeResolveTextAlias(candidate, cfg) != null) {
+    return allowTextCommands;
+  }
+
+  if (isResetCommandCandidate(normalized)) {
+    return true;
+  }
+
+  if (isAcpCommandCandidate(normalized)) {
+    return true;
+  }
+
+  if (isLocalCommandCandidate(normalized, cfg)) {
     return allowTextCommands;
   }
 

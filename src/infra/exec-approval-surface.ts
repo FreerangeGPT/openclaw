@@ -1,10 +1,10 @@
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import {
   getChannelPlugin,
   listChannelPlugins,
-  resolveChannelApprovalAdapter,
   resolveChannelApprovalCapability,
 } from "../channels/plugins/index.js";
-import { loadConfig, type OpenClawConfig } from "../config/config.js";
+import { getRuntimeConfig, type OpenClawConfig } from "../config/config.js";
 import {
   INTERNAL_MESSAGE_CHANNEL,
   isDeliverableMessageChannel,
@@ -15,6 +15,8 @@ export type ExecApprovalInitiatingSurfaceState =
   | { kind: "enabled"; channel: string | undefined; channelLabel: string; accountId?: string }
   | { kind: "disabled"; channel: string; channelLabel: string; accountId?: string }
   | { kind: "unsupported"; channel: string; channelLabel: string; accountId?: string };
+
+type ApprovalKind = "exec" | "plugin";
 
 function labelForChannel(channel?: string): string {
   if (channel === "tui") {
@@ -31,7 +33,10 @@ function labelForChannel(channel?: string): string {
 
 function hasNativeExecApprovalCapability(channel?: string): boolean {
   const capability = resolveChannelApprovalCapability(getChannelPlugin(channel ?? ""));
-  return Boolean(capability?.native && capability.getActionAvailabilityState);
+  if (!capability?.native) {
+    return false;
+  }
+  return Boolean(capability.getExecInitiatingSurfaceState || capability.getActionAvailabilityState);
 }
 
 export function resolveExecApprovalInitiatingSurfaceState(params: {
@@ -39,21 +44,38 @@ export function resolveExecApprovalInitiatingSurfaceState(params: {
   accountId?: string | null;
   cfg?: OpenClawConfig;
 }): ExecApprovalInitiatingSurfaceState {
+  return resolveApprovalInitiatingSurfaceState({ ...params, approvalKind: "exec" });
+}
+
+export function resolveApprovalInitiatingSurfaceState(params: {
+  channel?: string | null;
+  accountId?: string | null;
+  cfg?: OpenClawConfig;
+  approvalKind: ApprovalKind;
+}): ExecApprovalInitiatingSurfaceState {
   const channel = normalizeMessageChannel(params.channel);
   const channelLabel = labelForChannel(channel);
-  const accountId = params.accountId?.trim() || undefined;
+  const accountId = normalizeOptionalString(params.accountId);
   if (!channel || channel === INTERNAL_MESSAGE_CHANNEL || channel === "tui") {
     return { kind: "enabled", channel, channelLabel, accountId };
   }
 
-  const cfg = params.cfg ?? loadConfig();
-  const state = resolveChannelApprovalCapability(
-    getChannelPlugin(channel),
-  )?.getActionAvailabilityState?.({
-    cfg,
-    accountId: params.accountId,
-    action: "approve",
-  });
+  const cfg = params.cfg ?? getRuntimeConfig();
+  const capability = resolveChannelApprovalCapability(getChannelPlugin(channel));
+  const state =
+    (params.approvalKind === "exec"
+      ? capability?.getExecInitiatingSurfaceState?.({
+          cfg,
+          accountId: params.accountId,
+          action: "approve",
+        })
+      : undefined) ??
+    capability?.getActionAvailabilityState?.({
+      cfg,
+      accountId: params.accountId,
+      action: "approve",
+      approvalKind: params.approvalKind,
+    });
   if (state) {
     return { ...state, channel, channelLabel, accountId };
   }
@@ -78,7 +100,7 @@ export function listNativeExecApprovalClientLabels(params?: {
   return listChannelPlugins()
     .filter((plugin) => plugin.id !== excludeChannel)
     .filter((plugin) => hasNativeExecApprovalCapability(plugin.id))
-    .map((plugin) => plugin.meta.label?.trim())
+    .map((plugin) => normalizeOptionalString(plugin.meta.label))
     .filter((label): label is string => Boolean(label))
     .toSorted((a, b) => a.localeCompare(b));
 }
@@ -92,20 +114,13 @@ export function describeNativeExecApprovalClientSetup(params: {
   if (!channel || channel === INTERNAL_MESSAGE_CHANNEL || channel === "tui") {
     return null;
   }
-  const channelLabel = params.channelLabel?.trim() || labelForChannel(channel);
-  const accountId = params.accountId?.trim() || undefined;
+  const channelLabel = normalizeOptionalString(params.channelLabel) ?? labelForChannel(channel);
+  const accountId = normalizeOptionalString(params.accountId);
   return (
     resolveChannelApprovalCapability(getChannelPlugin(channel))?.describeExecApprovalSetup?.({
       channel,
       channelLabel,
       accountId,
     }) ?? null
-  );
-}
-
-export function hasConfiguredExecApprovalDmRoute(cfg: OpenClawConfig): boolean {
-  return listChannelPlugins().some(
-    (plugin) =>
-      resolveChannelApprovalAdapter(plugin)?.delivery?.hasConfiguredDmRoute?.({ cfg }) ?? false,
   );
 }

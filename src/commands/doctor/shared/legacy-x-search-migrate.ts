@@ -1,12 +1,10 @@
+import { isRecord } from "./legacy-config-record-shared.js";
+
 type JsonRecord = Record<string, unknown>;
 
 const XAI_PLUGIN_ID = "xai";
 const X_SEARCH_LEGACY_PATH = "tools.web.x_search";
 const XAI_WEB_SEARCH_PLUGIN_KEY_PATH = `plugins.entries.${XAI_PLUGIN_ID}.config.webSearch.apiKey`;
-
-function isRecord(value: unknown): value is JsonRecord {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function cloneRecord<T extends JsonRecord | undefined>(value: T): T {
   if (!value) {
@@ -40,7 +38,7 @@ function resolveLegacyXSearchAuth(legacy: JsonRecord): unknown {
 
 export function listLegacyXSearchConfigPaths(raw: unknown): string[] {
   const legacy = resolveLegacyXSearchConfig(raw);
-  if (!legacy || !Object.prototype.hasOwnProperty.call(legacy, "apiKey")) {
+  if (!legacy || !Object.hasOwn(legacy, "apiKey")) {
     return [];
   }
   return [`${X_SEARCH_LEGACY_PATH}.apiKey`];
@@ -51,7 +49,7 @@ export function migrateLegacyXSearchConfig<T>(raw: T): { config: T; changes: str
     return { config: raw, changes: [] };
   }
   const legacy = resolveLegacyXSearchConfig(raw);
-  if (!legacy || !Object.prototype.hasOwnProperty.call(legacy, "apiKey")) {
+  if (!legacy || !Object.hasOwn(legacy, "apiKey")) {
     return { config: raw, changes: [] };
   }
 
@@ -84,7 +82,7 @@ export function migrateLegacyXSearchConfig<T>(raw: T): { config: T; changes: str
     if (!existingWebSearch) {
       config.webSearch = { apiKey: auth };
       changes.push(`Moved ${X_SEARCH_LEGACY_PATH}.apiKey → ${XAI_WEB_SEARCH_PLUGIN_KEY_PATH}.`);
-    } else if (!Object.prototype.hasOwnProperty.call(existingWebSearch, "apiKey")) {
+    } else if (!Object.hasOwn(existingWebSearch, "apiKey")) {
       existingWebSearch.apiKey = auth;
       config.webSearch = existingWebSearch;
       changes.push(

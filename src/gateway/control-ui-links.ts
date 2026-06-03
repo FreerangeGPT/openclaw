@@ -10,7 +10,10 @@ export function resolveControlUiLinks(params: {
   bind?: "auto" | "lan" | "loopback" | "custom" | "tailnet";
   customBindHost?: string;
   basePath?: string;
+  tlsEnabled?: boolean;
 }): { httpUrl: string; wsUrl: string } {
+  // Current BYOH truth: lan, tailnet, and custom bind resolve through IPv4-only helpers.
+  // IPv6-only hosts need an IPv4 sidecar or proxy in front of the Gateway.
   const port = params.port;
   const bind = params.bind ?? "loopback";
   const customBindHost = params.customBindHost?.trim();
@@ -30,8 +33,10 @@ export function resolveControlUiLinks(params: {
   const basePath = normalizeControlUiBasePath(params.basePath);
   const uiPath = basePath ? `${basePath}/` : "/";
   const wsPath = basePath ? basePath : "";
+  const httpScheme = params.tlsEnabled === true ? "https" : "http";
+  const wsScheme = params.tlsEnabled === true ? "wss" : "ws";
   return {
-    httpUrl: `http://${host}:${port}${uiPath}`,
-    wsUrl: `ws://${host}:${port}${wsPath}`,
+    httpUrl: `${httpScheme}://${host}:${port}${uiPath}`,
+    wsUrl: `${wsScheme}://${host}:${port}${wsPath}`,
   };
 }

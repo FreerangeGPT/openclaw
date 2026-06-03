@@ -1,5 +1,10 @@
-import type { OpenClawConfig } from "../config/config.js";
-import { resolvePluginCapabilityProviders } from "./capability-provider-runtime.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
+import {
+  getRuntimeEmbeddingProviderAdapter,
+  listRuntimeEmbeddingProviderAdapters,
+  readConfiguredProviderApiId,
+  resolveRuntimeEmbeddingProviderLookupIds,
+} from "./embedding-provider-runtime-shared.js";
 import {
   getRegisteredMemoryEmbeddingProvider,
   listRegisteredMemoryEmbeddingProviders,
@@ -14,13 +19,25 @@ export function listRegisteredMemoryEmbeddingProviderAdapters(): MemoryEmbedding
 export function listMemoryEmbeddingProviders(
   cfg?: OpenClawConfig,
 ): MemoryEmbeddingProviderAdapter[] {
-  const registered = listRegisteredMemoryEmbeddingProviderAdapters();
-  if (registered.length > 0) {
-    return registered;
-  }
-  return resolvePluginCapabilityProviders({
+  return listRuntimeEmbeddingProviderAdapters({
     key: "memoryEmbeddingProviders",
     cfg,
+    registered: listRegisteredMemoryEmbeddingProviderAdapters(),
+  });
+}
+
+function resolveConfiguredMemoryEmbeddingProviderId(
+  providerId: string,
+  cfg?: OpenClawConfig,
+): string | undefined {
+  return readConfiguredProviderApiId({ providerId, cfg });
+}
+
+function resolveMemoryEmbeddingProviderLookupIds(id: string, cfg?: OpenClawConfig): string[] {
+  return resolveRuntimeEmbeddingProviderLookupIds({
+    id,
+    cfg,
+    resolveConfiguredProviderId: resolveConfiguredMemoryEmbeddingProviderId,
   });
 }
 
@@ -28,12 +45,10 @@ export function getMemoryEmbeddingProvider(
   id: string,
   cfg?: OpenClawConfig,
 ): MemoryEmbeddingProviderAdapter | undefined {
-  const registered = getRegisteredMemoryEmbeddingProvider(id);
-  if (registered) {
-    return registered.adapter;
-  }
-  if (listRegisteredMemoryEmbeddingProviders().length > 0) {
-    return undefined;
-  }
-  return listMemoryEmbeddingProviders(cfg).find((adapter) => adapter.id === id);
+  return getRuntimeEmbeddingProviderAdapter({
+    key: "memoryEmbeddingProviders",
+    cfg,
+    lookupIds: resolveMemoryEmbeddingProviderLookupIds(id, cfg),
+    getRegisteredProvider: getRegisteredMemoryEmbeddingProvider,
+  });
 }

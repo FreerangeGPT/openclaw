@@ -1,3 +1,5 @@
+import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
+import { getSystemdCgroupHygieneSummary } from "../daemon/service-runtime.js";
 import { formatDurationPrecise } from "../infra/format-time/format-duration.ts";
 import { formatRuntimeStatusWithDetails } from "../infra/runtime-status.ts";
 import type { SessionStatus } from "./status.types.js";
@@ -22,7 +24,7 @@ export const formatTokensCompact = (
   const used = sess.totalTokens;
   const ctx = sess.contextTokens;
 
-  let result = "";
+  let result;
   if (used == null) {
     result = ctx ? `unknown/${formatKTokens(ctx)} (?%)` : "unknown used";
   } else if (!ctx) {
@@ -100,6 +102,7 @@ export const formatDaemonRuntimeShort = (runtime?: {
   status?: string;
   pid?: number;
   state?: string;
+  systemd?: { killMode?: string; tasksCurrent?: number; memoryCurrent?: number };
   detail?: string;
   missingUnit?: boolean;
 }) => {
@@ -109,9 +112,14 @@ export const formatDaemonRuntimeShort = (runtime?: {
   const details: string[] = [];
   const detail = runtime.detail?.replace(/\s+/g, " ").trim() || "";
   const noisyLaunchctlDetail =
-    runtime.missingUnit === true && detail.toLowerCase().includes("could not find service");
+    runtime.missingUnit === true &&
+    normalizeLowercaseStringOrEmpty(detail).includes("could not find service");
   if (detail && !noisyLaunchctlDetail) {
     details.push(detail);
+  }
+  const cgroupSummary = getSystemdCgroupHygieneSummary(runtime.systemd);
+  if (cgroupSummary) {
+    details.push(cgroupSummary);
   }
   return formatRuntimeStatusWithDetails({
     status: runtime.status,

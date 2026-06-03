@@ -1,11 +1,10 @@
-import {
-  getChannelPlugin,
-  normalizeChannelId as normalizePluginChannelId,
-} from "../../channels/plugins/index.js";
+import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
+import { getChannelPlugin } from "../../channels/plugins/index.js";
 import type { ChannelThreadingAdapter } from "../../channels/plugins/types.core.js";
-import { normalizeChannelId as normalizeBuiltInChannelId } from "../../channels/registry.js";
-import type { OpenClawConfig } from "../../config/config.js";
+import { normalizeAnyChannelId } from "../../channels/registry.js";
 import type { ReplyToMode } from "../../config/types.js";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { copyReplyPayloadMetadata, isReplyPayloadStatusNotice } from "../reply-payload.js";
 import type { OriginatingChannelType } from "../templating.js";
 import type { ReplyPayload, ReplyThreadingPolicy } from "../types.js";
 import { isSingleUseReplyToMode } from "./reply-reference.js";
@@ -26,24 +25,12 @@ function normalizeReplyToModeChatType(
     : undefined;
 }
 
-function resolveReplyToModeChannelKey(channel?: OriginatingChannelType): string | undefined {
-  if (typeof channel !== "string") {
-    return undefined;
-  }
-  return (
-    (normalizeBuiltInChannelId(channel) ??
-      normalizePluginChannelId(channel) ??
-      channel.trim().toLowerCase()) ||
-    undefined
-  );
-}
-
 export function resolveConfiguredReplyToMode(
   cfg: OpenClawConfig,
   channel?: OriginatingChannelType,
   chatType?: string | null,
 ): ReplyToMode {
-  const provider = resolveReplyToModeChannelKey(channel);
+  const provider = normalizeAnyChannelId(channel) ?? normalizeOptionalLowercaseString(channel);
   if (!provider) {
     return "all";
   }
@@ -89,16 +76,17 @@ export function resolveReplyToMode(
   accountId?: string | null,
   chatType?: string | null,
 ): ReplyToMode {
-  const provider = normalizePluginChannelId(channel);
-  return resolveReplyToModeWithThreading(
-    cfg,
-    provider ? getChannelPlugin(provider)?.threading : undefined,
-    {
-      channel,
-      accountId,
-      chatType,
-    },
-  );
+  const normalizedAccountId = normalizeOptionalLowercaseString(accountId);
+  if (!normalizedAccountId) {
+    return resolveConfiguredReplyToMode(cfg, channel, chatType);
+  }
+  const provider = normalizeAnyChannelId(channel) ?? normalizeOptionalLowercaseString(channel);
+  const threading = provider ? getChannelPlugin(provider)?.threading : undefined;
+  return resolveReplyToModeWithThreading(cfg, threading, {
+    channel,
+    accountId: normalizedAccountId,
+    chatType,
+  });
 }
 
 export function createReplyToModeFilter(
@@ -107,38 +95,39 @@ export function createReplyToModeFilter(
 ) {
   let hasThreaded = false;
   return (payload: ReplyPayload): ReplyPayload => {
+    const isStatusNotice = isReplyPayloadStatusNotice(payload);
     if (!payload.replyToId) {
       return payload;
     }
     if (mode === "off") {
       const isExplicit = Boolean(payload.replyToTag) || Boolean(payload.replyToCurrent);
-      // Compaction notices must never be threaded when replyToMode=off — even
+      // Status notices must never be threaded when replyToMode=off — even
       // if they carry explicit reply tags (replyToCurrent).  Honouring the
       // explicit tag here would make status notices appear in-thread while
       // normal assistant replies stay off-thread, contradicting the off-mode
       // expectation.  Strip replyToId unconditionally for compaction payloads.
-      if (opts.allowExplicitReplyTagsWhenOff && isExplicit && !payload.isCompactionNotice) {
+      if (opts.allowExplicitReplyTagsWhenOff && isExplicit && !isStatusNotice) {
         return payload;
       }
-      return { ...payload, replyToId: undefined };
+      return copyReplyPayloadMetadata(payload, { ...payload, replyToId: undefined });
     }
     if (mode === "all") {
       return payload;
     }
     if (isSingleUseReplyToMode(mode) && hasThreaded) {
-      // Compaction notices are transient status messages that should always
+      // Status notices are transient messages that should always
       // appear in-thread, even after the first assistant block has already
       // consumed the "first" slot.  Let them keep their replyToId.
-      if (payload.isCompactionNotice) {
+      if (isStatusNotice) {
         return payload;
       }
-      return { ...payload, replyToId: undefined };
+      return copyReplyPayloadMetadata(payload, { ...payload, replyToId: undefined });
     }
-    // Compaction notices are transient status messages — they should be
+    // Status notices are transient messages — they should be
     // threaded (so they appear in-context), but they must not consume the
     // "first" slot of the replyToMode=first|batched filter.  Skip advancing
     // hasThreaded so the real assistant reply still gets replyToId.
-    if (isSingleUseReplyToMode(mode) && !payload.isCompactionNotice) {
+    if (isSingleUseReplyToMode(mode) && !isStatusNotice) {
       hasThreaded = true;
     }
     return payload;
@@ -175,15 +164,11 @@ export function createReplyToModeFilterForChannel(
   mode: ReplyToMode,
   channel?: OriginatingChannelType,
 ) {
-  const provider = normalizePluginChannelId(channel);
-  const normalized = typeof channel === "string" ? channel.trim().toLowerCase() : undefined;
+  const normalized = normalizeOptionalLowercaseString(channel);
   const isWebchat = normalized === "webchat";
   // Default: allow explicit reply tags/directives even when replyToMode is "off".
   // Unknown channels fail closed; internal webchat stays allowed.
-  const threading = provider ? getChannelPlugin(provider)?.threading : undefined;
-  const allowExplicitReplyTagsWhenOff = provider
-    ? (threading?.allowExplicitReplyTagsWhenOff ?? threading?.allowTagsWhenOff ?? true)
-    : isWebchat;
+  const allowExplicitReplyTagsWhenOff = normalized ? true : isWebchat;
   return createReplyToModeFilter(mode, {
     allowExplicitReplyTagsWhenOff,
   });

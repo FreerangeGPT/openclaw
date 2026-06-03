@@ -44,7 +44,7 @@ vi.mock("../ui/src/ui/controllers/channels.ts", () => ({
 }));
 
 vi.mock("../ui/src/ui/controllers/cron.ts", () => ({
-  loadCronJobs: vi.fn(async () => undefined),
+  loadCronJobsPage: vi.fn(async () => undefined),
   loadCronRuns: vi.fn(async () => undefined),
   loadCronStatus: vi.fn(async () => undefined),
 }));
@@ -67,7 +67,6 @@ function createHost(agentsPanel: AgentsPanel): Parameters<typeof refreshActiveTa
       lastActiveSessionKey: "main",
       theme: "claw",
       themeMode: "system",
-      chatFocusMode: false,
       chatShowThinking: true,
       chatShowToolCalls: true,
       splitRatio: 0.6,

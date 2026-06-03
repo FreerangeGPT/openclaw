@@ -1,46 +1,22 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
-import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { formatErrorMessage } from "./lib/error-format.mjs";
 import { resolveExtensionTestPlan } from "./lib/extension-test-plan.mjs";
+import { isDirectScriptRun, runVitestBatch } from "./lib/vitest-batch-runner.mjs";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const repoRoot = path.resolve(__dirname, "..");
-const pnpm = "pnpm";
-
-async function runVitestBatch(params) {
-  return await new Promise((resolve, reject) => {
-    const child = spawn(
-      pnpm,
-      ["exec", "vitest", "run", "--config", params.config, ...params.targets, ...params.args],
-      {
-        cwd: repoRoot,
-        stdio: "inherit",
-        shell: process.platform === "win32",
-        env: params.env,
-      },
-    );
-
-    child.on("error", reject);
-    child.on("exit", (code, signal) => {
-      if (signal) {
-        process.kill(process.pid, signal);
-        return;
-      }
-      resolve(code ?? 1);
-    });
-  });
-}
+const ALLOW_NO_TESTS_FLAG = "--allow-no-tests";
 
 function printUsage() {
-  console.error("Usage: pnpm test:extension <extension-name|path> [vitest args...]");
-  console.error("       node scripts/test-extension.mjs [extension-name|path] [vitest args...]");
+  console.error(
+    `Usage: pnpm test:extension <extension-name|path> [${ALLOW_NO_TESTS_FLAG}] [vitest args...]`,
+  );
+  console.error(
+    `       node scripts/test-extension.mjs [extension-name|path] [${ALLOW_NO_TESTS_FLAG}] [vitest args...]`,
+  );
 }
 
 function printNoTestsMessage(plan) {
-  console.log(`[test-extension] No tests found for ${plan.extensionDir}. Skipping.`);
+  console.error(`[test-extension] No tests found for ${plan.extensionDir}.`);
 }
 
 async function run() {
@@ -50,7 +26,8 @@ async function run() {
     return;
   }
 
-  const passthroughArgs = rawArgs.filter((arg) => arg !== "--");
+  const allowNoTests = rawArgs.includes(ALLOW_NO_TESTS_FLAG);
+  const passthroughArgs = rawArgs.filter((arg) => arg !== "--" && arg !== ALLOW_NO_TESTS_FLAG);
 
   let targetArg;
   if (passthroughArgs[0] && !passthroughArgs[0].startsWith("-")) {
@@ -62,12 +39,15 @@ async function run() {
     plan = resolveExtensionTestPlan({ cwd: process.cwd(), targetArg });
   } catch (error) {
     printUsage();
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(formatErrorMessage(error));
     process.exit(1);
   }
 
   if (!plan.hasTests) {
     printNoTestsMessage(plan);
+    if (!allowNoTests) {
+      process.exit(1);
+    }
     return;
   }
 
@@ -81,8 +61,6 @@ async function run() {
   process.exit(exitCode);
 }
 
-const entryHref = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : "";
-
-if (import.meta.url === entryHref) {
+if (isDirectScriptRun(import.meta.url)) {
   await run();
 }

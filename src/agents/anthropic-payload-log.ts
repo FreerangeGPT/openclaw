@@ -1,17 +1,18 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import type { AgentMessage, StreamFn } from "@mariozechner/pi-agent-core";
-import type { Api, Model } from "@mariozechner/pi-ai";
-import type { OpenClawConfig } from "../config/config.js";
 import { resolveStateDir } from "../config/paths.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
+import type { Model } from "../llm/types.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveUserPath } from "../utils.js";
 import { parseBooleanValue } from "../utils/boolean.js";
 import { safeJsonStringify } from "../utils/safe-json.js";
 import { sanitizeDiagnosticPayload } from "./payload-redaction.js";
 import { getQueuedFileWriter, type QueuedFileWriter } from "./queued-file-writer.js";
+import type { AgentMessage, StreamFn } from "./runtime/index.js";
 
 type PayloadLogStage = "request" | "response" | "usage";
+type PayloadLogScope = "anthropic" | "provider";
 
 type PayloadLogEvent = {
   ts: string;
@@ -37,59 +38,64 @@ type PayloadLogConfig = {
   includeRequest: boolean;
   includeResponse: boolean;
   includeUsage: boolean;
-  scope: "all" | "anthropic";
+  scope: PayloadLogScope;
 };
 
 type PayloadLogWriter = QueuedFileWriter;
 
 const writers = new Map<string, PayloadLogWriter>();
-const log = createSubsystemLogger("agent/anthropic-payload");
+const log = createSubsystemLogger("agent/provider-payload");
 
-function resolveOptionalBoolean(value: string | undefined, fallback: boolean | undefined) {
-  return parseBooleanValue(value) ?? fallback;
+function resolveBooleanOverride(
+  cfgValue: boolean | undefined,
+  envValue: string | undefined,
+  defaultValue: boolean,
+): boolean {
+  return parseBooleanValue(envValue) ?? cfgValue ?? defaultValue;
 }
 
-function resolvePayloadLogConfig(params: {
-  cfg?: OpenClawConfig;
-  env: NodeJS.ProcessEnv;
-}): PayloadLogConfig {
-  const providerConfig = params.cfg?.diagnostics?.providerPayloadLog;
+function resolvePayloadLogConfig(env: NodeJS.ProcessEnv, cfg?: OpenClawConfig): PayloadLogConfig {
+  const providerCfg = cfg?.diagnostics?.providerPayloadLog;
   const providerEnabled =
-    parseBooleanValue(params.env.OPENCLAW_PROVIDER_PAYLOAD_LOG) ??
-    providerConfig?.enabled ??
-    false;
-  const legacyAnthropicEnabled =
-    parseBooleanValue(params.env.OPENCLAW_ANTHROPIC_PAYLOAD_LOG) ?? false;
-  const enabled = providerEnabled || legacyAnthropicEnabled;
-  const scope = providerEnabled ? "all" : "anthropic";
-  const providerFileOverride =
-    params.env.OPENCLAW_PROVIDER_PAYLOAD_LOG_FILE?.trim() || providerConfig?.filePath?.trim();
-  const legacyFileOverride = params.env.OPENCLAW_ANTHROPIC_PAYLOAD_LOG_FILE?.trim();
-  const fileOverride = providerEnabled ? providerFileOverride : legacyFileOverride;
-  const fileName = providerEnabled ? "provider-payload.jsonl" : "anthropic-payload.jsonl";
-  const filePath = fileOverride
-    ? resolveUserPath(fileOverride)
-    : path.join(resolveStateDir(params.env), "logs", fileName);
+    parseBooleanValue(env.OPENCLAW_PROVIDER_PAYLOAD_LOG) ?? providerCfg?.enabled ?? false;
+  if (providerEnabled) {
+    const fileOverride =
+      env.OPENCLAW_PROVIDER_PAYLOAD_LOG_FILE?.trim() || providerCfg?.filePath?.trim();
+    return {
+      enabled: true,
+      filePath: fileOverride
+        ? resolveUserPath(fileOverride)
+        : path.join(resolveStateDir(env), "logs", "provider-payload.jsonl"),
+      includeRequest: resolveBooleanOverride(
+        providerCfg?.includeRequest,
+        env.OPENCLAW_PROVIDER_PAYLOAD_LOG_REQUEST,
+        true,
+      ),
+      includeResponse: resolveBooleanOverride(
+        providerCfg?.includeResponse,
+        env.OPENCLAW_PROVIDER_PAYLOAD_LOG_RESPONSE,
+        true,
+      ),
+      includeUsage: resolveBooleanOverride(
+        providerCfg?.includeUsage,
+        env.OPENCLAW_PROVIDER_PAYLOAD_LOG_USAGE,
+        true,
+      ),
+      scope: "provider",
+    };
+  }
 
+  const legacyEnabled = parseBooleanValue(env.OPENCLAW_ANTHROPIC_PAYLOAD_LOG) ?? false;
+  const fileOverride = env.OPENCLAW_ANTHROPIC_PAYLOAD_LOG_FILE?.trim();
   return {
-    enabled,
-    filePath,
-    includeRequest:
-      resolveOptionalBoolean(
-        params.env.OPENCLAW_PROVIDER_PAYLOAD_LOG_REQUEST,
-        providerConfig?.includeRequest,
-      ) ?? true,
-    includeResponse:
-      resolveOptionalBoolean(
-        params.env.OPENCLAW_PROVIDER_PAYLOAD_LOG_RESPONSE,
-        providerConfig?.includeResponse,
-      ) ?? true,
-    includeUsage:
-      resolveOptionalBoolean(
-        params.env.OPENCLAW_PROVIDER_PAYLOAD_LOG_USAGE,
-        providerConfig?.includeUsage,
-      ) ?? true,
-    scope,
+    enabled: legacyEnabled,
+    filePath: fileOverride
+      ? resolveUserPath(fileOverride)
+      : path.join(resolveStateDir(env), "logs", "anthropic-payload.jsonl"),
+    includeRequest: true,
+    includeResponse: false,
+    includeUsage: true,
+    scope: "anthropic",
   };
 }
 
@@ -99,16 +105,18 @@ function getWriter(filePath: string): PayloadLogWriter {
 
 function formatError(error: unknown): string | undefined {
   if (error instanceof Error) {
-    return error.message;
+    const redacted = sanitizeDiagnosticPayload(error.message);
+    return typeof redacted === "string" ? redacted : error.message;
   }
   if (typeof error === "string") {
-    return error;
+    const redacted = sanitizeDiagnosticPayload(error);
+    return typeof redacted === "string" ? redacted : error;
   }
   if (typeof error === "number" || typeof error === "boolean" || typeof error === "bigint") {
     return String(error);
   }
   if (error && typeof error === "object") {
-    return safeJsonStringify(error) ?? "unknown error";
+    return safeJsonStringify(sanitizeDiagnosticPayload(error)) ?? "unknown error";
   }
   return undefined;
 }
@@ -121,12 +129,14 @@ function digest(value: unknown): string | undefined {
   return crypto.createHash("sha256").update(serialized).digest("hex");
 }
 
-function isAnthropicModel(model: Model<Api> | undefined | null): boolean {
+function isAnthropicModel(model: Model | undefined | null): boolean {
   return (model as { api?: unknown })?.api === "anthropic-messages";
 }
 
-function shouldLogModel(model: Model<Api> | undefined | null, scope: PayloadLogConfig["scope"]) {
-  return scope === "all" || isAnthropicModel(model);
+function findLastAssistantUsage(messages: AgentMessage[]): Record<string, unknown> | null {
+  const msg = findLastAssistantMessage(messages);
+  const usage = (msg as { usage?: unknown } | null)?.usage;
+  return usage && typeof usage === "object" ? (usage as Record<string, unknown>) : null;
 }
 
 function findLastAssistantMessage(messages: AgentMessage[]): AgentMessage | null {
@@ -139,12 +149,7 @@ function findLastAssistantMessage(messages: AgentMessage[]): AgentMessage | null
   return null;
 }
 
-function findAssistantUsage(message: AgentMessage | null): Record<string, unknown> | null {
-  const usage = (message as { usage?: unknown } | null)?.usage;
-  return usage && typeof usage === "object" ? (usage as Record<string, unknown>) : null;
-}
-
-export type AnthropicPayloadLogger = {
+type AnthropicPayloadLogger = {
   enabled: true;
   wrapStreamFn: (streamFn: StreamFn) => StreamFn;
   recordUsage: (messages: AgentMessage[], error?: unknown) => void;
@@ -163,7 +168,7 @@ export function createAnthropicPayloadLogger(params: {
   writer?: PayloadLogWriter;
 }): AnthropicPayloadLogger | null {
   const env = params.env ?? process.env;
-  const cfg = resolvePayloadLogConfig({ cfg: params.cfg, env });
+  const cfg = resolvePayloadLogConfig(env, params.cfg);
   if (!cfg.enabled) {
     return null;
   }
@@ -189,7 +194,7 @@ export function createAnthropicPayloadLogger(params: {
 
   const wrapStreamFn: AnthropicPayloadLogger["wrapStreamFn"] = (streamFn) => {
     const wrapped: StreamFn = (model, context, options) => {
-      if (!shouldLogModel(model, cfg.scope)) {
+      if (cfg.scope === "anthropic" && !isAnthropicModel(model)) {
         return streamFn(model, context, options);
       }
       const nextOnPayload = (payload: unknown) => {
@@ -215,51 +220,55 @@ export function createAnthropicPayloadLogger(params: {
 
   const recordUsage: AnthropicPayloadLogger["recordUsage"] = (messages, error) => {
     const assistantMessage = findLastAssistantMessage(messages);
-    const usage = findAssistantUsage(assistantMessage);
+    const usage = findLastAssistantUsage(messages);
     const errorMessage = formatError(error);
-    if (assistantMessage && cfg.includeResponse) {
-      const response = sanitizeDiagnosticPayload(assistantMessage);
-      record({
-        ...base,
-        ts: new Date().toISOString(),
-        stage: "response",
-        response,
-        responseDigest: digest(response),
-        error: errorMessage,
-      });
-    } else if (errorMessage && cfg.includeResponse) {
-      record({
-        ...base,
-        ts: new Date().toISOString(),
-        stage: "response",
-        error: errorMessage,
-      });
-    }
-    if (cfg.includeUsage) {
-      if (!usage) {
-        if (errorMessage) {
-          record({
-            ...base,
-            ts: new Date().toISOString(),
-            stage: "usage",
-            error: errorMessage,
-          });
-        }
-        return;
+    if (cfg.includeResponse) {
+      if (assistantMessage) {
+        const response = sanitizeDiagnosticPayload(assistantMessage);
+        record({
+          ...base,
+          ts: new Date().toISOString(),
+          stage: "response",
+          response,
+          responseDigest: digest(response),
+          error: errorMessage,
+        });
+      } else if (errorMessage) {
+        record({
+          ...base,
+          ts: new Date().toISOString(),
+          stage: "response",
+          error: errorMessage,
+        });
       }
-      record({
-        ...base,
-        ts: new Date().toISOString(),
-        stage: "usage",
-        usage,
-        error: errorMessage,
-      });
-      log.info("provider usage", {
-        runId: params.runId,
-        sessionId: params.sessionId,
-        usage,
-      });
     }
+    if (!cfg.includeUsage) {
+      return;
+    }
+    if (!usage) {
+      if (errorMessage) {
+        record({
+          ...base,
+          ts: new Date().toISOString(),
+          stage: "usage",
+          error: errorMessage,
+        });
+      }
+      return;
+    }
+    const sanitizedUsage = sanitizeDiagnosticPayload(usage) as Record<string, unknown>;
+    record({
+      ...base,
+      ts: new Date().toISOString(),
+      stage: "usage",
+      usage: sanitizedUsage,
+      error: errorMessage,
+    });
+    log.info("provider usage", {
+      runId: params.runId,
+      sessionId: params.sessionId,
+      usage: sanitizedUsage,
+    });
   };
 
   log.info("provider payload logger enabled", { filePath: writer.filePath, scope: cfg.scope });

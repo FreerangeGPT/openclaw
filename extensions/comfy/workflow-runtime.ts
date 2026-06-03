@@ -1,5 +1,8 @@
 import fs from "node:fs/promises";
-import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { canResolveEnvSecretRefInReadOnlyPath } from "openclaw/plugin-sdk/extension-shared";
+import { extensionForMime } from "openclaw/plugin-sdk/media-mime";
+import { resolvePositiveTimerTimeoutMs } from "openclaw/plugin-sdk/number-runtime";
 import {
   isProviderApiKeyConfigured,
   type AuthProfileStore,
@@ -10,14 +13,27 @@ import {
   normalizeBaseUrl,
   resolveProviderHttpRequestConfig,
 } from "openclaw/plugin-sdk/provider-http";
+import { readResponseWithLimit } from "openclaw/plugin-sdk/response-limit-runtime";
+import {
+  normalizeSecretInputString,
+  resolveSecretInputString,
+} from "openclaw/plugin-sdk/secret-input-runtime";
 import {
   buildHostnameAllowlistPolicyFromSuffixAllowlist,
   fetchWithSsrFGuard,
   isPrivateOrLoopbackHost,
+  mergeSsrFPolicies,
   ssrfPolicyFromDangerouslyAllowPrivateNetwork,
   type SsrFPolicy,
 } from "openclaw/plugin-sdk/ssrf-runtime";
-import { resolveUserPath } from "openclaw/plugin-sdk/text-runtime";
+import {
+  asBoolean,
+  isRecord,
+  normalizeOptionalLowercaseString,
+  normalizeOptionalString,
+  uniqueStrings,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
+import { resolveUserPath } from "openclaw/plugin-sdk/text-utility-runtime";
 
 const DEFAULT_COMFY_LOCAL_BASE_URL = "http://127.0.0.1:8188";
 const DEFAULT_COMFY_CLOUD_BASE_URL = "https://cloud.comfy.org";
@@ -25,14 +41,16 @@ const DEFAULT_PROMPT_INPUT_NAME = "text";
 const DEFAULT_INPUT_IMAGE_INPUT_NAME = "image";
 const DEFAULT_POLL_INTERVAL_MS = 1_500;
 const DEFAULT_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_GENERATED_IMAGE_MAX_BYTES = 6 * 1024 * 1024;
+const DEFAULT_GENERATED_MEDIA_MAX_BYTES = 16 * 1024 * 1024;
 
 export const DEFAULT_COMFY_MODEL = "workflow";
 
-export type ComfyMode = "local" | "cloud";
-export type ComfyCapability = "image" | "music" | "video";
-export type ComfyOutputKind = "audio" | "gifs" | "images" | "videos";
-export type ComfyWorkflow = Record<string, unknown>;
-export type ComfyProviderConfig = Record<string, unknown>;
+type ComfyMode = "local" | "cloud";
+type ComfyCapability = "image" | "music" | "video";
+type ComfyOutputKind = "audio" | "gifs" | "images" | "videos";
+type ComfyWorkflow = Record<string, unknown>;
+type ComfyProviderConfig = Record<string, unknown>;
 type ComfyFetchGuardParams = Parameters<typeof fetchWithSsrFGuard>[0];
 type ComfyDispatcherPolicy = ComfyFetchGuardParams["dispatcherPolicy"];
 type ComfyPromptResponse = {
@@ -60,21 +78,33 @@ type ComfyStatusResponse = {
 type ComfyNetworkPolicy = {
   apiPolicy?: SsrFPolicy;
 };
+type ComfyApiKeyResolution =
+  | {
+      status: "available";
+      apiKey: string;
+      source: string;
+    }
+  | {
+      status: "missing";
+    }
+  | {
+      status: "configured_unavailable";
+    };
 
-export type ComfySourceImage = {
+type ComfySourceImage = {
   buffer: Buffer;
   mimeType: string;
   fileName?: string;
 };
 
-export type ComfyGeneratedAsset = {
+type ComfyGeneratedAsset = {
   buffer: Buffer;
   mimeType: string;
   fileName: string;
   nodeId: string;
 };
 
-export type ComfyWorkflowResult = {
+type ComfyWorkflowResult = {
   assets: ComfyGeneratedAsset[];
   model: string;
   promptId: string;
@@ -83,26 +113,25 @@ export type ComfyWorkflowResult = {
 
 let comfyFetchGuard = fetchWithSsrFGuard;
 
-export function _setComfyFetchGuardForTesting(impl: typeof fetchWithSsrFGuard | null): void {
+export function setComfyFetchGuardForTesting(impl: typeof fetchWithSsrFGuard | null): void {
   comfyFetchGuard = impl ?? fetchWithSsrFGuard;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function readConfigString(config: ComfyProviderConfig, key: string): string | undefined {
-  const value = config[key];
-  if (typeof value !== "string") {
-    return undefined;
+function resolveComfyGeneratedOutputMaxBytes(params: {
+  cfg: OpenClawConfig;
+  capability: ComfyCapability;
+}): number {
+  const configured = params.cfg.agents?.defaults?.mediaMaxMb;
+  if (typeof configured === "number" && Number.isFinite(configured) && configured > 0) {
+    return Math.floor(configured * 1024 * 1024);
   }
-  const trimmed = value.trim();
-  return trimmed ? trimmed : undefined;
+  return params.capability === "image"
+    ? DEFAULT_GENERATED_IMAGE_MAX_BYTES
+    : DEFAULT_GENERATED_MEDIA_MAX_BYTES;
 }
 
 function readConfigBoolean(config: ComfyProviderConfig, key: string): boolean | undefined {
-  const value = config[key];
-  return typeof value === "boolean" ? value : undefined;
+  return asBoolean(config[key]);
 }
 
 function readConfigInteger(config: ComfyProviderConfig, key: string): number | undefined {
@@ -110,38 +139,13 @@ function readConfigInteger(config: ComfyProviderConfig, key: string): number | u
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
-function mergeSsrFPolicies(...policies: Array<SsrFPolicy | undefined>): SsrFPolicy | undefined {
-  const merged: SsrFPolicy = {};
-  for (const policy of policies) {
-    if (!policy) {
-      continue;
-    }
-    if (policy.allowPrivateNetwork) {
-      merged.allowPrivateNetwork = true;
-    }
-    if (policy.dangerouslyAllowPrivateNetwork) {
-      merged.dangerouslyAllowPrivateNetwork = true;
-    }
-    if (policy.allowRfc2544BenchmarkRange) {
-      merged.allowRfc2544BenchmarkRange = true;
-    }
-    if (policy.allowedHostnames?.length) {
-      merged.allowedHostnames = Array.from(
-        new Set([...(merged.allowedHostnames ?? []), ...policy.allowedHostnames]),
-      );
-    }
-    if (policy.hostnameAllowlist?.length) {
-      merged.hostnameAllowlist = Array.from(
-        new Set([...(merged.hostnameAllowlist ?? []), ...policy.hostnameAllowlist]),
-      );
-    }
-  }
-  return Object.keys(merged).length > 0 ? merged : undefined;
-}
-
 export function getComfyConfig(cfg?: OpenClawConfig): ComfyProviderConfig {
-  const raw = cfg?.models?.providers?.comfy;
-  return isRecord(raw) ? raw : {};
+  const pluginConfig = cfg?.plugins?.entries?.comfy?.config;
+  if (isRecord(pluginConfig)) {
+    return pluginConfig;
+  }
+  const legacyConfig = cfg?.models?.providers?.comfy;
+  return isRecord(legacyConfig) ? legacyConfig : {};
 }
 
 function stripNestedCapabilityConfig(config: ComfyProviderConfig): ComfyProviderConfig {
@@ -152,7 +156,7 @@ function stripNestedCapabilityConfig(config: ComfyProviderConfig): ComfyProvider
   return next;
 }
 
-export function getComfyCapabilityConfig(
+function getComfyCapabilityConfig(
   config: ComfyProviderConfig,
   capability: ComfyCapability,
 ): ComfyProviderConfig {
@@ -164,14 +168,60 @@ export function getComfyCapabilityConfig(
   return { ...shared, ...nested };
 }
 
-export function resolveComfyMode(config: ComfyProviderConfig): ComfyMode {
-  return readConfigString(config, "mode") === "cloud" ? "cloud" : "local";
+function resolveComfyMode(config: ComfyProviderConfig): ComfyMode {
+  return normalizeOptionalString(config.mode) === "cloud" ? "cloud" : "local";
+}
+
+function resolveComfyApiKey(
+  config: ComfyProviderConfig,
+  cfg?: OpenClawConfig,
+): ComfyApiKeyResolution {
+  const resolved = resolveSecretInputString({
+    value: config.apiKey,
+    path: "plugins.entries.comfy.config.apiKey",
+    defaults: cfg?.secrets?.defaults,
+    mode: "inspect",
+  });
+  if (resolved.status === "available") {
+    const apiKey = normalizeSecretInputString(resolved.value);
+    return apiKey
+      ? {
+          status: "available",
+          apiKey,
+          source: "plugins.entries.comfy.config.apiKey",
+        }
+      : { status: "missing" };
+  }
+  if (resolved.status === "configured_unavailable") {
+    if (resolved.ref.source !== "env") {
+      return { status: "configured_unavailable" };
+    }
+    const envVarName = resolved.ref.id.trim();
+    if (
+      !canResolveEnvSecretRefInReadOnlyPath({
+        cfg,
+        provider: resolved.ref.provider,
+        id: envVarName,
+      })
+    ) {
+      return { status: "configured_unavailable" };
+    }
+    const apiKey = normalizeSecretInputString(process.env[envVarName]);
+    return apiKey
+      ? {
+          status: "available",
+          apiKey,
+          source: `plugins.entries.comfy.config.apiKey (${envVarName})`,
+        }
+      : { status: "configured_unavailable" };
+  }
+  return { status: "missing" };
 }
 
 function getRequiredConfigString(config: ComfyProviderConfig, key: string): string {
-  const value = readConfigString(config, key);
+  const value = normalizeOptionalString(config[key]);
   if (!value) {
-    throw new Error(`models.providers.comfy.${key} is required`);
+    throw new Error(`plugins.entries.comfy.config.${key} is required`);
   }
   return value;
 }
@@ -184,7 +234,7 @@ function resolveComfyWorkflowSource(config: ComfyProviderConfig): {
   if (isRecord(workflow)) {
     return { workflow: structuredClone(workflow) };
   }
-  const workflowPath = readConfigString(config, "workflowPath");
+  const workflowPath = normalizeOptionalString(config.workflowPath);
   return { workflowPath };
 }
 
@@ -194,7 +244,9 @@ async function loadComfyWorkflow(config: ComfyProviderConfig): Promise<ComfyWork
     return source.workflow;
   }
   if (!source.workflowPath) {
-    throw new Error("models.providers.comfy.<capability>.workflow or workflowPath is required");
+    throw new Error(
+      "plugins.entries.comfy.config.<capability>.workflow or workflowPath is required",
+    );
   }
 
   const resolvedPath = resolveUserPath(source.workflowPath);
@@ -234,7 +286,7 @@ function resolveComfyNetworkPolicy(params: {
     return {};
   }
 
-  const hostname = parsed.hostname.trim().toLowerCase();
+  const hostname = normalizeOptionalLowercaseString(parsed.hostname) ?? "";
   if (!hostname || !params.allowPrivateNetwork || !isPrivateOrLoopbackHost(hostname)) {
     return {};
   }
@@ -265,31 +317,20 @@ async function readJsonResponse<T>(params: {
   });
   try {
     await assertOkOrThrowHttpError(response, params.errorPrefix);
-    return (await response.json()) as T;
+    try {
+      return (await response.json()) as T;
+    } catch (cause) {
+      throw new Error(`${params.errorPrefix}: malformed JSON response`, { cause });
+    }
   } finally {
     await release();
   }
 }
 
-function inferFileExtension(params: { fileName?: string; mimeType?: string }): string {
-  const normalizedMime = params.mimeType?.toLowerCase().trim();
-  if (normalizedMime?.includes("jpeg")) {
-    return "jpg";
-  }
-  if (normalizedMime?.includes("png")) {
-    return "png";
-  }
-  if (normalizedMime?.includes("webm")) {
-    return "webm";
-  }
-  if (normalizedMime?.includes("mp4")) {
-    return "mp4";
-  }
-  if (normalizedMime?.includes("mpeg")) {
-    return "mp3";
-  }
-  if (normalizedMime?.includes("wav")) {
-    return "wav";
+function resolveFileExtension(params: { fileName?: string; mimeType?: string }): string {
+  const extension = extensionForMime(params.mimeType);
+  if (extension) {
+    return extension.slice(1);
   }
   const fileName = params.fileName?.trim();
   if (!fileName) {
@@ -322,8 +363,8 @@ async function uploadInputImage(params: {
   form.set(
     "image",
     new Blob([toBlobBytes(params.image.buffer)], { type: params.image.mimeType }),
-    params.image.fileName?.trim() ||
-      `input.${inferFileExtension({ mimeType: params.image.mimeType })}`,
+    normalizeOptionalString(params.image.fileName) ||
+      `input.${resolveFileExtension({ mimeType: params.image.mimeType })}`,
   );
   form.set("type", "input");
   form.set("overwrite", "true");
@@ -345,7 +386,8 @@ async function uploadInputImage(params: {
     errorPrefix: "Comfy image upload failed",
   });
 
-  const uploadedName = payload.filename?.trim() || payload.name?.trim();
+  const uploadedName =
+    normalizeOptionalString(payload.filename) || normalizeOptionalString(payload.name);
   if (!uploadedName) {
     throw new Error("Comfy image upload response missing filename");
   }
@@ -377,14 +419,15 @@ async function waitForLocalHistory(params: {
   dispatcherPolicy?: ComfyDispatcherPolicy;
 }): Promise<ComfyHistoryEntry> {
   const deadline = Date.now() + params.timeoutMs;
-  while (Date.now() <= deadline) {
+  for (;;) {
+    const requestTimeoutMs = resolveComfyRemainingMs(deadline, params.timeoutMs);
     const history = await readJsonResponse<unknown>({
       url: `${params.baseUrl}/history/${params.promptId}`,
       init: {
         method: "GET",
         headers: params.headers,
       },
-      timeoutMs: params.timeoutMs,
+      timeoutMs: requestTimeoutMs,
       policy: params.policy,
       dispatcherPolicy: params.dispatcherPolicy,
       auditContext: "comfy-history",
@@ -396,10 +439,11 @@ async function waitForLocalHistory(params: {
       return entry;
     }
 
-    await new Promise((resolve) => setTimeout(resolve, params.pollIntervalMs));
+    const pollDelayMs = resolveComfyRemainingMs(deadline, params.timeoutMs, params.pollIntervalMs);
+    await new Promise((resolve) => {
+      setTimeout(resolve, pollDelayMs);
+    });
   }
-
-  throw new Error(`Comfy workflow did not finish within ${Math.ceil(params.timeoutMs / 1000)}s`);
 }
 
 async function waitForCloudCompletion(params: {
@@ -412,14 +456,15 @@ async function waitForCloudCompletion(params: {
   dispatcherPolicy?: ComfyDispatcherPolicy;
 }): Promise<void> {
   const deadline = Date.now() + params.timeoutMs;
-  while (Date.now() <= deadline) {
+  for (;;) {
+    const requestTimeoutMs = resolveComfyRemainingMs(deadline, params.timeoutMs);
     const status = await readJsonResponse<ComfyStatusResponse>({
       url: `${params.baseUrl}/api/job/${params.promptId}/status`,
       init: {
         method: "GET",
         headers: params.headers,
       },
-      timeoutMs: params.timeoutMs,
+      timeoutMs: requestTimeoutMs,
       policy: params.policy,
       dispatcherPolicy: params.dispatcherPolicy,
       auditContext: "comfy-status",
@@ -435,10 +480,24 @@ async function waitForCloudCompletion(params: {
       );
     }
 
-    await new Promise((resolve) => setTimeout(resolve, params.pollIntervalMs));
+    const pollDelayMs = resolveComfyRemainingMs(deadline, params.timeoutMs, params.pollIntervalMs);
+    await new Promise((resolve) => {
+      setTimeout(resolve, pollDelayMs);
+    });
   }
+}
 
-  throw new Error(`Comfy workflow did not finish within ${Math.ceil(params.timeoutMs / 1000)}s`);
+function resolveComfyRemainingMs(
+  deadline: number,
+  timeoutMs: number,
+  defaultTimeoutMs = timeoutMs,
+) {
+  const defaultMs = resolvePositiveTimerTimeoutMs(defaultTimeoutMs, 1);
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) {
+    throw new Error(`Comfy workflow did not finish within ${Math.ceil(timeoutMs / 1000)}s`);
+  }
+  return Math.max(1, Math.min(defaultMs, remainingMs));
 }
 
 function collectOutputFiles(params: {
@@ -480,16 +539,18 @@ async function downloadOutputFile(params: {
   file: ComfyOutputFile;
   mode: ComfyMode;
   capability: ComfyCapability;
+  maxBytes: number;
 }): Promise<{ buffer: Buffer; mimeType: string }> {
-  const fileName = params.file.filename?.trim() || params.file.name?.trim();
+  const fileName =
+    normalizeOptionalString(params.file.filename) || normalizeOptionalString(params.file.name);
   if (!fileName) {
     throw new Error("Comfy output entry missing filename");
   }
 
   const query = new URLSearchParams({
     filename: fileName,
-    subfolder: params.file.subfolder?.trim() ?? "",
-    type: params.file.type?.trim() ?? "output",
+    subfolder: normalizeOptionalString(params.file.subfolder) ?? "",
+    type: normalizeOptionalString(params.file.type) ?? "output",
   });
   const viewPath = params.mode === "cloud" ? "/api/view" : "/view";
   const auditContext = `comfy-${params.capability}-download`;
@@ -512,7 +573,7 @@ async function downloadOutputFile(params: {
       params.mode === "cloud" &&
       [301, 302, 303, 307, 308].includes(firstResponse.response.status)
     ) {
-      const redirectUrl = firstResponse.response.headers.get("location")?.trim();
+      const redirectUrl = normalizeOptionalString(firstResponse.response.headers.get("location"));
       if (!redirectUrl) {
         throw new Error("Comfy cloud output redirect missing location header");
       }
@@ -528,9 +589,18 @@ async function downloadOutputFile(params: {
       try {
         await assertOkOrThrowHttpError(redirected.response, "Comfy output download failed");
         const mimeType =
-          redirected.response.headers.get("content-type")?.trim() || "application/octet-stream";
+          normalizeOptionalString(redirected.response.headers.get("content-type")) ||
+          "application/octet-stream";
         return {
-          buffer: Buffer.from(await redirected.response.arrayBuffer()),
+          buffer: await readResponseWithLimit(redirected.response, params.maxBytes, {
+            chunkTimeoutMs: params.timeoutMs,
+            onOverflow: ({ maxBytes }) =>
+              new Error(`Comfy ${params.capability} output download exceeds ${maxBytes} bytes`),
+            onIdleTimeout: ({ chunkTimeoutMs }) =>
+              new Error(
+                `Comfy ${params.capability} output download stalled after ${chunkTimeoutMs}ms`,
+              ),
+          }),
           mimeType,
         };
       } finally {
@@ -540,9 +610,16 @@ async function downloadOutputFile(params: {
 
     await assertOkOrThrowHttpError(firstResponse.response, "Comfy output download failed");
     const mimeType =
-      firstResponse.response.headers.get("content-type")?.trim() || "application/octet-stream";
+      normalizeOptionalString(firstResponse.response.headers.get("content-type")) ||
+      "application/octet-stream";
     return {
-      buffer: Buffer.from(await firstResponse.response.arrayBuffer()),
+      buffer: await readResponseWithLimit(firstResponse.response, params.maxBytes, {
+        chunkTimeoutMs: params.timeoutMs,
+        onOverflow: ({ maxBytes }) =>
+          new Error(`Comfy ${params.capability} output download exceeds ${maxBytes} bytes`),
+        onIdleTimeout: ({ chunkTimeoutMs }) =>
+          new Error(`Comfy ${params.capability} output download stalled after ${chunkTimeoutMs}ms`),
+      }),
       mimeType,
     };
   } finally {
@@ -559,14 +636,21 @@ export function isComfyCapabilityConfigured(params: {
   const capabilityConfig = getComfyCapabilityConfig(config, params.capability);
   const hasWorkflow = Boolean(
     resolveComfyWorkflowSource(capabilityConfig).workflow ||
-    readConfigString(capabilityConfig, "workflowPath"),
+    normalizeOptionalString(capabilityConfig.workflowPath),
   );
-  const hasPromptNode = Boolean(readConfigString(capabilityConfig, "promptNodeId"));
+  const hasPromptNode = Boolean(normalizeOptionalString(capabilityConfig.promptNodeId));
   if (!hasWorkflow || !hasPromptNode) {
     return false;
   }
   if (resolveComfyMode(capabilityConfig) === "local") {
     return true;
+  }
+  const configuredApiKey = resolveComfyApiKey(capabilityConfig, params.cfg);
+  if (configuredApiKey.status === "available") {
+    return true;
+  }
+  if (configuredApiKey.status === "configured_unavailable") {
+    return false;
   }
   return isProviderApiKeyConfigured({
     provider: "comfy",
@@ -591,16 +675,20 @@ export async function runComfyWorkflow(params: {
   const workflow = await loadComfyWorkflow(capabilityConfig);
   const promptNodeId = getRequiredConfigString(capabilityConfig, "promptNodeId");
   const promptInputName =
-    readConfigString(capabilityConfig, "promptInputName") ?? DEFAULT_PROMPT_INPUT_NAME;
-  const inputImageNodeId = readConfigString(capabilityConfig, "inputImageNodeId");
+    normalizeOptionalString(capabilityConfig.promptInputName) ?? DEFAULT_PROMPT_INPUT_NAME;
+  const inputImageNodeId = normalizeOptionalString(capabilityConfig.inputImageNodeId);
   const inputImageInputName =
-    readConfigString(capabilityConfig, "inputImageInputName") ?? DEFAULT_INPUT_IMAGE_INPUT_NAME;
-  const outputNodeId = readConfigString(capabilityConfig, "outputNodeId");
-  const pollIntervalMs =
-    readConfigInteger(capabilityConfig, "pollIntervalMs") ?? DEFAULT_POLL_INTERVAL_MS;
-  const timeoutMs =
-    readConfigInteger(capabilityConfig, "timeoutMs") ?? params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const providerModel = params.model?.trim() || DEFAULT_COMFY_MODEL;
+    normalizeOptionalString(capabilityConfig.inputImageInputName) ?? DEFAULT_INPUT_IMAGE_INPUT_NAME;
+  const outputNodeId = normalizeOptionalString(capabilityConfig.outputNodeId);
+  const pollIntervalMs = resolvePositiveTimerTimeoutMs(
+    readConfigInteger(capabilityConfig, "pollIntervalMs"),
+    DEFAULT_POLL_INTERVAL_MS,
+  );
+  const timeoutMs = resolvePositiveTimerTimeoutMs(
+    readConfigInteger(capabilityConfig, "timeoutMs") ?? params.timeoutMs,
+    DEFAULT_TIMEOUT_MS,
+  );
+  const providerModel = normalizeOptionalString(params.model) || DEFAULT_COMFY_MODEL;
 
   setWorkflowInput({
     workflow,
@@ -609,14 +697,23 @@ export async function runComfyWorkflow(params: {
     value: params.prompt,
   });
 
+  const pluginApiKey = resolveComfyApiKey(capabilityConfig, params.cfg);
   const resolvedAuth =
     mode === "cloud"
-      ? await resolveApiKeyForProvider({
-          provider: "comfy",
-          cfg: params.cfg,
-          agentDir: params.agentDir,
-          store: params.authStore,
-        })
+      ? pluginApiKey.status === "available"
+        ? {
+            apiKey: pluginApiKey.apiKey,
+            source: pluginApiKey.source,
+            mode: "api-key" as const,
+          }
+        : pluginApiKey.status === "configured_unavailable"
+          ? null
+          : await resolveApiKeyForProvider({
+              provider: "comfy",
+              cfg: params.cfg,
+              agentDir: params.agentDir,
+              store: params.authStore,
+            })
       : null;
   if (mode === "cloud" && !resolvedAuth?.apiKey) {
     throw new Error("Comfy Cloud API key missing");
@@ -624,7 +721,7 @@ export async function runComfyWorkflow(params: {
 
   const { baseUrl, allowPrivateNetwork, headers, dispatcherPolicy } =
     resolveProviderHttpRequestConfig({
-      baseUrl: readConfigString(capabilityConfig, "baseUrl"),
+      baseUrl: normalizeOptionalString(capabilityConfig.baseUrl),
       defaultBaseUrl:
         mode === "cloud" ? DEFAULT_COMFY_CLOUD_BASE_URL : DEFAULT_COMFY_LOCAL_BASE_URL,
       allowPrivateNetwork:
@@ -653,7 +750,7 @@ export async function runComfyWorkflow(params: {
   if (params.inputImage) {
     if (!inputImageNodeId) {
       throw new Error(
-        "Comfy edit requests require models.providers.comfy.<capability>.inputImageNodeId to be configured",
+        "Comfy edit requests require plugins.entries.comfy.config.<capability>.inputImageNodeId to be configured",
       );
     }
     const uploadedName = await uploadInputImage({
@@ -695,7 +792,7 @@ export async function runComfyWorkflow(params: {
     errorPrefix: "Comfy workflow submit failed",
   });
 
-  const promptId = promptResponse.prompt_id?.trim();
+  const promptId = normalizeOptionalString(promptResponse.prompt_id);
   if (!promptId) {
     throw new Error("Comfy workflow submit response missing prompt_id");
   }
@@ -750,6 +847,10 @@ export async function runComfyWorkflow(params: {
   }
 
   const assets: ComfyGeneratedAsset[] = [];
+  const maxOutputBytes = resolveComfyGeneratedOutputMaxBytes({
+    cfg: params.cfg,
+    capability: params.capability,
+  });
   let assetIndex = 0;
   for (const output of outputFiles) {
     const downloaded = await downloadOutputFile({
@@ -761,15 +862,17 @@ export async function runComfyWorkflow(params: {
       file: output.file,
       mode,
       capability: params.capability,
+      maxBytes: maxOutputBytes,
     });
     assetIndex += 1;
-    const originalName = output.file.filename?.trim() || output.file.name?.trim();
+    const originalName =
+      normalizeOptionalString(output.file.filename) || normalizeOptionalString(output.file.name);
     assets.push({
       buffer: downloaded.buffer,
       mimeType: downloaded.mimeType,
       fileName:
         originalName ||
-        `${params.capability}-${assetIndex}.${inferFileExtension({ mimeType: downloaded.mimeType })}`,
+        `${params.capability}-${assetIndex}.${resolveFileExtension({ mimeType: downloaded.mimeType })}`,
       nodeId: output.nodeId,
     });
   }
@@ -778,6 +881,6 @@ export async function runComfyWorkflow(params: {
     assets,
     model: providerModel,
     promptId,
-    outputNodeIds: Array.from(new Set(outputFiles.map((entry) => entry.nodeId))),
+    outputNodeIds: uniqueStrings(outputFiles.map((entry) => entry.nodeId)),
   };
 }

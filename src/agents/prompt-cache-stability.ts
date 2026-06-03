@@ -1,3 +1,5 @@
+import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
+
 export function normalizeStructuredPromptSection(text: string): string {
   return text
     .replace(/\r\n?/g, "\n")
@@ -9,7 +11,7 @@ export function normalizePromptCapabilityIds(capabilities: ReadonlyArray<string>
   const seen = new Set<string>();
   const normalized: string[] = [];
   for (const capability of capabilities) {
-    const value = normalizeStructuredPromptSection(capability).toLowerCase();
+    const value = normalizeLowercaseStringOrEmpty(normalizeStructuredPromptSection(capability));
     if (!value || seen.has(value)) {
       continue;
     }

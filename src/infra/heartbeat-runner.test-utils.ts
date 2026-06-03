@@ -2,14 +2,14 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { vi } from "vitest";
-import type { OpenClawConfig } from "../config/config.js";
+import { heartbeatRunnerTelegramPlugin } from "../../test/helpers/infra/heartbeat-runner-channel-plugins.js";
 import { resolveMainSessionKey } from "../config/sessions.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
 import { createTestRegistry } from "../test-utils/channel-plugins.js";
 import type { HeartbeatDeps } from "./heartbeat-runner.js";
-import { heartbeatRunnerTelegramPlugin } from "./heartbeat-runner.test-channel-plugins.js";
 
-export type HeartbeatSessionSeed = {
+type HeartbeatSessionSeed = {
   sessionId?: string;
   totalTokens?: number;
   totalTokensFresh?: boolean;
@@ -17,12 +17,21 @@ export type HeartbeatSessionSeed = {
   lastChannel: string;
   lastProvider: string;
   lastTo: string;
+  pendingFinalDelivery?: boolean;
+  pendingFinalDeliveryText?: string;
+  pendingFinalDeliveryCreatedAt?: number;
+  pendingFinalDeliveryAttemptCount?: number;
+  pendingFinalDeliveryLastError?: string | null;
+  agentHarnessId?: string;
+  agentRuntimeOverride?: string;
+  model?: string;
+  modelProvider?: string;
 };
 
-export type HeartbeatReplyFn = NonNullable<HeartbeatDeps["getReplyFromConfig"]>;
+type HeartbeatReplyFn = NonNullable<HeartbeatDeps["getReplyFromConfig"]>;
 export type HeartbeatReplySpy = ReturnType<typeof vi.fn<HeartbeatReplyFn>>;
 
-export function createHeartbeatReplySpy(): HeartbeatReplySpy {
+function createHeartbeatReplySpy(): HeartbeatReplySpy {
   const replySpy: HeartbeatReplySpy = vi.fn<HeartbeatReplyFn>();
   replySpy.mockResolvedValue({ text: "ok" });
   return replySpy;
@@ -33,9 +42,16 @@ export async function seedSessionStore(
   sessionKey: string,
   session: HeartbeatSessionSeed,
 ): Promise<void> {
+  let existingStore: Record<string, unknown>;
+  try {
+    existingStore = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<string, unknown>;
+  } catch {
+    existingStore = {};
+  }
   await fs.writeFile(
     storePath,
     JSON.stringify({
+      ...existingStore,
       [sessionKey]: {
         sessionId: session.sessionId ?? "sid",
         updatedAt: session.updatedAt ?? Date.now(),

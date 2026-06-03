@@ -1,4 +1,9 @@
-import type { ReplyPayload } from "../runtime-api.js";
+import { parseStrictFiniteNumber } from "openclaw/plugin-sdk/number-runtime";
+import type { ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
+import {
+  normalizeLowercaseStringOrEmpty,
+  normalizeStringEntries,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
 import {
   createAgendaCard,
   createAppleTvRemoteCard,
@@ -33,8 +38,7 @@ export function parseLineDirectives(payload: ReplyPayload): ReplyPayload {
     ...(result.channelData?.line as LineChannelData | undefined),
   };
   const toSlug = (value: string): string =>
-    value
-      .toLowerCase()
+    normalizeLowercaseStringOrEmpty(value)
       .replace(/[^a-z0-9]+/g, "_")
       .replace(/^_+|_+$/g, "") || "device";
   const lineActionData = (action: string, extras?: Record<string, string>): string => {
@@ -49,10 +53,7 @@ export function parseLineDirectives(payload: ReplyPayload): ReplyPayload {
 
   const quickRepliesMatch = text.match(/\[\[quick_replies:\s*([^\]]+)\]\]/i);
   if (quickRepliesMatch) {
-    const options = quickRepliesMatch[1]
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const options = normalizeStringEntries(quickRepliesMatch[1].split(","));
     if (options.length > 0) {
       lineData.quickReplies = [...(lineData.quickReplies || []), ...options];
     }
@@ -64,9 +65,9 @@ export function parseLineDirectives(payload: ReplyPayload): ReplyPayload {
     const parts = locationMatch[1].split("|").map((s) => s.trim());
     if (parts.length >= 4) {
       const [title, address, latStr, lonStr] = parts;
-      const latitude = parseFloat(latStr);
-      const longitude = parseFloat(lonStr);
-      if (!isNaN(latitude) && !isNaN(longitude)) {
+      const latitude = parseStrictFiniteNumber(latStr);
+      const longitude = parseStrictFiniteNumber(lonStr);
+      if (latitude !== undefined && longitude !== undefined) {
         lineData.location = {
           title: title || "Location",
           address: address || "",
@@ -85,10 +86,10 @@ export function parseLineDirectives(payload: ReplyPayload): ReplyPayload {
       const [question, yesPart, noPart] = parts;
       const [yesLabel, yesData] = yesPart.includes(":")
         ? yesPart.split(":").map((s) => s.trim())
-        : [yesPart, yesPart.toLowerCase()];
+        : [yesPart, normalizeLowercaseStringOrEmpty(yesPart)];
       const [noLabel, noData] = noPart.includes(":")
         ? noPart.split(":").map((s) => s.trim())
-        : [noPart, noPart.toLowerCase()];
+        : [noPart, normalizeLowercaseStringOrEmpty(noPart)];
 
       lineData.templateMessage = {
         type: "confirm",
@@ -116,7 +117,7 @@ export function parseLineDirectives(payload: ReplyPayload): ReplyPayload {
           if (index === -1) {
             return -1;
           }
-          const lower = trimmed.toLowerCase();
+          const lower = normalizeLowercaseStringOrEmpty(trimmed);
           if (lower.startsWith("http://") || lower.startsWith("https://")) {
             return -1;
           }
@@ -161,7 +162,7 @@ export function parseLineDirectives(payload: ReplyPayload): ReplyPayload {
     const parts = mediaPlayerMatch[1].split("|").map((s) => s.trim());
     if (parts.length >= 1) {
       const [title, artist, source, imageUrl, statusStr] = parts;
-      const isPlaying = statusStr?.toLowerCase() === "playing";
+      const isPlaying = normalizeLowercaseStringOrEmpty(statusStr) === "playing";
       const validImageUrl = imageUrl?.startsWith("https://") ? imageUrl : undefined;
       const deviceKey = toSlug(source || title || "media");
       const card = createMediaPlayerCard({
@@ -281,7 +282,7 @@ export function parseLineDirectives(payload: ReplyPayload): ReplyPayload {
       const controls = controlsStr
         ? controlsStr.split(",").map((ctrlStr) => {
             const [label, data] = ctrlStr.split(":").map((s) => s.trim());
-            const action = data || label.toLowerCase().replace(/\s+/g, "_");
+            const action = data || normalizeLowercaseStringOrEmpty(label).replace(/\s+/g, "_");
             return { label, data: lineActionData(action, { "line.device": deviceKey }) };
           })
         : [];

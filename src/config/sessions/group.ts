@@ -1,6 +1,12 @@
+import {
+  normalizeLowercaseStringOrEmpty,
+  normalizeOptionalLowercaseString,
+  normalizeOptionalString,
+} from "@openclaw/normalization-core/string-coerce";
+import { normalizeHyphenSlug } from "@openclaw/normalization-core/string-normalization";
 import type { MsgContext } from "../../auto-reply/templating.js";
 import { listChannelPlugins } from "../../channels/plugins/registry.js";
-import { normalizeHyphenSlug } from "../../shared/string-normalization.js";
+import { normalizeSessionPeerId } from "../../sessions/session-key-utils.js";
 import { listDeliverableMessageChannels } from "../../utils/message-channel.js";
 import type { GroupKeyResolution } from "./types.js";
 
@@ -26,8 +32,36 @@ function normalizeGroupLabel(raw?: string) {
   return normalizeHyphenSlug(raw);
 }
 
+function resolveOriginatingGroupTargetId(params: {
+  ctx: MsgContext;
+  provider: string;
+}): string | null {
+  const target = normalizeOptionalString(params.ctx.OriginatingTo ?? params.ctx.To) ?? "";
+  if (!target) {
+    return null;
+  }
+  const parts = target.split(":").filter(Boolean);
+  if (parts.length < 2) {
+    return null;
+  }
+
+  const head = normalizeLowercaseStringOrEmpty(parts[0]);
+  const second = normalizeOptionalLowercaseString(parts[1]);
+  const secondIsKind = second === "group" || second === "channel";
+  if (secondIsKind && (head === params.provider || getGroupSurfaces().has(head))) {
+    return parts.slice(2).join(":") || null;
+  }
+  if (head === params.provider || head === "chat" || head === "room" || head === "group") {
+    return parts.slice(1).join(":") || null;
+  }
+  if (head === "channel") {
+    return parts.slice(1).join(":") || null;
+  }
+  return null;
+}
+
 function shortenGroupId(value?: string) {
-  const trimmed = value?.trim() ?? "";
+  const trimmed = normalizeOptionalString(value) ?? "";
   if (!trimmed) {
     return "";
   }
@@ -45,15 +79,15 @@ export function buildGroupDisplayName(params: {
   id?: string;
   key: string;
 }) {
-  const providerKey = (params.provider?.trim().toLowerCase() || "group").trim();
-  const groupChannel = params.groupChannel?.trim();
-  const space = params.space?.trim();
-  const subject = params.subject?.trim();
+  const providerKey = normalizeOptionalLowercaseString(params.provider) ?? "group";
+  const groupChannel = normalizeOptionalString(params.groupChannel);
+  const space = normalizeOptionalString(params.space);
+  const subject = normalizeOptionalString(params.subject);
   const detail =
     (groupChannel && space
       ? `${space}${groupChannel.startsWith("#") ? "" : "#"}${groupChannel}`
       : groupChannel || subject || space || "") || "";
-  const fallbackId = params.id?.trim() || params.key;
+  const fallbackId = normalizeOptionalString(params.id) ?? params.key;
   const rawLabel = detail || fallbackId;
   let token = normalizeGroupLabel(rawLabel);
   if (!token) {
@@ -69,8 +103,8 @@ export function buildGroupDisplayName(params: {
 }
 
 export function resolveGroupSessionKey(ctx: MsgContext): GroupKeyResolution | null {
-  const from = typeof ctx.From === "string" ? ctx.From.trim() : "";
-  const chatType = ctx.ChatType?.trim().toLowerCase();
+  const from = normalizeOptionalString(ctx.From) ?? "";
+  const chatType = normalizeOptionalLowercaseString(ctx.ChatType);
   const normalizedChatType =
     chatType === "channel" ? "channel" : chatType === "group" ? "group" : undefined;
 
@@ -85,10 +119,10 @@ export function resolveGroupSessionKey(ctx: MsgContext): GroupKeyResolution | nu
     return null;
   }
 
-  const providerHint = ctx.Provider?.trim().toLowerCase();
+  const providerHint = normalizeOptionalLowercaseString(ctx.Provider);
 
   const parts = from.split(":").filter(Boolean);
-  const head = parts[0]?.trim().toLowerCase() ?? "";
+  const head = normalizeLowercaseStringOrEmpty(parts[0]);
   const headIsSurface = head ? getGroupSurfaces().has(head) : false;
 
   if (!headIsSurface && !providerHint && legacyResolution) {
@@ -100,19 +134,23 @@ export function resolveGroupSessionKey(ctx: MsgContext): GroupKeyResolution | nu
     return null;
   }
 
-  const second = parts[1]?.trim().toLowerCase();
+  const second = normalizeOptionalLowercaseString(parts[1]);
   const secondIsKind = second === "group" || second === "channel";
   const kind = secondIsKind
     ? second
     : from.includes(":channel:") || normalizedChatType === "channel"
       ? "channel"
       : "group";
-  const id = headIsSurface
-    ? secondIsKind
-      ? parts.slice(2).join(":")
-      : parts.slice(1).join(":")
-    : from;
-  const finalId = id.trim().toLowerCase();
+  const originatingGroupTargetId =
+    !secondIsKind && normalizedChatType ? resolveOriginatingGroupTargetId({ ctx, provider }) : null;
+  const id = originatingGroupTargetId
+    ? originatingGroupTargetId
+    : headIsSurface
+      ? secondIsKind
+        ? parts.slice(2).join(":")
+        : parts.slice(1).join(":")
+      : from;
+  const finalId = normalizeSessionPeerId({ channel: provider, peerKind: kind, peerId: id });
   if (!finalId) {
     return null;
   }

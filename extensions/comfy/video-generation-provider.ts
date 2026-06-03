@@ -5,12 +5,12 @@ import type {
 } from "openclaw/plugin-sdk/video-generation";
 import {
   DEFAULT_COMFY_MODEL,
-  _setComfyFetchGuardForTesting,
+  setComfyFetchGuardForTesting,
   isComfyCapabilityConfigured,
   runComfyWorkflow,
 } from "./workflow-runtime.js";
 
-export { _setComfyFetchGuardForTesting };
+export { setComfyFetchGuardForTesting };
 
 function toComfyInputImage(inputImage?: VideoGenerationSourceAsset) {
   if (!inputImage) {
@@ -39,14 +39,27 @@ export function buildComfyVideoGenerationProvider(): VideoGenerationProvider {
         capability: "video",
       }),
     capabilities: {
-      maxVideos: 1,
-      maxInputImages: 1,
-      maxInputVideos: 0,
-      supportsSize: false,
-      supportsAspectRatio: false,
-      supportsResolution: false,
-      supportsAudio: false,
-      supportsWatermark: false,
+      generate: {
+        maxVideos: 1,
+        supportsSize: false,
+        supportsAspectRatio: false,
+        supportsResolution: false,
+        supportsAudio: false,
+        supportsWatermark: false,
+      },
+      imageToVideo: {
+        enabled: true,
+        maxVideos: 1,
+        maxInputImages: 1,
+        supportsSize: false,
+        supportsAspectRatio: false,
+        supportsResolution: false,
+        supportsAudio: false,
+        supportsWatermark: false,
+      },
+      videoToVideo: {
+        enabled: false,
+      },
     },
     async generateVideo(req) {
       if ((req.inputImages?.length ?? 0) > 1) {

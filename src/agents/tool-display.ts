@@ -1,3 +1,4 @@
+import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { redactToolDetail } from "../logging/redact.js";
 import { shortenHomeInString } from "../utils.js";
 import {
@@ -8,8 +9,9 @@ import {
   resolveToolVerbAndDetailForArgs,
 } from "./tool-display-common.js";
 import { TOOL_DISPLAY_CONFIG } from "./tool-display-config.js";
+import type { ToolDetailMode } from "./tool-display-exec.js";
 
-export type ToolDisplay = {
+type ToolDisplay = {
   name: string;
   emoji: string;
   title: string;
@@ -44,23 +46,27 @@ export function resolveToolDisplay(params: {
   name?: string;
   args?: unknown;
   meta?: string;
+  detailMode?: ToolDetailMode;
 }): ToolDisplay {
   const name = normalizeToolName(params.name);
-  const key = name.toLowerCase();
+  const key = normalizeLowercaseStringOrEmpty(name);
   const spec = TOOL_MAP[key];
   const emoji = spec?.emoji ?? FALLBACK.emoji ?? "🧩";
   const title = spec?.title ?? defaultTitle(name);
   const label = spec?.label ?? title;
-  let { verb, detail } = resolveToolVerbAndDetailForArgs({
+  const toolDisplayParts = resolveToolVerbAndDetailForArgs({
     toolKey: key,
     args: params.args,
     meta: params.meta,
     spec,
     fallbackDetailKeys: FALLBACK.detailKeys,
     detailMode: "summary",
+    toolDetailMode: params.detailMode,
     detailMaxEntries: MAX_DETAIL_ENTRIES,
     detailFormatKey: (raw) => formatDetailKey(raw, DETAIL_LABEL_OVERRIDES),
   });
+  const { verb } = toolDisplayParts;
+  let { detail } = toolDisplayParts;
 
   if (detail) {
     detail = shortenHomeInString(detail);
@@ -83,6 +89,9 @@ export function formatToolDetail(display: ToolDisplay): string | undefined {
 
 export function formatToolSummary(display: ToolDisplay): string {
   const detail = formatToolDetail(display);
+  if (detail && (display.name === "bash" || display.name === "exec")) {
+    return `${display.emoji} ${detail}`;
+  }
   return detail
     ? `${display.emoji} ${display.label}: ${detail}`
     : `${display.emoji} ${display.label}`;

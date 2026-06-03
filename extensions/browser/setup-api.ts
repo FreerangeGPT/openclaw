@@ -1,14 +1,12 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/plugin-entry";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
+import { normalizeOptionalLowercaseString } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { isRecord } from "./src/record-shared.js";
 
 function listContainsBrowser(value: unknown): boolean {
   return (
     Array.isArray(value) &&
-    value.some((entry) => typeof entry === "string" && entry.trim().toLowerCase() === "browser")
+    value.some((entry) => normalizeOptionalLowercaseString(entry) === "browser")
   );
 }
 
@@ -40,13 +38,10 @@ export default definePluginEntry({
       ) {
         return null;
       }
-      if (Object.prototype.hasOwnProperty.call(config, "browser")) {
+      if (Object.hasOwn(config, "browser")) {
         return "browser configured";
       }
-      if (
-        config.plugins?.entries &&
-        Object.prototype.hasOwnProperty.call(config.plugins.entries, "browser")
-      ) {
+      if (config.plugins?.entries && Object.hasOwn(config.plugins.entries, "browser")) {
         return "browser plugin configured";
       }
       if (hasBrowserToolReference(config)) {

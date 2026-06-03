@@ -1,3 +1,4 @@
+import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
 import {
   buildDefaultControlUiAllowedOrigins,
   hasConfiguredControlUiAllowedOrigins,
@@ -20,13 +21,19 @@ const GATEWAY_BIND_RULE: LegacyConfigRule = {
   requireSourceLiteral: true,
 };
 
+const GATEWAY_WEBCHAT_RULE: LegacyConfigRule = {
+  path: ["gateway", "webchat"],
+  message: 'gateway.webchat is retired. Run "openclaw doctor --fix".',
+};
+
 function isLegacyGatewayBindHostAlias(value: unknown): boolean {
-  if (typeof value !== "string") {
-    return false;
-  }
-  const normalized = value.trim().toLowerCase();
+  return normalizeLegacyGatewayBindHostAlias(value) !== null;
+}
+
+function normalizeLegacyGatewayBindHostAlias(value: unknown): "lan" | "loopback" | null {
+  const normalized = normalizeOptionalLowercaseString(value);
   if (!normalized) {
-    return false;
+    return null;
   }
   if (
     normalized === "auto" ||
@@ -35,18 +42,25 @@ function isLegacyGatewayBindHostAlias(value: unknown): boolean {
     normalized === "tailnet" ||
     normalized === "custom"
   ) {
-    return false;
+    return null;
   }
-  return (
+  if (
     normalized === "0.0.0.0" ||
     normalized === "::" ||
     normalized === "[::]" ||
-    normalized === "*" ||
+    normalized === "*"
+  ) {
+    return "lan";
+  }
+  if (
     normalized === "127.0.0.1" ||
     normalized === "localhost" ||
     normalized === "::1" ||
     normalized === "[::1]"
-  );
+  ) {
+    return "loopback";
+  }
+  return null;
 }
 
 function escapeControlForLog(value: string): string {
@@ -55,6 +69,24 @@ function escapeControlForLog(value: string): string {
 
 export const LEGACY_CONFIG_MIGRATIONS_RUNTIME_GATEWAY: LegacyConfigMigrationSpec[] = [
   defineLegacyConfigMigration({
+    id: "gateway.webchat-remove",
+    describe: "Remove retired WebChat gateway config",
+    legacyRules: [GATEWAY_WEBCHAT_RULE],
+    apply: (raw, changes) => {
+      const gateway = getRecord(raw.gateway);
+      if (!gateway || !Object.hasOwn(gateway, "webchat")) {
+        return;
+      }
+      delete gateway.webchat;
+      if (Object.keys(gateway).length > 0) {
+        raw.gateway = gateway;
+      } else {
+        delete raw.gateway;
+      }
+      changes.push("Removed retired gateway.webchat config.");
+    },
+  }),
+  defineLegacyConfigMigration({
     id: "gateway.controlUi.allowedOrigins-seed-for-non-loopback",
     describe: "Seed gateway.controlUi.allowedOrigins for existing non-loopback gateway installs",
     apply: (raw, changes) => {
@@ -62,7 +94,7 @@ export const LEGACY_CONFIG_MIGRATIONS_RUNTIME_GATEWAY: LegacyConfigMigrationSpec
       if (!gateway) {
         return;
       }
-      const bind = gateway.bind;
+      const bind = normalizeLegacyGatewayBindHostAlias(gateway.bind) ?? gateway.bind;
       if (!isGatewayNonLoopbackBindMode(bind)) {
         return;
       }
@@ -86,7 +118,7 @@ export const LEGACY_CONFIG_MIGRATIONS_RUNTIME_GATEWAY: LegacyConfigMigrationSpec
       gateway.controlUi = { ...controlUi, allowedOrigins: origins };
       raw.gateway = gateway;
       changes.push(
-        `Seeded gateway.controlUi.allowedOrigins ${JSON.stringify(origins)} for bind=${String(bind)}. ` +
+        `Seeded gateway.controlUi.allowedOrigins ${JSON.stringify(origins)} for bind=${bind}. ` +
           "Required since v2026.2.26. Add other machine origins to gateway.controlUi.allowedOrigins if needed.",
       );
     },
@@ -105,23 +137,11 @@ export const LEGACY_CONFIG_MIGRATIONS_RUNTIME_GATEWAY: LegacyConfigMigrationSpec
         return;
       }
 
-      const normalized = bindRaw.trim().toLowerCase();
-      let mapped: "lan" | "loopback" | undefined;
-      if (
-        normalized === "0.0.0.0" ||
-        normalized === "::" ||
-        normalized === "[::]" ||
-        normalized === "*"
-      ) {
-        mapped = "lan";
-      } else if (
-        normalized === "127.0.0.1" ||
-        normalized === "localhost" ||
-        normalized === "::1" ||
-        normalized === "[::1]"
-      ) {
-        mapped = "loopback";
+      const normalized = normalizeOptionalLowercaseString(bindRaw);
+      if (!normalized) {
+        return;
       }
+      const mapped = normalizeLegacyGatewayBindHostAlias(bindRaw);
 
       if (!mapped || normalized === mapped) {
         return;

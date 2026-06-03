@@ -1,28 +1,21 @@
+import { asOptionalRecord, readStringField } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { VoiceCallConfig } from "./config.js";
 import { VoiceCallConfigSchema } from "./config.js";
 
 export const VOICE_CALL_LEGACY_CONFIG_REMOVAL_VERSION = "2026.6.0";
 
-export type VoiceCallLegacyConfigIssue = {
+type VoiceCallLegacyConfigIssue = {
   path: string;
   replacement: string;
   message: string;
 };
 
-function asObject(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function getString(obj: Record<string, unknown> | undefined, key: string): string | undefined {
-  const value = obj?.[key];
-  return typeof value === "string" ? value : undefined;
-}
+const asObject = asOptionalRecord;
+const getString = readStringField;
 
 function getNumber(obj: Record<string, unknown> | undefined, key: string): number | undefined {
   const value = obj?.[key];
-  return typeof value === "number" ? value : undefined;
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function mergeProviderConfig(
@@ -47,6 +40,8 @@ function mergeProviderConfig(
 
 export function collectVoiceCallLegacyConfigIssues(value: unknown): VoiceCallLegacyConfigIssue[] {
   const raw = asObject(value) ?? {};
+  const realtime = asObject(raw.realtime);
+  const realtimeAgentContext = asObject(realtime?.agentContext);
   const twilio = asObject(raw.twilio);
   const streaming = asObject(raw.streaming);
 
@@ -100,6 +95,14 @@ export function collectVoiceCallLegacyConfigIssues(value: unknown): VoiceCallLeg
       message: "Move streaming.vadThreshold to streaming.providers.openai.vadThreshold.",
     });
   }
+  if (realtimeAgentContext && Object.hasOwn(realtimeAgentContext, "includeSystemPrompt")) {
+    issues.push({
+      path: "realtime.agentContext.includeSystemPrompt",
+      replacement: "realtime.agentContext",
+      message:
+        "Remove realtime.agentContext.includeSystemPrompt; realtime context now uses the generated agent prompt.",
+    });
+  }
 
   return issues;
 }
@@ -131,6 +134,8 @@ export function migrateVoiceCallLegacyConfigInput(params: {
   issues: VoiceCallLegacyConfigIssue[];
 } {
   const raw = asObject(params.value) ?? {};
+  const realtime = asObject(raw.realtime);
+  const realtimeAgentContext = asObject(realtime?.agentContext);
   const twilio = asObject(raw.twilio);
   const streaming = asObject(raw.streaming);
   const configPathPrefix = params.configPathPrefix ?? "plugins.entries.voice-call.config";
@@ -181,12 +186,29 @@ export function migrateVoiceCallLegacyConfigInput(params: {
     delete normalizedTwilio.from;
   }
 
+  const normalizedRealtimeAgentContext = realtimeAgentContext
+    ? {
+        ...realtimeAgentContext,
+      }
+    : undefined;
+  if (normalizedRealtimeAgentContext) {
+    delete normalizedRealtimeAgentContext.includeSystemPrompt;
+  }
+
+  const normalizedRealtime = realtime
+    ? {
+        ...realtime,
+        agentContext: normalizedRealtimeAgentContext ?? realtime.agentContext,
+      }
+    : undefined;
+
   const config = {
     ...raw,
     provider: raw.provider === "log" ? "mock" : raw.provider,
     fromNumber: raw.fromNumber ?? (typeof twilio?.from === "string" ? twilio.from : undefined),
     twilio: normalizedTwilio,
     streaming: normalizedStreaming,
+    realtime: normalizedRealtime,
   };
 
   const changes: string[] = [];
@@ -211,15 +233,22 @@ export function migrateVoiceCallLegacyConfigInput(params: {
       `Moved ${configPathPrefix}.streaming.sttModel → ${configPathPrefix}.streaming.providers.openai.model.`,
     );
   }
-  if (typeof streaming?.silenceDurationMs === "number") {
+  if (getNumber(streaming, "silenceDurationMs") !== undefined) {
     changes.push(
       `Moved ${configPathPrefix}.streaming.silenceDurationMs → ${configPathPrefix}.streaming.providers.openai.silenceDurationMs.`,
     );
+  } else if (typeof streaming?.silenceDurationMs === "number") {
+    changes.push(`Removed invalid ${configPathPrefix}.streaming.silenceDurationMs.`);
   }
-  if (typeof streaming?.vadThreshold === "number") {
+  if (getNumber(streaming, "vadThreshold") !== undefined) {
     changes.push(
       `Moved ${configPathPrefix}.streaming.vadThreshold → ${configPathPrefix}.streaming.providers.openai.vadThreshold.`,
     );
+  } else if (typeof streaming?.vadThreshold === "number") {
+    changes.push(`Removed invalid ${configPathPrefix}.streaming.vadThreshold.`);
+  }
+  if (realtimeAgentContext && Object.hasOwn(realtimeAgentContext, "includeSystemPrompt")) {
+    changes.push(`Removed ${configPathPrefix}.realtime.agentContext.includeSystemPrompt.`);
   }
 
   return { config, changes, issues };

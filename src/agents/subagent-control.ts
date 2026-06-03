@@ -1,35 +1,23 @@
 import crypto from "node:crypto";
-import { clearSessionQueues } from "../auto-reply/reply/queue.js";
-import {
-  resolveSubagentLabel,
-  resolveSubagentTargetFromRuns,
-  sortSubagentRuns,
-  type SubagentTargetResolution,
-} from "../auto-reply/reply/subagents-utils.js";
-import type { OpenClawConfig } from "../config/config.js";
-import type { SessionEntry } from "../config/sessions.js";
-import { loadSessionStore, resolveStorePath, updateSessionStore } from "../config/sessions.js";
+import type { ClearSessionQueueResult } from "../auto-reply/reply/queue.js";
+import { resolveSubagentLabel, sortSubagentRuns } from "../auto-reply/reply/subagents-utils.js";
+import { resolveStorePath } from "../config/sessions/paths.js";
+import { loadSessionStore, updateSessionStore } from "../config/sessions/store.js";
+import type { SessionEntry } from "../config/sessions/types.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { callGateway } from "../gateway/call.js";
 import { logVerbose } from "../globals.js";
+import { formatErrorMessage } from "../infra/errors.js";
 import { isSubagentSessionKey, parseAgentSessionKey } from "../routing/session-key.js";
+import { createLazyImportLoader } from "../shared/lazy-promise.js";
 import { INTERNAL_MESSAGE_CHANNEL } from "../utils/message-channel.js";
 import { AGENT_LANE_SUBAGENT } from "./lanes.js";
-import { abortEmbeddedPiRun } from "./pi-embedded.js";
 import {
   readLatestAssistantReplySnapshot,
   waitForAgentRunAndReadUpdatedAssistantReply,
 } from "./run-wait.js";
 import { resolveStoredSubagentCapabilities } from "./subagent-capabilities.js";
-import {
-  buildLatestSubagentRunIndex,
-  buildSubagentList,
-  createPendingDescendantCounter,
-  isActiveSubagentRun,
-  resolveSessionEntryForKey,
-  type BuiltSubagentList,
-  type SessionEntryResolution,
-  type SubagentListItem,
-} from "./subagent-list.js";
+import { buildLatestSubagentRunIndex, resolveSessionEntryForKey } from "./subagent-list.js";
 import { subagentRuns } from "./subagent-registry-memory.js";
 import {
   getLatestSubagentRunByChildSessionKey,
@@ -48,22 +36,54 @@ import { resolveInternalSessionKey, resolveMainSessionAlias } from "./tools/sess
 
 export const DEFAULT_RECENT_MINUTES = 30;
 export const MAX_RECENT_MINUTES = 24 * 60;
-export const MAX_STEER_MESSAGE_CHARS = 4_000;
-export const STEER_RATE_LIMIT_MS = 2_000;
-export const STEER_ABORT_SETTLE_TIMEOUT_MS = 5_000;
+const STEER_RATE_LIMIT_MS = 2_000;
+const STEER_ABORT_SETTLE_TIMEOUT_MS = 5_000;
 const SUBAGENT_REPLY_HISTORY_LIMIT = 50;
 
 const steerRateLimit = new Map<string, number>();
 
 type GatewayCaller = typeof callGateway;
+type UpdateSessionStore = typeof updateSessionStore;
+type AbortEmbeddedAgentRun = (sessionId: string) => boolean;
+type ClearSessionQueues = (keys: Array<string | undefined>) => ClearSessionQueueResult;
 
 const defaultSubagentControlDeps = {
   callGateway,
+  updateSessionStore,
 };
 
 let subagentControlDeps: {
   callGateway: GatewayCaller;
+  updateSessionStore: UpdateSessionStore;
+  abortEmbeddedAgentRun?: AbortEmbeddedAgentRun;
+  clearSessionQueues?: ClearSessionQueues;
 } = defaultSubagentControlDeps;
+
+const subagentControlRuntimeLoader = createLazyImportLoader(
+  () => import("./subagent-control.runtime.js"),
+);
+
+function loadSubagentControlRuntime() {
+  return subagentControlRuntimeLoader.load();
+}
+
+async function resolveSubagentControlRuntime(): Promise<{
+  abortEmbeddedAgentRun: AbortEmbeddedAgentRun;
+  clearSessionQueues: ClearSessionQueues;
+}> {
+  if (subagentControlDeps.abortEmbeddedAgentRun && subagentControlDeps.clearSessionQueues) {
+    return {
+      abortEmbeddedAgentRun: subagentControlDeps.abortEmbeddedAgentRun,
+      clearSessionQueues: subagentControlDeps.clearSessionQueues,
+    };
+  }
+  const runtime = await loadSubagentControlRuntime();
+  return {
+    abortEmbeddedAgentRun:
+      subagentControlDeps.abortEmbeddedAgentRun ?? runtime.abortEmbeddedAgentRun,
+    clearSessionQueues: subagentControlDeps.clearSessionQueues ?? runtime.clearSessionQueues,
+  };
+}
 
 export type ResolvedSubagentController = {
   controllerSessionKey: string;
@@ -71,14 +91,6 @@ export type ResolvedSubagentController = {
   callerIsSubagent: boolean;
   controlScope: "children" | "none";
 };
-export type { BuiltSubagentList, SessionEntryResolution, SubagentListItem };
-export {
-  buildSubagentList,
-  createPendingDescendantCounter,
-  isActiveSubagentRun,
-  resolveSessionEntryForKey,
-};
-
 export function resolveSubagentController(params: {
   cfg: OpenClawConfig;
   agentSessionKey?: string;
@@ -136,6 +148,10 @@ function ensureControllerOwnsRun(params: {
   return "Subagents can only control runs spawned from their own session.";
 }
 
+function isFinishedForSteerControl(entry: SubagentRunRecord, hasPendingDescendants: boolean) {
+  return Boolean(entry.endedAt) && entry.pauseReason !== "sessions_yield" && !hasPendingDescendants;
+}
+
 async function killSubagentRun(params: {
   cfg: OpenClawConfig;
   entry: SubagentRunRecord;
@@ -151,8 +167,9 @@ async function killSubagentRun(params: {
     cache: params.cache,
   });
   const sessionId = resolved.entry?.sessionId;
-  const aborted = sessionId ? abortEmbeddedPiRun(sessionId) : false;
-  const cleared = clearSessionQueues([childSessionKey, sessionId]);
+  const runtime = await resolveSubagentControlRuntime();
+  const aborted = sessionId ? runtime.abortEmbeddedAgentRun(sessionId) : false;
+  const cleared = runtime.clearSessionQueues([childSessionKey, sessionId]);
   if (cleared.followupCleared > 0 || cleared.laneCleared > 0) {
     logVerbose(
       `subagents control kill: cleared followups=${cleared.followupCleared} lane=${cleared.laneCleared} keys=${cleared.keys.join(",")}`,
@@ -160,7 +177,7 @@ async function killSubagentRun(params: {
   }
   if (resolved.entry) {
     try {
-      await updateSessionStore(resolved.storePath, (store) => {
+      await subagentControlDeps.updateSessionStore(resolved.storePath, (store) => {
         const current = store[childSessionKey];
         if (!current) {
           return;
@@ -171,9 +188,7 @@ async function killSubagentRun(params: {
       });
     } catch (error) {
       logVerbose(
-        `subagents control kill: failed to persist abortedLastRun for ${childSessionKey}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `subagents control kill: failed to persist abortedLastRun for ${childSessionKey}: ${formatErrorMessage(error)}`,
       );
     }
   }
@@ -453,7 +468,7 @@ export async function steerControlledSubagentRun(params: {
     };
   }
   const targetHasPendingDescendants = countPendingDescendantRuns(params.entry.childSessionKey) > 0;
-  if (params.entry.endedAt && !targetHasPendingDescendants) {
+  if (isFinishedForSteerControl(params.entry, targetHasPendingDescendants)) {
     return {
       status: "done",
       runId: params.entry.runId,
@@ -470,12 +485,13 @@ export async function steerControlledSubagentRun(params: {
     };
   }
   const currentEntry = getLatestSubagentRunByChildSessionKey(params.entry.childSessionKey);
-  const currentHasPendingDescendants =
-    currentEntry && countPendingDescendantRuns(currentEntry.childSessionKey) > 0;
+  const currentHasPendingDescendants = currentEntry
+    ? countPendingDescendantRuns(currentEntry.childSessionKey) > 0
+    : false;
   if (
     !currentEntry ||
     currentEntry.runId !== params.entry.runId ||
-    (currentEntry.endedAt && !currentHasPendingDescendants)
+    isFinishedForSteerControl(currentEntry, currentHasPendingDescendants)
   ) {
     return {
       status: "done",
@@ -511,11 +527,14 @@ export async function steerControlledSubagentRun(params: {
     typeof targetSession.entry?.sessionId === "string" && targetSession.entry.sessionId.trim()
       ? targetSession.entry.sessionId.trim()
       : undefined;
+  const restartSessionId = sessionId ? crypto.randomUUID() : undefined;
 
   if (sessionId) {
-    abortEmbeddedPiRun(sessionId);
+    const runtime = await resolveSubagentControlRuntime();
+    runtime.abortEmbeddedAgentRun(sessionId);
   }
-  const cleared = clearSessionQueues([params.entry.childSessionKey, sessionId]);
+  const runtime = await resolveSubagentControlRuntime();
+  const cleared = runtime.clearSessionQueues([params.entry.childSessionKey, sessionId]);
   if (cleared.followupCleared > 0 || cleared.laneCleared > 0) {
     logVerbose(
       `subagents control steer: cleared followups=${cleared.followupCleared} lane=${cleared.laneCleared} keys=${cleared.keys.join(",")}`,
@@ -543,7 +562,7 @@ export async function steerControlledSubagentRun(params: {
       params: {
         message: params.message,
         sessionKey: params.entry.childSessionKey,
-        sessionId,
+        sessionId: restartSessionId,
         idempotencyKey,
         deliver: false,
         channel: INTERNAL_MESSAGE_CHANNEL,
@@ -557,12 +576,12 @@ export async function steerControlledSubagentRun(params: {
     }
   } catch (err) {
     clearSubagentRunSteerRestart(params.entry.runId);
-    const error = err instanceof Error ? err.message : String(err);
+    const error = formatErrorMessage(err);
     return {
       status: "error",
       runId,
       sessionKey: params.entry.childSessionKey,
-      sessionId,
+      sessionId: restartSessionId,
       error,
     };
   }
@@ -579,7 +598,7 @@ export async function steerControlledSubagentRun(params: {
       status: "error",
       runId,
       sessionKey: params.entry.childSessionKey,
-      sessionId,
+      sessionId: restartSessionId,
       error: "failed to replace steered subagent run",
     };
   }
@@ -588,7 +607,7 @@ export async function steerControlledSubagentRun(params: {
     status: "accepted",
     runId,
     sessionKey: params.entry.childSessionKey,
-    sessionId,
+    sessionId: restartSessionId,
     mode: "restart",
     label: resolveSubagentLabel(params.entry),
     text: `steered ${resolveSubagentLabel(params.entry)}.`,
@@ -681,36 +700,20 @@ export async function sendControlledSubagentMessage(params: {
     }
     return { status: "ok" as const, runId, replyText: result.replyText };
   } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
+    const error = formatErrorMessage(err);
     return { status: "error" as const, runId, error };
   }
 }
 
-export function resolveControlledSubagentTarget(
-  runs: SubagentRunRecord[],
-  token: string | undefined,
-  options?: { recentMinutes?: number; isActive?: (entry: SubagentRunRecord) => boolean },
-): SubagentTargetResolution {
-  return resolveSubagentTargetFromRuns({
-    runs,
-    token,
-    recentWindowMinutes: options?.recentMinutes ?? DEFAULT_RECENT_MINUTES,
-    label: (entry) => resolveSubagentLabel(entry),
-    isActive: options?.isActive,
-    errors: {
-      missingTarget: "Missing subagent target.",
-      invalidIndex: (value) => `Invalid subagent index: ${value}`,
-      unknownSession: (value) => `Unknown subagent session: ${value}`,
-      ambiguousLabel: (value) => `Ambiguous subagent label: ${value}`,
-      ambiguousLabelPrefix: (value) => `Ambiguous subagent label prefix: ${value}`,
-      ambiguousRunIdPrefix: (value) => `Ambiguous subagent run id prefix: ${value}`,
-      unknownTarget: (value) => `Unknown subagent target: ${value}`,
-    },
-  });
-}
-
-export const __testing = {
-  setDepsForTest(overrides?: Partial<{ callGateway: GatewayCaller }>) {
+export const testing = {
+  setDepsForTest(
+    overrides?: Partial<{
+      callGateway: GatewayCaller;
+      updateSessionStore: UpdateSessionStore;
+      abortEmbeddedAgentRun: AbortEmbeddedAgentRun;
+      clearSessionQueues: ClearSessionQueues;
+    }>,
+  ) {
     subagentControlDeps = overrides
       ? {
           ...defaultSubagentControlDeps,
@@ -719,3 +722,4 @@ export const __testing = {
       : defaultSubagentControlDeps;
   },
 };
+export { testing as __testing };

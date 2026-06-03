@@ -1,17 +1,20 @@
-import type { ReplyPayload } from "../auto-reply/types.js";
+import { normalizeOptionalString } from "../../packages/normalization-core/src/string-coerce.js";
 import {
-  buildApprovalInteractiveReply,
+  buildApprovalPresentation,
   type ExecApprovalReplyDecision,
 } from "../infra/exec-approval-reply.js";
 import {
   buildPluginApprovalRequestMessage,
   buildPluginApprovalResolvedMessage,
+  resolvePluginApprovalRequestAllowedDecisions,
   type PluginApprovalRequest,
   type PluginApprovalResolved,
 } from "../infra/plugin-approvals.js";
+import type { ReplyPayload } from "./reply-payload.js";
 
 const DEFAULT_ALLOWED_DECISIONS = ["allow-once", "allow-always", "deny"] as const;
 
+/** Build a pending approval reply payload using the portable presentation API. */
 export function buildApprovalPendingReplyPayload(params: {
   approvalKind?: "exec" | "plugin";
   approvalId: string;
@@ -25,7 +28,7 @@ export function buildApprovalPendingReplyPayload(params: {
   const allowedDecisions = params.allowedDecisions ?? DEFAULT_ALLOWED_DECISIONS;
   return {
     text: params.text,
-    interactive: buildApprovalInteractiveReply({
+    presentation: buildApprovalPresentation({
       approvalId: params.approvalId,
       allowedDecisions,
     }),
@@ -34,9 +37,9 @@ export function buildApprovalPendingReplyPayload(params: {
         approvalId: params.approvalId,
         approvalSlug: params.approvalSlug,
         approvalKind: params.approvalKind ?? "exec",
-        agentId: params.agentId?.trim() || undefined,
+        agentId: normalizeOptionalString(params.agentId),
         allowedDecisions,
-        sessionKey: params.sessionKey?.trim() || undefined,
+        sessionKey: normalizeOptionalString(params.sessionKey),
         state: "pending",
       },
       ...params.channelData,
@@ -44,6 +47,7 @@ export function buildApprovalPendingReplyPayload(params: {
   };
 }
 
+/** Build a resolved approval reply payload with approval metadata but no controls. */
 export function buildApprovalResolvedReplyPayload(params: {
   approvalId: string;
   approvalSlug: string;
@@ -76,7 +80,9 @@ export function buildPluginApprovalPendingReplyPayload(params: {
     approvalId: params.request.id,
     approvalSlug: params.approvalSlug ?? params.request.id.slice(0, 8),
     text: params.text ?? buildPluginApprovalRequestMessage(params.request, params.nowMs),
-    allowedDecisions: params.allowedDecisions,
+    allowedDecisions:
+      params.allowedDecisions ??
+      resolvePluginApprovalRequestAllowedDecisions(params.request.request),
     channelData: params.channelData,
   });
 }

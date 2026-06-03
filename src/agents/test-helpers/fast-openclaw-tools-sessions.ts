@@ -1,3 +1,4 @@
+import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
 import { vi } from "vitest";
 import { stubTool } from "./fast-tool-stubs.js";
 
@@ -45,7 +46,7 @@ vi.mock("../tools/update-plan-tool.js", () => ({
 
 vi.mock("../../channels/plugins/index.js", () => ({
   getChannelPlugin: () => null,
-  normalizeChannelId: (channel?: string) => channel?.trim().toLowerCase() || undefined,
+  normalizeChannelId: (channel?: string) => normalizeOptionalLowercaseString(channel),
   listChannelPlugins: () => [],
 }));
 

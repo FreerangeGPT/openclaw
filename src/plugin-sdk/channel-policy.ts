@@ -1,9 +1,13 @@
+import {
+  normalizeStringEntries,
+  uniqueStrings,
+} from "../../packages/normalization-core/src/string-normalization.js";
+import { sanitizeForLog } from "../../packages/terminal-core/src/ansi.js";
 import { createAllowlistProviderRestrictSendersWarningCollector } from "../channels/plugins/group-policy-warnings.js";
 import type { ChannelSecurityAdapter } from "../channels/plugins/types.adapters.js";
-import type { OpenClawConfig } from "../config/config.js";
 import { collectProviderDangerousNameMatchingScopes } from "../config/dangerous-name-matching.js";
 import type { GroupPolicy } from "../config/types.base.js";
-import { sanitizeForLog } from "../terminal/ansi.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createScopedDmSecurityResolver } from "./channel-config-helpers.js";
 /** Shared policy warnings and DM/group policy helpers for channel plugins. */
 export type {
@@ -25,6 +29,7 @@ export {
   buildOpenGroupPolicyWarning,
   collectAllowlistProviderGroupPolicyWarnings,
   collectAllowlistProviderRestrictSendersWarnings,
+  collectOpenGroupPolicyConfiguredRouteWarnings,
   collectOpenGroupPolicyRestrictSendersWarnings,
   collectOpenGroupPolicyRouteAllowlistWarnings,
   collectOpenProviderGroupPolicyWarnings,
@@ -36,22 +41,44 @@ export {
 } from "../channels/plugins/group-policy-warnings.js";
 export { buildAccountScopedDmSecurityPolicy } from "../channels/plugins/helpers.js";
 export {
+  resolveChannelGroupPolicy,
   resolveChannelGroupRequireMention,
   resolveChannelGroupToolsPolicy,
   resolveToolsBySender,
+  type ChannelGroupPolicy,
 } from "../config/group-policy.js";
 export {
   DM_GROUP_ACCESS_REASON,
   readStoreAllowFromForDmPolicy,
+  resolveDmGroupAccessWithCommandGate,
   resolveDmGroupAccessWithLists,
   resolveEffectiveAllowFromLists,
-} from "../security/dm-policy-shared.js";
+  resolveOpenDmAllowlistAccess,
+} from "./channel-access-compat.js";
 export {
   evaluateGroupRouteAccessForPolicy,
+  evaluateSenderGroupAccessForPolicy,
   resolveSenderScopedGroupPolicy,
 } from "./group-access.js";
 export { createAllowlistProviderRestrictSendersWarningCollector };
 
+/** Normalizes allowFrom entries into trimmed unique string identifiers. */
+export function normalizeAllowFromList(list: Array<string | number> | undefined | null): string[] {
+  if (!Array.isArray(list)) {
+    return [];
+  }
+  return normalizeStringEntries(list);
+}
+
+/** Coerces native feature settings to the supported boolean/auto shape. */
+export function coerceNativeSetting(value: unknown): boolean | "auto" | undefined {
+  if (value === true || value === false || value === "auto") {
+    return value;
+  }
+  return undefined;
+}
+
+/** Candidate mutable allowlist path inspected for dangerous name-matching warnings. */
 export type ChannelMutableAllowlistCandidate = {
   pathLabel: string;
   list: unknown;
@@ -73,9 +100,10 @@ function collectMutableAllowlistWarningLines(
   const exampleLines = hits
     .slice(0, 8)
     .map((hit) => `- ${sanitizeForLog(hit.path)}: ${sanitizeForLog(hit.entry)}`);
+  // Keep doctor output actionable without dumping large allowlists into logs.
   const remaining =
     hits.length > 8 ? `- +${hits.length - 8} more mutable allowlist entries.` : null;
-  const flagPaths = Array.from(new Set(hits.map((hit) => hit.dangerousFlagPath)));
+  const flagPaths = uniqueStrings(hits.map((hit) => hit.dangerousFlagPath));
   const flagHint =
     flagPaths.length === 1
       ? sanitizeForLog(flagPaths[0] ?? "")
@@ -89,6 +117,7 @@ function collectMutableAllowlistWarningLines(
   ];
 }
 
+/** Creates a warning collector for mutable name/email/nick allowlists when matching is disabled. */
 export function createDangerousNameMatchingMutableAllowlistWarningCollector(params: {
   channel: string;
   detector: (entry: string) => boolean;
@@ -146,6 +175,7 @@ export function createRestrictSendersChannelSecurity<
   approveChannelId?: string;
   approveHint?: string;
   normalizeDmEntry?: (raw: string) => string;
+  inheritSharedDefaultsFromDefaultAccount?: boolean;
 }): ChannelSecurityAdapter<ResolvedAccount> {
   return {
     resolveDmPolicy: createScopedDmSecurityResolver<ResolvedAccount>({
@@ -159,6 +189,7 @@ export function createRestrictSendersChannelSecurity<
       approveChannelId: params.approveChannelId,
       approveHint: params.approveHint,
       normalizeEntry: params.normalizeDmEntry,
+      inheritSharedDefaultsFromDefaultAccount: params.inheritSharedDefaultsFromDefaultAccount,
     }),
     collectWarnings: createAllowlistProviderRestrictSendersWarningCollector<ResolvedAccount>({
       providerConfigPresent:

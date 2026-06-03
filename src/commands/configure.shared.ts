@@ -5,7 +5,12 @@ import {
   select as clackSelect,
   text as clackText,
 } from "@clack/prompts";
-import { stylePromptHint, stylePromptMessage, stylePromptTitle } from "../terminal/prompt-style.js";
+import { normalizeStringEntries } from "@openclaw/normalization-core/string-normalization";
+import {
+  stylePromptHint,
+  stylePromptMessage,
+  stylePromptTitle,
+} from "../../packages/terminal-core/src/prompt-style.js";
 
 export const CONFIGURE_WIZARD_SECTIONS = [
   "workspace",
@@ -25,9 +30,7 @@ export function parseConfigureWizardSections(raw: unknown): {
   sections: WizardSection[];
   invalid: string[];
 } {
-  const sectionsRaw: string[] = Array.isArray(raw)
-    ? raw.map((value: unknown) => (typeof value === "string" ? value.trim() : "")).filter(Boolean)
-    : [];
+  const sectionsRaw: string[] = Array.isArray(raw) ? normalizeStringEntries(raw) : [];
   if (sectionsRaw.length === 0) {
     return { sections: [], invalid: [] };
   }

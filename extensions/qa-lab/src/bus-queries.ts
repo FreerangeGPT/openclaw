@@ -1,4 +1,6 @@
+import { normalizeOptionalLowercaseString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type {
+  QaBusAttachment,
   QaBusConversation,
   QaBusEvent,
   QaBusMessage,
@@ -8,6 +10,7 @@ import type {
   QaBusSearchMessagesInput,
   QaBusStateSnapshot,
   QaBusThread,
+  QaBusToolCall,
 } from "./runtime-api.js";
 
 export const DEFAULT_ACCOUNT_ID = "default";
@@ -37,6 +40,11 @@ export function normalizeConversationFromTarget(target: string): {
       conversation: { id: trimmed.slice("channel:".length), kind: "channel" },
     };
   }
+  if (trimmed.startsWith("group:")) {
+    return {
+      conversation: { id: trimmed.slice("group:".length), kind: "group" },
+    };
+  }
   if (trimmed.startsWith("dm:")) {
     return {
       conversation: { id: trimmed.slice("dm:".length), kind: "direct" },
@@ -51,7 +59,20 @@ export function cloneMessage(message: QaBusMessage): QaBusMessage {
   return {
     ...message,
     conversation: { ...message.conversation },
+    attachments: (message.attachments ?? []).map((attachment) => cloneAttachment(attachment)),
+    toolCalls: message.toolCalls?.map((toolCall) => cloneToolCall(toolCall)),
     reactions: message.reactions.map((reaction) => ({ ...reaction })),
+  };
+}
+
+function cloneAttachment(attachment: QaBusAttachment): QaBusAttachment {
+  return { ...attachment };
+}
+
+function cloneToolCall(toolCall: QaBusToolCall): QaBusToolCall {
+  return {
+    name: toolCall.name,
+    ...(toolCall.arguments ? { arguments: structuredClone(toolCall.arguments) } : {}),
   };
 }
 
@@ -66,6 +87,7 @@ export function cloneEvent(event: QaBusEvent): QaBusEvent {
     case "thread-created":
       return { ...event, thread: { ...event.thread } };
   }
+  throw new Error("Unsupported QA bus event kind");
 }
 
 export function buildQaBusSnapshot(params: {
@@ -77,10 +99,10 @@ export function buildQaBusSnapshot(params: {
 }): QaBusStateSnapshot {
   return {
     cursor: params.cursor,
-    conversations: Array.from(params.conversations.values()).map((conversation) => ({
-      ...conversation,
-    })),
-    threads: Array.from(params.threads.values()).map((thread) => ({ ...thread })),
+    conversations: Array.from(params.conversations.values()).map((conversation) =>
+      Object.assign({}, conversation),
+    ),
+    threads: Array.from(params.threads.values()).map((thread) => Object.assign({}, thread)),
     messages: Array.from(params.messages.values()).map((message) => cloneMessage(message)),
     events: params.events.map((event) => cloneEvent(event)),
   };
@@ -103,7 +125,7 @@ export function searchQaBusMessages(params: {
 }) {
   const accountId = normalizeAccountId(params.input.accountId);
   const limit = Math.max(1, Math.min(params.input.limit ?? 20, 100));
-  const query = params.input.query?.trim().toLowerCase();
+  const query = normalizeOptionalLowercaseString(params.input.query);
   return Array.from(params.messages.values())
     .filter((message) => message.accountId === accountId)
     .filter((message) =>
@@ -112,9 +134,38 @@ export function searchQaBusMessages(params: {
     .filter((message) =>
       params.input.threadId ? message.threadId === params.input.threadId : true,
     )
-    .filter((message) => (query ? message.text.toLowerCase().includes(query) : true))
+    .filter((message) => {
+      if (!query) {
+        return true;
+      }
+      const attachmentHaystack = message.attachments ?? [];
+      const searchableAttachmentText = attachmentHaystack
+        .flatMap((attachment) => [
+          attachment.fileName,
+          attachment.altText,
+          attachment.transcript,
+          attachment.mimeType,
+        ])
+        .filter((value): value is string => Boolean(value))
+        .join(" ")
+        .toLowerCase();
+      const messageText = normalizeOptionalLowercaseString(message.text) ?? "";
+      const searchableToolText = (message.toolCalls ?? [])
+        .map((toolCall) => toolCall.name)
+        .join(" ")
+        .toLowerCase();
+      return `${messageText} ${searchableAttachmentText} ${searchableToolText}`.includes(query);
+    })
     .slice(-limit)
     .map((message) => cloneMessage(message));
+}
+
+export function resolveQaBusPollStartCursor(params: {
+  currentCursor: number;
+  requestedCursor?: number;
+}): number {
+  const requestedCursor = params.requestedCursor ?? 0;
+  return params.currentCursor < requestedCursor ? 0 : requestedCursor;
 }
 
 export function pollQaBusEvents(params: {
@@ -123,8 +174,10 @@ export function pollQaBusEvents(params: {
   input?: QaBusPollInput;
 }): QaBusPollResult {
   const accountId = normalizeAccountId(params.input?.accountId);
-  const startCursor = params.input?.cursor ?? 0;
-  const effectiveStartCursor = params.cursor < startCursor ? 0 : startCursor;
+  const effectiveStartCursor = resolveQaBusPollStartCursor({
+    currentCursor: params.cursor,
+    requestedCursor: params.input?.cursor,
+  });
   const limit = Math.max(1, Math.min(params.input?.limit ?? 100, 500));
   const matches = params.events
     .filter((event) => event.accountId === accountId && event.cursor > effectiveStartCursor)

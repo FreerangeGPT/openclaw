@@ -1,36 +1,41 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { importFreshModule } from "../../test/helpers/import-fresh.js";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({
-  abortEmbeddedPiRunMock: vi.fn(),
+  abortEmbeddedAgentRunMock: vi.fn(),
   requestEmbeddedRunModelSwitchMock: vi.fn(),
   consumeEmbeddedRunModelSwitchMock: vi.fn(),
   resolveDefaultModelForAgentMock: vi.fn(),
-  resolvePersistedModelRefMock: vi.fn(),
+  resolvePersistedSelectedModelRefMock: vi.fn(),
   loadSessionStoreMock: vi.fn(),
   resolveStorePathMock: vi.fn(),
   updateSessionStoreMock: vi.fn(),
-  piEmbeddedModuleImported: false,
+  embeddedAgentModuleImported: false,
 }));
 
-vi.mock("./pi-embedded.js", () => {
-  state.piEmbeddedModuleImported = true;
+vi.mock("./embedded-agent.js", () => {
+  state.embeddedAgentModuleImported = true;
   return {};
 });
 
-vi.mock("./pi-embedded-runner/runs.js", () => ({
-  abortEmbeddedPiRun: (...args: unknown[]) => state.abortEmbeddedPiRunMock(...args),
+vi.mock("./embedded-agent-runner/runs.js", () => ({
+  abortEmbeddedAgentRun: (...args: unknown[]) => state.abortEmbeddedAgentRunMock(...args),
   requestEmbeddedRunModelSwitch: (...args: unknown[]) =>
     state.requestEmbeddedRunModelSwitchMock(...args),
   consumeEmbeddedRunModelSwitch: (...args: unknown[]) =>
     state.consumeEmbeddedRunModelSwitchMock(...args),
 }));
 
-vi.mock("./model-selection.js", () => ({
-  resolveDefaultModelForAgent: (...args: unknown[]) =>
-    state.resolveDefaultModelForAgentMock(...args),
-  resolvePersistedModelRef: (...args: unknown[]) => state.resolvePersistedModelRefMock(...args),
-}));
+vi.mock("./model-selection.js", async () => {
+  const actual =
+    await vi.importActual<typeof import("./model-selection.js")>("./model-selection.js");
+  return {
+    normalizeStoredOverrideModel: actual.normalizeStoredOverrideModel,
+    resolveDefaultModelForAgent: (...args: unknown[]) =>
+      state.resolveDefaultModelForAgentMock(...args),
+    resolvePersistedSelectedModelRef: (...args: unknown[]) =>
+      state.resolvePersistedSelectedModelRefMock(...args),
+  };
+});
 
 vi.mock("../config/sessions/store.js", () => ({
   loadSessionStore: (...args: unknown[]) => state.loadSessionStoreMock(...args),
@@ -47,23 +52,43 @@ vi.mock("../config/sessions.js", () => ({
   updateSessionStore: (...args: unknown[]) => state.updateSessionStoreMock(...args),
 }));
 
+let mod: typeof import("./live-model-switch.js");
+
 async function loadModule() {
-  return await importFreshModule<typeof import("./live-model-switch.js")>(
-    import.meta.url,
-    `./live-model-switch.js?scope=${Math.random().toString(36).slice(2)}`,
-  );
+  return mod;
+}
+
+type ShouldSwitchParams = Parameters<
+  typeof import("./live-model-switch.js").shouldSwitchToLiveModel
+>[0];
+
+function makeShouldSwitchParams(overrides: Partial<ShouldSwitchParams> = {}): ShouldSwitchParams {
+  return {
+    cfg: { session: { store: "/tmp/custom-store.json" } },
+    sessionKey: "main",
+    agentId: "reply",
+    defaultProvider: "anthropic",
+    defaultModel: "claude-opus-4-6",
+    currentProvider: "anthropic",
+    currentModel: "claude-opus-4-6",
+    ...overrides,
+  };
 }
 
 describe("live model switch", () => {
+  beforeAll(async () => {
+    mod = await import("./live-model-switch.js");
+  });
+
   beforeEach(() => {
-    state.abortEmbeddedPiRunMock.mockReset().mockReturnValue(false);
+    state.abortEmbeddedAgentRunMock.mockReset().mockReturnValue(false);
     state.requestEmbeddedRunModelSwitchMock.mockReset();
     state.consumeEmbeddedRunModelSwitchMock.mockReset();
-    state.piEmbeddedModuleImported = false;
+    state.embeddedAgentModuleImported = false;
     state.resolveDefaultModelForAgentMock
       .mockReset()
       .mockReturnValue({ provider: "anthropic", model: "claude-opus-4-6" });
-    state.resolvePersistedModelRefMock
+    state.resolvePersistedSelectedModelRefMock
       .mockReset()
       .mockImplementation(
         (params: {
@@ -74,6 +99,21 @@ describe("live model switch", () => {
           overrideModel?: string;
         }) => {
           const defaultProvider = params.defaultProvider.trim();
+          const overrideProvider = params.overrideProvider?.trim();
+          const overrideModel = params.overrideModel?.trim();
+          if (overrideModel) {
+            if (overrideProvider) {
+              return { provider: overrideProvider, model: overrideModel };
+            }
+            const slash = overrideModel.indexOf("/");
+            if (slash <= 0 || slash === overrideModel.length - 1) {
+              return { provider: defaultProvider, model: overrideModel };
+            }
+            return {
+              provider: overrideModel.slice(0, slash),
+              model: overrideModel.slice(slash + 1),
+            };
+          }
           const runtimeProvider = params.runtimeProvider?.trim();
           const runtimeModel = params.runtimeModel?.trim();
           if (runtimeModel) {
@@ -89,22 +129,7 @@ describe("live model switch", () => {
               model: runtimeModel.slice(slash + 1),
             };
           }
-          const overrideProvider = params.overrideProvider?.trim();
-          const overrideModel = params.overrideModel?.trim();
-          if (!overrideModel) {
-            return null;
-          }
-          if (overrideProvider) {
-            return { provider: overrideProvider, model: overrideModel };
-          }
-          const slash = overrideModel.indexOf("/");
-          if (slash <= 0 || slash === overrideModel.length - 1) {
-            return { provider: defaultProvider, model: overrideModel };
-          }
-          return {
-            provider: overrideModel.slice(0, slash),
-            model: overrideModel.slice(slash + 1),
-          };
+          return null;
         },
       );
     state.loadSessionStoreMock.mockReset().mockReturnValue({});
@@ -232,8 +257,87 @@ describe("live model switch", () => {
     });
   });
 
+  it("keeps nested model ids under the persisted provider override", async () => {
+    state.loadSessionStoreMock.mockReturnValue({
+      main: {
+        providerOverride: "nvidia",
+        modelOverride: "moonshotai/kimi-k2.5",
+      },
+    });
+
+    const { resolveLiveSessionModelSelection } = await loadModule();
+
+    expect(
+      resolveLiveSessionModelSelection({
+        cfg: { session: { store: "/tmp/custom-store.json" } },
+        sessionKey: "main",
+        agentId: "reply",
+        defaultProvider: "anthropic",
+        defaultModel: "claude-opus-4-6",
+      }),
+    ).toEqual({
+      provider: "nvidia",
+      model: "moonshotai/kimi-k2.5",
+      authProfileId: undefined,
+      authProfileIdSource: undefined,
+    });
+  });
+
+  it("strips duplicated provider prefixes from persisted overrides", async () => {
+    state.loadSessionStoreMock.mockReturnValue({
+      main: {
+        providerOverride: "openai",
+        modelOverride: "openai/gpt-5.4",
+      },
+    });
+
+    const { resolveLiveSessionModelSelection } = await loadModule();
+
+    expect(
+      resolveLiveSessionModelSelection({
+        cfg: { session: { store: "/tmp/custom-store.json" } },
+        sessionKey: "main",
+        agentId: "reply",
+        defaultProvider: "anthropic",
+        defaultModel: "claude-opus-4-6",
+      }),
+    ).toEqual({
+      provider: "openai",
+      model: "gpt-5.4",
+      authProfileId: undefined,
+      authProfileIdSource: undefined,
+    });
+  });
+
+  it("routes normalized overrides back through persisted ref resolution", async () => {
+    state.loadSessionStoreMock.mockReturnValue({
+      main: {
+        providerOverride: "z-ai",
+        modelOverride: "z-ai/deepseek-chat",
+      },
+    });
+
+    const { resolveLiveSessionModelSelection } = await loadModule();
+
+    resolveLiveSessionModelSelection({
+      cfg: { session: { store: "/tmp/custom-store.json" } },
+      sessionKey: "main",
+      agentId: "reply",
+      defaultProvider: "anthropic",
+      defaultModel: "claude-opus-4-6",
+    });
+
+    expect(state.resolvePersistedSelectedModelRefMock).toHaveBeenCalledWith({
+      defaultProvider: "anthropic",
+      runtimeProvider: undefined,
+      runtimeModel: undefined,
+      overrideProvider: "z-ai",
+      overrideModel: "deepseek-chat",
+    });
+  });
+
   it("queues a live switch only when an active run was aborted", async () => {
-    state.abortEmbeddedPiRunMock.mockReturnValue(true);
+    state.abortEmbeddedAgentRunMock.mockReturnValue(true);
 
     const { requestLiveSessionModelSwitch } = await loadModule();
 
@@ -243,7 +347,7 @@ describe("live model switch", () => {
         selection: { provider: "openai", model: "gpt-5.4", authProfileId: "profile-gpt" },
       }),
     ).toBe(true);
-    expect(state.abortEmbeddedPiRunMock).toHaveBeenCalledWith("session-1");
+    expect(state.abortEmbeddedAgentRunMock).toHaveBeenCalledWith("session-1");
     expect(state.requestEmbeddedRunModelSwitchMock).toHaveBeenCalledWith("session-1", {
       provider: "openai",
       model: "gpt-5.4",
@@ -251,10 +355,61 @@ describe("live model switch", () => {
     });
   });
 
-  it("does not import the broad pi-embedded barrel on module load", async () => {
+  it("does not import the broad embedded-agent barrel on module load", async () => {
     await loadModule();
 
-    expect(state.piEmbeddedModuleImported).toBe(false);
+    expect(state.embeddedAgentModuleImported).toBe(false);
+  });
+
+  it("treats active openai as an already-applied openai runtime promotion", async () => {
+    const { hasDifferentLiveSessionModelSelection } = await loadModule();
+
+    expect(
+      hasDifferentLiveSessionModelSelection(
+        {
+          provider: "openai",
+          model: "gpt-5.5",
+        },
+        {
+          provider: "openai",
+          model: "gpt-5.5",
+        },
+      ),
+    ).toBe(false);
+  });
+
+  it("does not suppress explicit runtime provider switches with the same model", async () => {
+    const { hasDifferentLiveSessionModelSelection } = await loadModule();
+
+    expect(
+      hasDifferentLiveSessionModelSelection(
+        {
+          provider: "anthropic",
+          model: "claude-sonnet-4-6",
+        },
+        {
+          provider: "claude-cli",
+          model: "claude-sonnet-4-6",
+        },
+      ),
+    ).toBe(true);
+  });
+
+  it("does not suppress switch when model actually differs across runtime alias", async () => {
+    const { hasDifferentLiveSessionModelSelection } = await loadModule();
+
+    expect(
+      hasDifferentLiveSessionModelSelection(
+        {
+          provider: "openai",
+          model: "gpt-5.5",
+        },
+        {
+          provider: "openai",
+          model: "gpt-5.4",
+        },
+      ),
+    ).toBe(true);
   });
 
   it("treats auth-profile-source changes as no-op when no auth profile is selected", async () => {
@@ -294,25 +449,18 @@ describe("live model switch", () => {
 
   describe("shouldSwitchToLiveModel", () => {
     it("returns the persisted selection when liveModelSwitchPending is true and model differs", async () => {
+      const sessionEntry = {
+        liveModelSwitchPending: true,
+        providerOverride: "openai",
+        modelOverride: "gpt-5.4",
+      };
       state.loadSessionStoreMock.mockReturnValue({
-        main: {
-          liveModelSwitchPending: true,
-          providerOverride: "openai",
-          modelOverride: "gpt-5.4",
-        },
+        main: sessionEntry,
       });
 
       const { shouldSwitchToLiveModel } = await loadModule();
 
-      const result = shouldSwitchToLiveModel({
-        cfg: { session: { store: "/tmp/custom-store.json" } },
-        sessionKey: "main",
-        agentId: "reply",
-        defaultProvider: "anthropic",
-        defaultModel: "claude-opus-4-6",
-        currentProvider: "anthropic",
-        currentModel: "claude-opus-4-6",
-      });
+      const result = shouldSwitchToLiveModel(makeShouldSwitchParams());
 
       expect(result).toEqual({
         provider: "openai",
@@ -332,39 +480,29 @@ describe("live model switch", () => {
 
       const { shouldSwitchToLiveModel } = await loadModule();
 
-      const result = shouldSwitchToLiveModel({
-        cfg: { session: { store: "/tmp/custom-store.json" } },
-        sessionKey: "main",
-        agentId: "reply",
-        defaultProvider: "anthropic",
-        defaultModel: "claude-opus-4-6",
-        currentProvider: "anthropic",
-        currentModel: "claude-opus-4-6",
-      });
+      const result = shouldSwitchToLiveModel(makeShouldSwitchParams());
 
       expect(result).toBeUndefined();
+      expect(state.loadSessionStoreMock).toHaveBeenCalledWith("/tmp/session-store.json", {
+        hydrateSkillPromptRefs: false,
+        skipCache: true,
+        clone: false,
+      });
     });
 
     it("returns undefined when liveModelSwitchPending is true but models match", async () => {
+      const sessionEntry = {
+        liveModelSwitchPending: true,
+        providerOverride: "anthropic",
+        modelOverride: "claude-opus-4-6",
+      };
       state.loadSessionStoreMock.mockReturnValue({
-        main: {
-          liveModelSwitchPending: true,
-          providerOverride: "anthropic",
-          modelOverride: "claude-opus-4-6",
-        },
+        main: sessionEntry,
       });
 
       const { shouldSwitchToLiveModel } = await loadModule();
 
-      const result = shouldSwitchToLiveModel({
-        cfg: { session: { store: "/tmp/custom-store.json" } },
-        sessionKey: "main",
-        agentId: "reply",
-        defaultProvider: "anthropic",
-        defaultModel: "claude-opus-4-6",
-        currentProvider: "anthropic",
-        currentModel: "claude-opus-4-6",
-      });
+      const result = shouldSwitchToLiveModel(makeShouldSwitchParams());
 
       expect(result).toBeUndefined();
     });
@@ -385,35 +523,39 @@ describe("live model switch", () => {
 
       const { shouldSwitchToLiveModel } = await loadModule();
 
-      const result = shouldSwitchToLiveModel({
-        cfg: { session: { store: "/tmp/custom-store.json" } },
-        sessionKey: "main",
-        agentId: "reply",
-        defaultProvider: "anthropic",
-        defaultModel: "claude-opus-4-6",
-        currentProvider: "anthropic",
-        currentModel: "claude-opus-4-6",
-      });
+      const result = shouldSwitchToLiveModel(makeShouldSwitchParams());
 
       expect(result).toBeUndefined();
-      // Give the fire-and-forget clearLiveModelSwitchPending a tick to resolve
-      await new Promise((r) => setTimeout(r, 10));
-      expect(state.updateSessionStoreMock).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(state.updateSessionStoreMock).toHaveBeenCalledTimes(1));
       expect(sessionEntry).not.toHaveProperty("liveModelSwitchPending");
     });
 
     it("returns undefined when sessionKey is missing", async () => {
       const { shouldSwitchToLiveModel } = await loadModule();
 
-      const result = shouldSwitchToLiveModel({
-        cfg: { session: { store: "/tmp/custom-store.json" } },
-        sessionKey: undefined,
-        agentId: "reply",
-        defaultProvider: "anthropic",
-        defaultModel: "claude-opus-4-6",
-        currentProvider: "anthropic",
-        currentModel: "claude-opus-4-6",
-      });
+      const result = shouldSwitchToLiveModel(makeShouldSwitchParams({ sessionKey: undefined }));
+
+      expect(result).toBeUndefined();
+    });
+
+    it("does not trigger switch when runtime promotes openai to openai", async () => {
+      const sessionEntry = {
+        liveModelSwitchPending: true,
+        providerOverride: "openai",
+        modelOverride: "gpt-5.5",
+      };
+      state.loadSessionStoreMock.mockReturnValue({ main: sessionEntry });
+
+      const { shouldSwitchToLiveModel } = await loadModule();
+
+      const result = shouldSwitchToLiveModel(
+        makeShouldSwitchParams({
+          currentProvider: "openai",
+          currentModel: "gpt-5.5",
+          defaultProvider: "openai",
+          defaultModel: "gpt-5.5",
+        }),
+      );
 
       expect(result).toBeUndefined();
     });

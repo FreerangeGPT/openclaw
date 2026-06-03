@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { sanitizeQaBusToolCalls } from "openclaw/plugin-sdk/qa-channel-protocol";
 import {
   buildQaBusSnapshot,
   cloneMessage,
@@ -10,6 +11,7 @@ import {
 } from "./bus-queries.js";
 import { createQaBusWaiterStore } from "./bus-waiters.js";
 import type {
+  QaBusAttachment,
   QaBusConversation,
   QaBusCreateThreadInput,
   QaBusDeleteMessageInput,
@@ -22,7 +24,9 @@ import type {
   QaBusReadMessageInput,
   QaBusReactToMessageInput,
   QaBusSearchMessagesInput,
+  QaBusStateSnapshot,
   QaBusThread,
+  QaBusToolCall,
   QaBusWaitForInput,
 } from "./runtime-api.js";
 
@@ -30,12 +34,38 @@ const DEFAULT_BOT_ID = "openclaw";
 const DEFAULT_BOT_NAME = "OpenClaw QA";
 
 type QaBusEventSeed =
-  | Omit<Extract<QaBusEvent, { kind: "inbound-message" }>, "cursor">
-  | Omit<Extract<QaBusEvent, { kind: "outbound-message" }>, "cursor">
-  | Omit<Extract<QaBusEvent, { kind: "thread-created" }>, "cursor">
-  | Omit<Extract<QaBusEvent, { kind: "message-edited" }>, "cursor">
-  | Omit<Extract<QaBusEvent, { kind: "message-deleted" }>, "cursor">
-  | Omit<Extract<QaBusEvent, { kind: "reaction-added" }>, "cursor">;
+  | {
+      kind: "inbound-message";
+      accountId: string;
+      message: QaBusMessage;
+    }
+  | {
+      kind: "outbound-message";
+      accountId: string;
+      message: QaBusMessage;
+    }
+  | {
+      kind: "thread-created";
+      accountId: string;
+      thread: QaBusThread;
+    }
+  | {
+      kind: "message-edited";
+      accountId: string;
+      message: QaBusMessage;
+    }
+  | {
+      kind: "message-deleted";
+      accountId: string;
+      message: QaBusMessage;
+    }
+  | {
+      kind: "reaction-added";
+      accountId: string;
+      message: QaBusMessage;
+      emoji: string;
+      senderId: string;
+    };
 
 export function createQaBusState() {
   const conversations = new Map<string, QaBusConversation>();
@@ -86,8 +116,11 @@ export function createQaBusState() {
     threadId?: string;
     threadTitle?: string;
     replyToId?: string;
+    attachments?: QaBusAttachment[];
+    toolCalls?: QaBusToolCall[];
   }): QaBusMessage => {
     const conversation = ensureConversation(params.conversation);
+    const toolCalls = sanitizeQaBusToolCalls(params.toolCalls);
     const message: QaBusMessage = {
       id: randomUUID(),
       accountId: params.accountId,
@@ -100,6 +133,8 @@ export function createQaBusState() {
       threadId: params.threadId,
       threadTitle: params.threadTitle,
       replyToId: params.replyToId,
+      attachments: params.attachments?.map((attachment) => ({ ...attachment })) ?? [],
+      ...(toolCalls ? { toolCalls } : {}),
       reactions: [],
     };
     messages.set(message.id, message);
@@ -138,6 +173,8 @@ export function createQaBusState() {
         threadId: input.threadId,
         threadTitle: input.threadTitle,
         replyToId: input.replyToId,
+        attachments: input.attachments,
+        toolCalls: input.toolCalls,
       });
       pushEvent({
         kind: "inbound-message",
@@ -159,6 +196,8 @@ export function createQaBusState() {
         timestamp: input.timestamp,
         threadId: input.threadId ?? threadId,
         replyToId: input.replyToId,
+        attachments: input.attachments,
+        toolCalls: input.toolCalls,
       });
       pushEvent({
         kind: "outbound-message",
@@ -250,6 +289,13 @@ export function createQaBusState() {
     },
     async waitFor(input: QaBusWaitForInput) {
       return await waiters.waitFor(input);
+    },
+    async waitForCursorAdvance(
+      afterCursor: number,
+      timeoutMs: number,
+      shouldResolve?: (snapshot: QaBusStateSnapshot) => boolean,
+    ) {
+      return await waiters.waitForCursorAdvance(afterCursor, timeoutMs, shouldResolve);
     },
   };
 }
