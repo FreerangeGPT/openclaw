@@ -1,3 +1,5 @@
+// Gateway E2E test helpers.
+// Starts gateway servers, connects test clients, and handles device-auth fixtures.
 import { writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -5,7 +7,7 @@ import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/st
 import { WebSocket } from "ws";
 import { PROTOCOL_VERSION } from "../../packages/gateway-protocol/src/index.js";
 import { clearConfigCache, clearRuntimeConfigSnapshot } from "../config/config.js";
-import { clearSessionStoreCacheForTest } from "../config/sessions/store.js";
+import { clearSessionStoreCacheForTest } from "../config/sessions/store-writer-state.js";
 import {
   type DeviceIdentity,
   loadOrCreateDeviceIdentity,
@@ -24,10 +26,12 @@ import { GatewayClient } from "./client.js";
 import { buildDeviceAuthPayloadV3 } from "./device-auth.js";
 import { startGatewayServer } from "./server.js";
 
+/** Reserve a deterministic free port block for Gateway E2E tests. */
 export async function getFreeGatewayPort(): Promise<number> {
   return await getDeterministicFreePortBlock({ offsets: [0, 1, 2, 3, 4] });
 }
 
+/** Connect a GatewayClient with test defaults and resolve after hello-ok. */
 export async function connectGatewayClient(params: {
   url: string;
   token?: string;
@@ -42,10 +46,12 @@ export async function connectGatewayClient(params: {
   scopes?: string[];
   caps?: string[];
   commands?: string[];
+  permissions?: Record<string, boolean>;
   instanceId?: string;
   deviceIdentity?: DeviceIdentity;
   onEvent?: (evt: { event?: string; payload?: unknown }) => void;
   connectChallengeTimeoutMs?: number;
+  requestTimeoutMs?: number;
   timeoutMs?: number;
   timeoutMessage?: string;
 }) {
@@ -55,17 +61,17 @@ export async function connectGatewayClient(params: {
   const identityRoot = process.env.OPENCLAW_STATE_DIR ?? process.env.HOME ?? os.tmpdir();
   const deviceIdentity =
     params.deviceIdentity ??
-    loadOrCreateDeviceIdentity(
-      (() => {
+    loadOrCreateDeviceIdentity({
+      path: (() => {
         const safe = normalizeLowercaseStringOrEmpty(
           `${params.clientName ?? GATEWAY_CLIENT_NAMES.TEST}-${params.mode ?? GATEWAY_CLIENT_MODES.TEST}-${platform}-${params.deviceFamily ?? "none"}-${role}`.replace(
             /[^a-zA-Z0-9._-]+/g,
             "_",
           ),
         );
-        return path.join(identityRoot, "test-device-identities", `${safe}.json`);
+        return path.join(identityRoot, "test-device-identities", `${safe}.sqlite`);
       })(),
-    );
+    });
   return await new Promise<InstanceType<typeof GatewayClient>>((resolve, reject) => {
     let settled = false;
     const stop = (err?: Error, connectedClient?: InstanceType<typeof GatewayClient>) => {
@@ -90,6 +96,9 @@ export async function connectGatewayClient(params: {
       ...(params.connectChallengeTimeoutMs !== undefined
         ? { connectChallengeTimeoutMs: params.connectChallengeTimeoutMs }
         : {}),
+      ...(params.requestTimeoutMs !== undefined
+        ? { requestTimeoutMs: params.requestTimeoutMs }
+        : {}),
       clientName: params.clientName ?? GATEWAY_CLIENT_NAMES.TEST,
       clientDisplayName: params.clientDisplayName ?? "vitest",
       clientVersion: params.clientVersion ?? "dev",
@@ -100,6 +109,7 @@ export async function connectGatewayClient(params: {
       scopes,
       caps: params.caps,
       commands: params.commands,
+      permissions: params.permissions,
       instanceId: params.instanceId,
       deviceIdentity,
       onEvent: params.onEvent,
@@ -117,6 +127,7 @@ export async function connectGatewayClient(params: {
   });
 }
 
+/** Stop a connected GatewayClient and wait for close. */
 export async function disconnectGatewayClient(client: GatewayClient): Promise<void> {
   await client.stopAndWait();
 }

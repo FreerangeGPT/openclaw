@@ -1,3 +1,4 @@
+/** Normalizes isolated cron run output into summaries, delivery payloads, and error state. */
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { hasOutboundReplyContent } from "openclaw/plugin-sdk/reply-payload";
 import { DEFAULT_HEARTBEAT_ACK_MAX_CHARS } from "../../auto-reply/heartbeat.js";
@@ -12,7 +13,7 @@ type DeliveryPayload = Pick<
 >;
 
 /** Normalized cron run payload state used for summaries, delivery, and failure classification. */
-export type CronPayloadOutcome = {
+type CronPayloadOutcome = {
   summary?: string;
   outputText?: string;
   synthesizedText?: string;
@@ -42,6 +43,8 @@ type NormalizedCronFailureSignal = CronFailureSignal & {
 function normalizeCronFailureSignal(
   signal: CronFailureSignal | undefined,
 ): NormalizedCronFailureSignal | undefined {
+  // Only explicit fatal signals become cron failures; ordinary tool warnings
+  // still need payload/output evidence before failing the run.
   const message = normalizeOptionalString(signal?.message);
   if (signal?.fatalForCron !== true || !message) {
     return undefined;
@@ -89,7 +92,7 @@ export function pickSummaryFromOutput(text: string | undefined) {
 }
 
 /** Picks the last non-error payload text suitable for cron run summaries. */
-export function pickSummaryFromPayloads(
+function pickSummaryFromPayloads(
   payloads: Array<{ text?: string | undefined; isError?: boolean }>,
 ) {
   for (let i = payloads.length - 1; i >= 0; i--) {
@@ -159,7 +162,7 @@ function payloadHasStructuredDeliveryContent(payload: DeliveryPayload | null | u
 }
 
 /** Picks the last payload with deliverable outbound content, preferring non-error payloads. */
-export function pickLastDeliverablePayload(payloads: DeliveryPayload[]) {
+function pickLastDeliverablePayload(payloads: DeliveryPayload[]) {
   for (let i = payloads.length - 1; i >= 0; i--) {
     if (payloads[i]?.isError) {
       continue;
@@ -177,7 +180,7 @@ export function pickLastDeliverablePayload(payloads: DeliveryPayload[]) {
 }
 
 /** Selects deliverable cron payloads while preserving multi-payload successful responses. */
-export function pickDeliverablePayloads(payloads: DeliveryPayload[]): DeliveryPayload[] {
+function pickDeliverablePayloads(payloads: DeliveryPayload[]): DeliveryPayload[] {
   const successfulDeliverablePayloads = payloads.filter(
     (payload) => payload != null && payload.isError !== true && isDeliverablePayload(payload),
   );
@@ -197,9 +200,8 @@ export function isHeartbeatOnlyResponse(payloads: DeliveryPayload[], ackMaxChars
 }
 
 /** Resolves the non-negative heartbeat ack length used for heartbeat-only filtering. */
-export function resolveHeartbeatAckMaxChars(agentCfg?: { heartbeat?: { ackMaxChars?: number } }) {
-  const raw = agentCfg?.heartbeat?.ackMaxChars ?? DEFAULT_HEARTBEAT_ACK_MAX_CHARS;
-  return Math.max(0, raw);
+export function resolveHeartbeatAckMaxChars(_agentCfg?: { heartbeat?: object }) {
+  return DEFAULT_HEARTBEAT_ACK_MAX_CHARS;
 }
 
 function isCronMessagePresentationWarning(text: string | undefined): boolean {
@@ -286,11 +288,12 @@ export function resolveCronPayloadOutcome(params: {
   const hasRecoveredToolWarning =
     !params.runLevelError &&
     params.failureSignal?.fatalForCron !== true &&
-    params.preferFinalAssistantVisibleText === true &&
     normalizedFinalAssistantVisibleText !== undefined &&
     !hasStructuredDeliveryPayloads &&
     errorPayloads.length > 0 &&
     errorPayloads.every((payload) => isCronToolWarning(payload?.text));
+  // Structured error payloads are fatal unless later successful output or a
+  // known non-terminal warning proves the agent recovered.
   const hasFatalStructuredErrorPayload =
     hasErrorPayload &&
     !hasSuccessfulPayloadAfterLastError &&
@@ -304,7 +307,7 @@ export function resolveCronPayloadOutcome(params: {
   // A final assistant answer can replace textual warning payloads, but never
   // structured/media payloads that carry the actual delivery content.
   const shouldUseFinalAssistantVisibleText =
-    params.preferFinalAssistantVisibleText === true &&
+    (params.preferFinalAssistantVisibleText === true || hasRecoveredToolWarning) &&
     normalizedFinalAssistantVisibleText !== undefined &&
     !hasFatalStructuredErrorPayload &&
     !hasStructuredDeliveryPayloads;

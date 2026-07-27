@@ -1,3 +1,7 @@
+/**
+ * Classifies transcript messages that contain real user-visible conversation
+ * for compaction and history pruning.
+ */
 import { stripHeartbeatToken } from "../auto-reply/heartbeat.js";
 import { isSilentReplyText } from "../auto-reply/tokens.js";
 import type { AgentMessage } from "./runtime/index.js";
@@ -26,6 +30,11 @@ function hasMeaningfulText(text: string): boolean {
   return true;
 }
 
+function isSummaryRole(role: unknown): boolean {
+  return role === "branchSummary" || role === "compactionSummary";
+}
+
+/** Returns whether a message has content worth preserving as conversation. */
 export function hasMeaningfulConversationContent(message: AgentMessage): boolean {
   if ((message as { role?: unknown }).role === "custom") {
     const custom = message as { content?: unknown; display?: unknown };
@@ -44,7 +53,7 @@ export function hasMeaningfulConversationContent(message: AgentMessage): boolean
     const output = typeof bash.output === "string" ? bash.output : "";
     return hasMeaningfulText(`${command}\n${output}`);
   }
-  if ((message as { role?: unknown }).role === "branchSummary") {
+  if (isSummaryRole((message as { role?: unknown }).role)) {
     const summary = (message as { summary?: unknown }).summary;
     return typeof summary === "string" && hasMeaningfulText(summary);
   }
@@ -88,14 +97,12 @@ function hasMeaningfulMessageContent(content: unknown): boolean {
 function isToolResultConversationAnchor(message: AgentMessage): boolean {
   const role = (message as { role?: unknown }).role;
   return (
-    (role === "user" ||
-      role === "custom" ||
-      role === "bashExecution" ||
-      role === "branchSummary") &&
+    (role === "user" || role === "custom" || role === "bashExecution" || isSummaryRole(role)) &&
     hasMeaningfulConversationContent(message)
   );
 }
 
+/** Returns whether a transcript message should count as real conversation. */
 export function isRealConversationMessage(
   message: AgentMessage,
   messages: AgentMessage[],
@@ -106,7 +113,7 @@ export function isRealConversationMessage(
     message.role === "assistant" ||
     message.role === "custom" ||
     message.role === "bashExecution" ||
-    message.role === "branchSummary"
+    isSummaryRole(message.role)
   ) {
     return hasMeaningfulConversationContent(message);
   }

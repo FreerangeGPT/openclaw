@@ -1,3 +1,4 @@
+// Covers current plugin metadata snapshot generation.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +12,7 @@ import {
 } from "./current-plugin-metadata-snapshot.js";
 import { resolveInstalledPluginIndexPolicyHash } from "./installed-plugin-index-policy.js";
 import { writePersistedInstalledPluginIndexSync } from "./installed-plugin-index-store.js";
+import { clearPluginMetadataLifecycleCaches } from "./plugin-metadata-lifecycle.js";
 import type { PluginMetadataSnapshot } from "./plugin-metadata-snapshot.js";
 
 function createSnapshot(
@@ -304,6 +306,15 @@ describe("current plugin metadata snapshot", () => {
     clearCurrentPluginMetadataSnapshot();
 
     expect(getCurrentPluginMetadataSnapshot()).toBeUndefined();
+  });
+
+  it("clears the complete current snapshot when its metadata lifecycle is invalidated", () => {
+    const config = { plugins: { allow: ["demo"] } };
+    setCurrentPluginMetadataSnapshot(createSnapshot({ config }), { config });
+
+    clearPluginMetadataLifecycleCaches();
+
+    expect(getCurrentPluginMetadataSnapshot({ config })).toBeUndefined();
   });
 
   it("keeps derived registry snapshots as the current process snapshot", () => {

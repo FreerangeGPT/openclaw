@@ -1,3 +1,4 @@
+// Deepgram plugin module implements audio behavior.
 import type {
   AudioTranscriptionRequest,
   AudioTranscriptionResult,
@@ -84,6 +85,7 @@ export async function transcribeDeepgramAudio(
     headers,
     body,
     timeoutMs: params.timeoutMs,
+    ...(params.signal ? { signal: params.signal } : {}),
     fetchFn,
     allowPrivateNetwork,
     dispatcherPolicy,

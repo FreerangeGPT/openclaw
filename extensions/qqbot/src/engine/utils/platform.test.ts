@@ -1,14 +1,22 @@
+// Qqbot tests cover platform plugin behavior.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   getHomeDir,
-  getQQBotDataPath,
+  getQQBotDataDir,
   getQQBotMediaPath,
-  resolveQQBotLocalMediaPath,
   resolveQQBotPayloadLocalFilePath,
 } from "./platform.js";
+
+function getQQBotDataPath(...subPaths: string[]): string {
+  return getQQBotDataDir(...subPaths);
+}
+
+function resolveQQBotLocalMediaPath(p: string): string | null {
+  return resolveQQBotPayloadLocalFilePath(p);
+}
 
 describe("qqbot local media path remapping", () => {
   const createdPaths: string[] = [];

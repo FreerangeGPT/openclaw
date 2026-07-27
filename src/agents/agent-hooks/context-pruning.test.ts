@@ -1,14 +1,24 @@
+/** Tests context-pruning extension settings, runtime registry, and message pruning. */
 import type { AgentMessage } from "openclaw/plugin-sdk/agent-core";
 import type { ExtensionAPI, ExtensionContext } from "openclaw/plugin-sdk/agent-sessions";
 import type { ToolResultMessage } from "openclaw/plugin-sdk/llm";
 import { describe, expect, it } from "vitest";
-import {
-  computeEffectiveSettings,
-  default as contextPruningExtension,
-  DEFAULT_CONTEXT_PRUNING_SETTINGS,
-  pruneContextMessages,
-} from "./context-pruning.js";
+import contextPruningExtension from "./context-pruning.js";
+import { pruneContextMessages } from "./context-pruning/pruner.js";
 import { getContextPruningRuntime, setContextPruningRuntime } from "./context-pruning/runtime.js";
+import { computeEffectiveSettings } from "./context-pruning/settings.js";
+
+function resolveDefaultContextPruningSettings(): NonNullable<
+  ReturnType<typeof computeEffectiveSettings>
+> {
+  const settings = computeEffectiveSettings({ mode: "cache-ttl" });
+  if (!settings) {
+    throw new Error("expected default context-pruning settings");
+  }
+  return settings;
+}
+
+const DEFAULT_CONTEXT_PRUNING_SETTINGS = resolveDefaultContextPruningSettings();
 
 function isToolResultMessage(msg: AgentMessage): msg is ToolResultMessage {
   return msg.role === "toolResult";
@@ -361,25 +371,6 @@ describe("context-pruning", () => {
 
     const second = runContextHandler(handler, messages, sessionManager);
     expect(second).toBeUndefined();
-  });
-
-  it("cache-ttl can prune before the first cache touch is recorded", () => {
-    const sessionManager = {};
-
-    setContextPruningRuntime(sessionManager, {
-      settings: makeAggressiveSettings(),
-      contextWindowTokens: 1000,
-      isToolPrunable: () => true,
-      dropThinkingBlocks: false,
-    });
-
-    const handler = createContextHandler();
-    const result = runContextHandler(handler, makeSimpleToolPruningMessages(), sessionManager);
-    if (!result) {
-      throw new Error("expected first prune");
-    }
-    expect(toolText(findToolResult(result.messages, "t1"))).toBe("[cleared]");
-    expect(getContextPruningRuntime(sessionManager)?.lastCacheTouchAt).toBeGreaterThan(0);
   });
 
   it("respects tools allow/deny (deny wins; wildcards supported)", () => {

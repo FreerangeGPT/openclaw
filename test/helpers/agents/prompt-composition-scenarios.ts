@@ -1,3 +1,4 @@
+// Prompt composition scenarios build reusable agent prompt fixtures.
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
@@ -26,7 +27,10 @@ import { SILENT_REPLY_TOKEN } from "../../../src/auto-reply/tokens.js";
 import type { OpenClawConfig } from "../../../src/config/config.js";
 import { makeTempWorkspace, writeWorkspaceFile } from "../../../src/test-helpers/workspace.js";
 
-export type PromptScenarioTurn = {
+// Prompt composition scenarios for system/body prompt stability tests.
+
+/** One turn in a prompt composition scenario. */
+type PromptScenarioTurn = {
   id: string;
   label: string;
   systemPrompt: string;
@@ -34,6 +38,7 @@ export type PromptScenarioTurn = {
   notes: string[];
 };
 
+/** Multi-turn prompt composition scenario fixture. */
 export type PromptScenario = {
   scenario: string;
   focus: string;
@@ -142,7 +147,7 @@ function buildAutoReplySystemPrompt(params: {
   groupSystemPrompt?: string;
 }) {
   const extraSystemPromptParts = [
-    buildInboundMetaSystemPrompt(params.sessionCtx),
+    buildInboundMetaSystemPrompt(params.sessionCtx, {}),
     params.sessionCtx.ChatType === "direct" || params.sessionCtx.ChatType === "dm"
       ? buildDirectChatContext({
           sessionCtx: params.sessionCtx,
@@ -157,10 +162,7 @@ function buildAutoReplySystemPrompt(params: {
       : "",
     params.includeGroupIntro
       ? buildGroupIntro({
-          cfg: {} as OpenClawConfig,
-          sessionCtx: params.sessionCtx,
           defaultActivation: "mention",
-          silentToken: SILENT_REPLY_TOKEN,
         })
       : "",
     params.groupSystemPrompt?.trim() ?? "",
@@ -345,11 +347,11 @@ function createGroupScenario(workspaceDir: string): PromptScenario {
   return {
     scenario: "auto-reply-group",
     focus: "Group chat bootstrap, steady state, and runtime event turns",
-    expectedStableSystemAfterTurnIds: ["t3"],
+    expectedStableSystemAfterTurnIds: ["t2", "t3"],
     turns: [
       {
         id: "t1",
-        label: "First group turn with one-time intro",
+        label: "First group turn with session-stable intro",
         systemPrompt: buildAutoReplySystemPrompt({
           workspaceDir,
           sessionCtx: {
@@ -370,7 +372,7 @@ function createGroupScenario(workspaceDir: string): PromptScenario {
           },
           body: "Can you investigate this issue?",
         }),
-        notes: ["Expected first-turn bootstrap churn", "Not steady-state"],
+        notes: ["Group intro belongs to the session-stable system prompt"],
       },
       {
         id: "t2",
@@ -387,6 +389,7 @@ function createGroupScenario(workspaceDir: string): PromptScenario {
             ],
           },
           includeGroupChatContext: true,
+          includeGroupIntro: true,
         }),
         bodyPrompt: buildAutoReplyBody({
           ctx: {
@@ -400,7 +403,7 @@ function createGroupScenario(workspaceDir: string): PromptScenario {
           },
           body: "Give a short update.",
         }),
-        notes: ["One-time intro gone", "Should settle afterward"],
+        notes: ["Group intro remains stable after turn one"],
       },
       {
         id: "t3",
@@ -417,6 +420,7 @@ function createGroupScenario(workspaceDir: string): PromptScenario {
             ],
           },
           includeGroupChatContext: true,
+          includeGroupIntro: true,
         }),
         bodyPrompt: buildAutoReplyBody({
           ctx: {
@@ -455,7 +459,7 @@ function createDiscordBoundaryScenario(workspaceDir: string): PromptScenario {
     MessageSid: "1503084621145964846",
     Body: body,
     BodyStripped: body,
-    UntrustedStructuredContext: [
+    ChannelStructuredContext: [
       {
         label: "Discord channel metadata",
         source: "discord",
@@ -500,7 +504,7 @@ async function createToolRichScenario(workspaceDir: string): Promise<PromptScena
     "<skill><name>release</name><description>Release OpenClaw safely.</description><location>/skills/release/SKILL.md</location></skill>",
     "</available_skills>",
   ].join("\n");
-  const contextFiles = await readContextFiles(workspaceDir, ["AGENTS.md", "TOOLS.md", "SOUL.md"]);
+  const contextFiles = await readContextFiles(workspaceDir, ["AGENTS.md", "SOUL.md"]);
   const systemPrompt = buildToolRichSystemPrompt({
     workspaceDir,
     skillsPrompt,
@@ -517,7 +521,7 @@ async function createToolRichScenario(workspaceDir: string): Promise<PromptScena
         label: "Tool-rich turn asking for search, read, and file edits",
         systemPrompt,
         bodyPrompt: [
-          "Conversation info (untrusted metadata):",
+          "Conversation info:",
           "```json",
           JSON.stringify({ message_id: "tool-1", sender_id: "U9", was_mentioned: true }, null, 2),
           "```",
@@ -531,12 +535,12 @@ async function createToolRichScenario(workspaceDir: string): Promise<PromptScena
         label: "Follow-up after a fictional tool call",
         systemPrompt,
         bodyPrompt: [
-          "Conversation info (untrusted metadata):",
+          "Conversation info:",
           "```json",
           JSON.stringify({ message_id: "tool-2", sender_id: "U9" }, null, 2),
           "```",
           "",
-          "Tool transcript summary (untrusted, for context):",
+          "Tool transcript summary:",
           "```json",
           JSON.stringify(
             [
@@ -565,12 +569,13 @@ async function createBootstrapWarningScenario(workspaceDir: string): Promise<Pro
         bootstrapMaxChars: 1_500,
         bootstrapTotalMaxChars: 2_200,
       },
+      entries: { main: { default: true } },
     },
   } satisfies OpenClawConfig;
   const largeAgents = "# AGENTS.md\n\n" + "Rules.\n".repeat(5_000);
-  const largeTools = "# TOOLS.md\n\n" + "Notes.\n".repeat(3_000);
+  const largeSoul = "# SOUL.md\n\n" + "Notes.\n".repeat(3_000);
   await writeWorkspaceFile({ dir: workspaceDir, name: "AGENTS.md", content: largeAgents });
-  await writeWorkspaceFile({ dir: workspaceDir, name: "TOOLS.md", content: largeTools });
+  await writeWorkspaceFile({ dir: workspaceDir, name: "SOUL.md", content: largeSoul });
   const { bootstrapFiles, contextFiles } = await resolveBootstrapContextForRun({
     workspaceDir,
     config: bootstrapConfig,
@@ -663,7 +668,7 @@ async function createMaintenanceScenario(workspaceDir: string): Promise<PromptSc
   const memoryFlushPrompt = [
     "Pre-compaction memory flush.",
     "Store durable memories only in memory/2026-03-15.md (create memory/ if needed).",
-    "Treat workspace bootstrap/reference files such as MEMORY.md, SOUL.md, TOOLS.md, and AGENTS.md as read-only during this flush; never overwrite, replace, or edit them.",
+    "Treat workspace bootstrap/reference files such as MEMORY.md, SOUL.md, and AGENTS.md as read-only during this flush; never overwrite, replace, or edit them.",
     "If nothing to store, reply with NO_REPLY.",
     "Current time: Sunday, March 15th, 2026 - 9:30 PM (America/Los_Angeles)",
     "Reference UTC: 2026-03-16 04:30 UTC",
@@ -695,14 +700,17 @@ async function createMaintenanceScenario(workspaceDir: string): Promise<PromptSc
   ].join("\n");
   const postCompactionSystemPrompt = buildSystemPrompt({
     workspaceDir,
-    extraSystemPrompt: buildInboundMetaSystemPrompt({
-      Provider: "slack",
-      Surface: "slack",
-      OriginatingChannel: "slack",
-      OriginatingTo: "D123",
-      AccountId: "A1",
-      ChatType: "direct",
-    }),
+    extraSystemPrompt: buildInboundMetaSystemPrompt(
+      {
+        Provider: "slack",
+        Surface: "slack",
+        OriginatingChannel: "slack",
+        OriginatingTo: "D123",
+        AccountId: "A1",
+        ChatType: "direct",
+      },
+      {},
+    ),
   });
   return {
     scenario: "maintenance-prompts",
@@ -733,7 +741,8 @@ async function createMaintenanceScenario(workspaceDir: string): Promise<PromptSc
   };
 }
 
-export async function createWorkspaceWithPromptCompositionFiles(): Promise<string> {
+/** Create a temp workspace with prompt composition context files. */
+async function createWorkspaceWithPromptCompositionFiles(): Promise<string> {
   const workspaceDir = await makeTempWorkspace("openclaw-prompt-cache-");
   await writeWorkspaceFile({
     dir: workspaceDir,
@@ -742,16 +751,14 @@ export async function createWorkspaceWithPromptCompositionFiles(): Promise<strin
       "# AGENTS.md",
       "",
       "## Session Startup",
-      "Read AGENTS.md and TOOLS.md before making changes.",
+      "Read AGENTS.md before making changes.",
+      "",
+      "## Tools",
+      "Use rg before grep.",
       "",
       "## Red Lines",
       "Do not rewrite user commits.",
     ].join("\n"),
-  });
-  await writeWorkspaceFile({
-    dir: workspaceDir,
-    name: "TOOLS.md",
-    content: "# TOOLS.md\n\nUse rg before grep.\n",
   });
   await writeWorkspaceFile({
     dir: workspaceDir,
@@ -761,6 +768,7 @@ export async function createWorkspaceWithPromptCompositionFiles(): Promise<strin
   return workspaceDir;
 }
 
+/** Create all prompt composition scenarios plus cleanup handles. */
 export async function createPromptCompositionScenarios(): Promise<{
   workspaceDir: string;
   warningWorkspaceDir: string;

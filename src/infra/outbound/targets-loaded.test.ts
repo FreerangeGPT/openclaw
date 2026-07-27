@@ -1,3 +1,5 @@
+// Verifies loaded-target resolution uses already-loaded plugins and does not
+// trigger channel bootstrap discovery.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 import { tryResolveLoadedOutboundTarget } from "./targets-loaded.js";
@@ -6,7 +8,7 @@ const mocks = vi.hoisted(() => ({
   getLoadedChannelPlugin: vi.fn(),
 }));
 
-vi.mock("../../channels/plugins/registry-loaded-read.js", () => ({
+vi.mock("../../channels/plugins/registry-loaded.js", () => ({
   getLoadedChannelPluginForRead: mocks.getLoadedChannelPlugin,
 }));
 

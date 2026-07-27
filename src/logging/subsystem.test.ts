@@ -1,3 +1,4 @@
+// Subsystem logger tests cover per-subsystem log routing and filtering.
 import fs from "node:fs";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -147,6 +148,30 @@ describe("createSubsystemLogger().isEnabled", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
+  it("keeps setup-inference probe warnings in the file log while suppressing console", () => {
+    const file = logPathTracker.nextPath();
+    setLoggerOverride({ level: "warn", consoleLevel: "warn", file });
+    const warn = installConsoleMethodSpy("warn");
+    const log = createSubsystemLogger("agent/embedded");
+
+    log.warn("embedded run failover decision", {
+      runId: "probe-setup-inference-test-run",
+      provider: "openai",
+      consoleMessage: "embedded run failover decision: provider=openai error=Authentication failed",
+    });
+    log.warn("embedded run agent end", {
+      runId: "probe-setup-inference-test-run",
+      provider: "openai",
+      consoleMessage: "embedded run agent end: provider=openai error=Authentication failed",
+    });
+
+    expect(warn).not.toHaveBeenCalled();
+    const fileLog = fs.readFileSync(file, "utf8");
+    expect(fileLog).toContain("embedded run failover decision");
+    expect(fileLog).toContain("embedded run agent end");
+    expect(fileLog).toContain('"provider":"openai"');
+  });
+
   it("does not suppress probe errors for embedded subsystems", () => {
     setLoggerOverride({ level: "silent", consoleLevel: "error" });
     const error = installConsoleMethodSpy("error");
@@ -268,6 +293,46 @@ describe("createSubsystemLogger().isEnabled", () => {
     const written = firstMockArgAsString(logSpy);
     expect(written).not.toContain(secret);
     expect(written).toContain("sk-raw…3456");
+  });
+
+  it("wraps raw subsystem output when console style is JSON", () => {
+    setLoggerOverride({ level: "silent", consoleLevel: "info", consoleStyle: "json" });
+    const logSpy = installConsoleMethodSpy("log");
+
+    createSubsystemLogger("gateway/auth").raw("raw diagnostic");
+
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(firstMockArgAsString(logSpy))).toMatchObject({
+      level: "info",
+      subsystem: "gateway/auth",
+      message: "raw diagnostic",
+    });
+  });
+
+  it.each(["pretty", "compact"] as const)(
+    "keeps raw subsystem output unchanged in %s style",
+    (consoleStyle) => {
+      setLoggerOverride({ level: "silent", consoleLevel: "info", consoleStyle });
+      const logSpy = installConsoleMethodSpy("log");
+
+      createSubsystemLogger("gateway/auth").raw("raw diagnostic");
+
+      expect(logSpy).toHaveBeenCalledWith("raw diagnostic");
+    },
+  );
+
+  it("preserves structured subsystem fields through the shared JSON formatter", () => {
+    setLoggerOverride({ level: "silent", consoleLevel: "warn", consoleStyle: "json" });
+    const warn = installConsoleMethodSpy("warn");
+
+    createSubsystemLogger("gateway/auth").warn("authentication retry", { attempt: 2 });
+
+    expect(JSON.parse(firstMockArgAsString(warn))).toMatchObject({
+      level: "warn",
+      subsystem: "gateway/auth",
+      message: "authentication retry",
+      attempt: 2,
+    });
   });
 
   it("keeps long-lived subsystem loggers on the current-day rolling file", () => {

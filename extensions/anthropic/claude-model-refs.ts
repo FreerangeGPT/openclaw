@@ -1,13 +1,19 @@
+/**
+ * Claude CLI model-ref normalization. It maps family aliases and retired model
+ * ids to current Anthropic runtime refs while preserving auth-profile suffixes.
+ */
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { CLAUDE_CLI_BACKEND_ID, CLAUDE_CLI_MODEL_ALIASES } from "./cli-constants.js";
 
 const DEFAULT_CLAUDE_MODEL_BY_FAMILY: Record<string, string> = {
-  opus: "claude-opus-4-8",
-  sonnet: "claude-sonnet-4-6",
+  opus: "claude-opus-5",
+  sonnet: "claude-sonnet-5",
+  fable: "claude-fable-5",
   haiku: "claude-haiku-4-5",
 };
 
-export type ClaudeCliAnthropicModelRefs = {
+/** Normalized Claude CLI selection plus runtime refs used by setup migrations. */
+type ClaudeCliAnthropicModelRefs = {
   selectedRef: string;
   runtimeRefs: string[];
   rewriteRef?: string;
@@ -103,6 +109,9 @@ function canonicalizeKnownClaudeCliModelId(modelId: string): string | null {
 }
 
 function upgradeOldClaudeModelId(normalized: string): string | null {
+  if (hasRetiredVersionPrefix(normalized, "claude-opus-5")) {
+    return null;
+  }
   if (normalized.startsWith("claude-opus-4-8") || normalized.startsWith("claude-opus-4.8")) {
     return null;
   }
@@ -133,7 +142,7 @@ function upgradeOldClaudeModelId(normalized: string): string | null {
     ]) ||
     /^claude-opus-4-20\d{6}/.test(normalized)
   ) {
-    return "claude-opus-4-8";
+    return "claude-opus-5";
   }
   if (
     normalized === "claude-sonnet-4" ||
@@ -150,7 +159,7 @@ function upgradeOldClaudeModelId(normalized: string): string | null {
     return "claude-sonnet-4-6";
   }
   if (normalized.startsWith("claude-3") && normalized.includes("opus")) {
-    return "claude-opus-4-8";
+    return "claude-opus-5";
   }
   if (
     normalized.startsWith("claude-3") &&
@@ -164,7 +173,7 @@ function upgradeOldClaudeModelId(normalized: string): string | null {
     normalized === "opus-4" ||
     normalized === "opus-3"
   ) {
-    return "claude-opus-4-8";
+    return "claude-opus-5";
   }
   if (
     normalized === "sonnet-4.5" ||
@@ -182,6 +191,7 @@ function upgradeOldClaudeModelId(normalized: string): string | null {
   return null;
 }
 
+/** Resolve a Claude CLI model ref into selected and Anthropic-compatible runtime refs. */
 export function resolveClaudeCliAnthropicModelRefs(
   raw: string,
 ): ClaudeCliAnthropicModelRefs | null {
@@ -214,6 +224,7 @@ export function resolveClaudeCliAnthropicModelRefs(
   };
 }
 
+/** Resolve a known Anthropic/Claude CLI model ref to its current Anthropic model ref. */
 export function resolveKnownAnthropicModelRef(raw?: string): string | null {
   if (!raw) {
     return null;

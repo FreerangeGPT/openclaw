@@ -1,3 +1,4 @@
+// Tlon plugin module implements channel behavior.
 import { describeAccountSnapshot } from "openclaw/plugin-sdk/account-helpers";
 import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk/account-id";
 import { createHybridChannelConfigAdapter } from "openclaw/plugin-sdk/channel-config-helpers";
@@ -10,10 +11,11 @@ import {
   createComputedAccountStatusAdapter,
   createDefaultChannelRuntimeState,
 } from "openclaw/plugin-sdk/status-helpers";
+import { sanitizeAssistantVisibleText } from "openclaw/plugin-sdk/text-chunking";
 import { tlonChannelConfigSchema } from "./config-schema.js";
 import { tlonDoctor } from "./doctor.js";
 import { resolveTlonOutboundSessionRoute } from "./session-route.js";
-import { createTlonSetupWizardBase, tlonSetupAdapter } from "./setup-core.js";
+import { createTlonSetupWizardBase, tlonSetupAdapter, tlonSetupContract } from "./setup-core.js";
 import {
   formatTargetHint,
   normalizeShip,
@@ -63,6 +65,7 @@ const tlonConfigAdapter = createHybridChannelConfigAdapter({
 const tlonChannelOutbound: ChannelOutboundAdapter = {
   deliveryMode: "direct",
   textChunkLimit: 10000,
+  sanitizeText: ({ text }) => sanitizeAssistantVisibleText(text),
   resolveTarget: ({ to }) => resolveTlonOutboundTarget(to),
   deliveryCapabilities: {
     durableFinal: {
@@ -105,6 +108,7 @@ export const tlonPlugin = createChatChannelPlugin({
       threads: true,
     },
     setup: tlonSetupAdapter,
+    setupContract: tlonSetupContract,
     setupWizard: tlonSetupWizardProxy,
     reload: { configPrefixes: ["channels.tlon"] },
     configSchema: tlonChannelConfigSchema,
@@ -166,11 +170,11 @@ export const tlonPlugin = createChatChannelPlugin({
           url: s.url ?? null,
         };
       },
-      probeAccount: async ({ account }) => {
+      probeAccount: async ({ account, timeoutMs }) => {
         if (!account.configured || !account.ship || !account.url || !account.code) {
           return { ok: false, error: "Not configured" };
         }
-        return await (await loadTlonChannelRuntime()).probeTlonAccount(account as never);
+        return await (await loadTlonChannelRuntime()).probeTlonAccount(account as never, timeoutMs);
       },
       resolveAccountSnapshot: ({ account }) => ({
         accountId: account.accountId,

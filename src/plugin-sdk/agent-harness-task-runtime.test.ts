@@ -1,3 +1,6 @@
+/**
+ * Tests agent harness task runtime scope, persistence, and completion delivery.
+ */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { deliverSubagentAnnouncement } from "../agents/subagent-announce-delivery.js";
 import { createAgentHarnessTaskRuntimeScope } from "../tasks/agent-harness-task-runtime-scope.js";
@@ -81,6 +84,7 @@ describe("agent-harness-task-runtime", () => {
   it("rejects task run ids outside the configured harness scope", () => {
     const runtime = createAgentHarnessTaskRuntime({
       runtime: "subagent",
+      taskKind: "example-harness",
       scope: createScope(),
       runIdPrefix: "example:",
     });
@@ -101,6 +105,7 @@ describe("agent-harness-task-runtime", () => {
     expect(() =>
       createAgentHarnessTaskRuntime({
         runtime: "subagent",
+        taskKind: "example-harness",
         scope: forgedScope,
       }),
     ).toThrow(/host-issued scope/);

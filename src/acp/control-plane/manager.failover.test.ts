@@ -1,3 +1,4 @@
+/** Tests ACP manager backend failover across initialization and turn execution. */
 import { describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { SessionAcpMeta } from "../../config/sessions/types.js";
@@ -102,6 +103,7 @@ describe("AcpSessionManager backend failover", () => {
 
     const manager = new AcpSessionManager();
     await manager.runTurn({
+      provenance: "system",
       cfg: harness.cfg,
       sessionKey: harness.sessionKey,
       text: "use primary",
@@ -126,6 +128,7 @@ describe("AcpSessionManager backend failover", () => {
 
     const manager = new AcpSessionManager();
     await manager.runTurn({
+      provenance: "system",
       cfg: harness.cfg,
       sessionKey: harness.sessionKey,
       text: "use fallback",
@@ -137,6 +140,7 @@ describe("AcpSessionManager backend failover", () => {
 
     harness.fallbackRuntime.close.mockClear();
     await manager.runTurn({
+      provenance: "system",
       cfg: harness.cfg,
       sessionKey: harness.sessionKey,
       text: "return to primary",
@@ -165,6 +169,7 @@ describe("AcpSessionManager backend failover", () => {
     const manager = new AcpSessionManager();
     await expect(
       manager.runTurn({
+        provenance: "system",
         cfg: harness.cfg,
         sessionKey: harness.sessionKey,
         text: "fallback",
@@ -192,6 +197,7 @@ describe("AcpSessionManager backend failover", () => {
     const manager = new AcpSessionManager();
     await expect(
       manager.runTurn({
+        provenance: "system",
         cfg: harness.cfg,
         sessionKey: harness.sessionKey,
         text: "fallback",
@@ -217,6 +223,7 @@ describe("AcpSessionManager backend failover", () => {
     const manager = new AcpSessionManager();
     await expect(
       manager.runTurn({
+        provenance: "system",
         cfg: harness.cfg,
         sessionKey: harness.sessionKey,
         text: "fallback",
@@ -240,6 +247,7 @@ describe("AcpSessionManager backend failover", () => {
     const manager = new AcpSessionManager();
     await expect(
       manager.runTurn({
+        provenance: "system",
         cfg: harness.cfg,
         sessionKey: harness.sessionKey,
         text: "do not duplicate",

@@ -1,3 +1,10 @@
+/**
+ * Browser-local SDK bridge for gateway, plugin runtime, CLI runtime, and timeout
+ * helpers.
+ */
+import { toErrorObject } from "openclaw/plugin-sdk/error-runtime";
+import { clampTimerTimeoutMs } from "openclaw/plugin-sdk/number-runtime";
+
 export {
   addGatewayClientOptions,
   callGatewayFromCli,
@@ -23,7 +30,6 @@ export {
   type LazyPluginServiceHandle,
 } from "openclaw/plugin-sdk/plugin-runtime";
 export { defaultRuntime } from "openclaw/plugin-sdk/runtime-env";
-import { clampTimerTimeoutMs } from "openclaw/plugin-sdk/number-runtime";
 
 function normalizeTimeoutMs(timeoutMs: number | undefined): number | undefined {
   return clampTimerTimeoutMs(timeoutMs);
@@ -46,13 +52,13 @@ function waitForAbort(
 } {
   if (signal.aborted) {
     return {
-      promise: Promise.reject(toLintErrorObject(signal.reason ?? fallback, "Non-Error rejection")),
+      promise: Promise.reject(toErrorObject(signal.reason ?? fallback, "Non-Error rejection")),
       cleanup: () => undefined,
     };
   }
   let listener: (() => void) | undefined;
   const promise = new Promise<never>((_, reject) => {
-    listener = () => reject(toLintErrorObject(signal.reason ?? fallback, "Non-Error rejection"));
+    listener = () => reject(toErrorObject(signal.reason ?? fallback, "Non-Error rejection"));
     signal.addEventListener("abort", listener, { once: true });
   });
   return {
@@ -65,6 +71,7 @@ function waitForAbort(
   };
 }
 
+/** Runs async work with an optional aborting timeout signal. */
 export async function withTimeout<T>(
   work: (signal: AbortSignal | undefined) => Promise<T>,
   timeoutMs?: number,
@@ -84,18 +91,4 @@ export async function withTimeout<T>(
     clearTimeout(timeout.timer);
     abort.cleanup();
   }
-}
-
-function toLintErrorObject(value: unknown, fallbackMessage: string): Error {
-  if (value instanceof Error) {
-    return value;
-  }
-  if (typeof value === "string") {
-    return new Error(value);
-  }
-  const error = new Error(fallbackMessage, { cause: value });
-  if ((typeof value === "object" && value !== null) || typeof value === "function") {
-    Object.assign(error, value);
-  }
-  return error;
 }

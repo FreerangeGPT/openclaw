@@ -1,5 +1,8 @@
+// Reply-payload normalization projects loose tool/agent objects onto the
+// outbound-supported reply payload fields.
 import { readStringValue } from "@openclaw/normalization-core/string-coerce";
 import type { ReplyPayload as InternalReplyPayload } from "../../auto-reply/reply-payload.js";
+import { normalizeOutboundLocation } from "../../channels/location.js";
 
 /**
  * Outbound-facing subset of reply payload fields accepted from loose producers.
@@ -9,6 +12,7 @@ export type OutboundReplyPayload = {
   mediaUrls?: string[];
   mediaUrl?: string;
   presentation?: InternalReplyPayload["presentation"];
+  presentationTextMode?: InternalReplyPayload["presentationTextMode"];
   /**
    * @deprecated Use presentation. Runtime support remains for legacy producers.
    */
@@ -16,6 +20,8 @@ export type OutboundReplyPayload = {
   channelData?: InternalReplyPayload["channelData"];
   sensitiveMedia?: boolean;
   replyToId?: string;
+  location?: InternalReplyPayload["location"];
+  videoAsNote?: boolean;
 };
 
 function readObjectValue(value: unknown): object | undefined {
@@ -36,18 +42,24 @@ export function normalizeOutboundReplyPayload(
   const presentation = readObjectValue(
     payload.presentation,
   ) as OutboundReplyPayload["presentation"];
+  const presentationTextMode = payload.presentationTextMode === "fallback" ? "fallback" : undefined;
   const interactive = readObjectValue(payload.interactive) as OutboundReplyPayload["interactive"];
   const channelData = readObjectValue(payload.channelData) as OutboundReplyPayload["channelData"];
   const sensitiveMedia = payload.sensitiveMedia === true ? true : undefined;
   const replyToId = readStringValue(payload.replyToId);
+  const location = normalizeOutboundLocation(payload.location);
+  const videoAsNote = payload.videoAsNote === true ? true : undefined;
   return {
     text,
     mediaUrls,
     mediaUrl,
     presentation,
+    ...(presentationTextMode ? { presentationTextMode } : {}),
     interactive,
     channelData,
     sensitiveMedia,
     replyToId,
+    ...(location ? { location } : {}),
+    ...(videoAsNote ? { videoAsNote: true } : {}),
   };
 }

@@ -1,3 +1,4 @@
+// Detects the package manager used by a project directory.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -23,7 +24,7 @@ function resolveBunGlobalNodeModules(): string {
   );
 }
 
-function resolvePnpmNodeModulesRoot(root: string): string | null {
+export function resolvePnpmNodeModulesRoot(root: string): string | null {
   const resolved = path.resolve(root);
   const parts = resolved.split(path.sep);
   const pnpmIndex = parts.lastIndexOf(".pnpm");
@@ -38,11 +39,11 @@ function resolvePnpmNodeModulesRoot(root: string): string | null {
   return path.basename(parent) === "node_modules" ? parent : null;
 }
 
-async function isBunOwnedPackageRoot(root: string): Promise<boolean> {
+export async function isBunOwnedPackageRoot(root: string): Promise<boolean> {
   return path.resolve(path.dirname(root)) === path.resolve(resolveBunGlobalNodeModules());
 }
 
-async function isPnpmOwnedPackageRoot(root: string): Promise<boolean> {
+export async function isPnpmOwnedPackageRoot(root: string): Promise<boolean> {
   const nodeModulesRoot = resolvePnpmNodeModulesRoot(root);
   if (!nodeModulesRoot || !(await exists(path.join(nodeModulesRoot, ".modules.yaml")))) {
     return false;
@@ -50,6 +51,7 @@ async function isPnpmOwnedPackageRoot(root: string): Promise<boolean> {
   return true;
 }
 
+/** Detects the package manager that owns a package root from manifests, locks, and install layout. */
 export async function detectPackageManager(root: string): Promise<DetectedPackageManager | null> {
   const pm = (await readPackageManagerSpec(root))?.split("@")[0]?.trim();
   const files = await fs.readdir(root).catch((): string[] => []);
@@ -58,6 +60,8 @@ export async function detectPackageManager(root: string): Promise<DetectedPackag
   const hasBunLock = files.includes("bun.lock") || files.includes("bun.lockb");
 
   if (hasNpmShrinkwrap) {
+    // Published npm packages carry npm-shrinkwrap even when their source uses pnpm;
+    // installed pnpm/bun-owned roots need layout proof before overriding npm.
     if (await isBunOwnedPackageRoot(root)) {
       return "bun";
     }

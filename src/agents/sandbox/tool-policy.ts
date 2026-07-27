@@ -1,3 +1,8 @@
+/**
+ * Sandbox tool policy resolver.
+ *
+ * Merges global, agent, and default allow/deny lists into normalized policy plus source diagnostics.
+ */
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
@@ -34,7 +39,10 @@ function pickConfiguredList(params: { agent?: string[]; global?: string[] }): {
   if (Array.isArray(params.agent)) {
     return {
       values: params.agent,
-      source: buildSource({ scope: "agent", key: "agents.list[].tools.sandbox.tools.allow" }),
+      source: buildSource({
+        scope: "agent",
+        key: "agents.entries.*.tools.sandbox.tools.allow",
+      }),
     };
   }
   if (Array.isArray(params.global)) {
@@ -56,7 +64,10 @@ function pickConfiguredDeny(params: { agent?: string[]; global?: string[] }): {
   if (Array.isArray(params.agent)) {
     return {
       values: params.agent,
-      source: buildSource({ scope: "agent", key: "agents.list[].tools.sandbox.tools.deny" }),
+      source: buildSource({
+        scope: "agent",
+        key: "agents.entries.*.tools.sandbox.tools.deny",
+      }),
     };
   }
   if (Array.isArray(params.global)) {
@@ -80,7 +91,7 @@ function pickConfiguredAlsoAllow(params: { agent?: string[]; global?: string[] }
       values: params.agent,
       source: buildSource({
         scope: "agent",
-        key: "agents.list[].tools.sandbox.tools.alsoAllow",
+        key: "agents.entries.*.tools.sandbox.tools.alsoAllow",
       }),
     };
   }

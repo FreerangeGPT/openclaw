@@ -1,8 +1,11 @@
+/** Compatibility helpers that auto-enable bundled plugins for legacy and Vitest flows. */
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { PluginEntryConfig } from "../config/types.plugins.js";
+import { readBundledDiscoveryMode } from "./bundled-discovery-state.js";
 import { hasExplicitPluginConfig } from "./config-policy.js";
 import { normalizePluginId } from "./config-state.js";
 
+/** Returns config with selected bundled plugins explicitly enabled when compat rules require it. */
 export function withBundledPluginEnablementCompat(params: {
   config: OpenClawConfig | undefined;
   pluginIds: readonly string[];
@@ -10,7 +13,7 @@ export function withBundledPluginEnablementCompat(params: {
   const existingEntries = params.config?.plugins?.entries ?? {};
   const forcePluginsEnabled = params.config?.plugins?.enabled === false;
   const allow = params.config?.plugins?.allow;
-  const bypassAllowlist = params.config?.plugins?.bundledDiscovery === "compat";
+  const bypassAllowlist = readBundledDiscoveryMode() === "compat";
   const allowSet =
     !bypassAllowlist && Array.isArray(allow) && allow.length > 0
       ? new Set(allow.map((pluginId) => normalizePluginId(pluginId)).filter(Boolean))
@@ -57,6 +60,7 @@ export function withBundledPluginEnablementCompat(params: {
   };
 }
 
+/** Enables bundled plugins in Vitest when tests did not provide explicit plugin config. */
 export function withBundledPluginVitestCompat(params: {
   config: OpenClawConfig | undefined;
   pluginIds: readonly string[];

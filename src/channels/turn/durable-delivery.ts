@@ -1,3 +1,4 @@
+// Durable final-reply delivery for inbound channel turns.
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { ReplyPayload } from "../../auto-reply/reply-payload.js";
 import type { FinalizedMsgContext } from "../../auto-reply/templating.js";
@@ -38,7 +39,7 @@ export type DurableInboundReplyDeliveryParams = DurableInboundReplyDeliveryOptio
 };
 
 /** Outcome of attempting durable final delivery for an inbound reply payload. */
-export type DurableInboundReplyDeliveryResult =
+type DurableInboundReplyDeliveryResult =
   | { status: "not_applicable"; reason: "non_final" }
   | {
       status: "unsupported";
@@ -61,7 +62,7 @@ function resolveDeliveryTarget(params: DurableInboundReplyDeliveryParams): strin
   );
 }
 
-export function resolveDurableInboundReplyToId(
+function resolveDurableInboundReplyToId(
   params: Pick<DurableInboundReplyDeliveryParams, "ctxPayload" | "payload" | "replyToId">,
 ): string | null | undefined {
   // Explicit null means "do not reply to a source message"; do not fall back to context ids.
@@ -94,6 +95,19 @@ function toDeliveryIntent(intent: OutboundDeliveryIntent): ChannelDeliveryResult
     id: intent.id,
     kind: "outbound_queue",
     queuePolicy: intent.queuePolicy,
+  };
+}
+
+function resolveDurableSuppression(
+  send: Extract<Awaited<ReturnType<typeof sendDurableMessageBatch>>, { status: "suppressed" }>,
+): NonNullable<ChannelDeliveryResult["suppression"]> {
+  const hookEffect = send.payloadOutcomes?.find(
+    (outcome) => outcome.status === "suppressed",
+  )?.hookEffect;
+  return {
+    reason: send.reason,
+    ...(hookEffect?.cancelReason ? { cancelReason: hookEffect.cancelReason } : {}),
+    ...(hookEffect?.metadata ? { metadata: hookEffect.metadata } : {}),
   };
 }
 
@@ -206,8 +220,9 @@ export async function deliverInboundReplyWithMessageSendContext(
     mediaAccess: params.mediaAccess,
     silent: params.silent,
     durability,
+    ...(durability === "required" ? { requireUnknownSendReconciliation: true } : {}),
     session,
-    gatewayClientScopes: params.ctxPayload.GatewayClientScopes,
+    gatewayClientScopes: params.ctxPayload.GatewayClientScopes ?? [],
   });
   if (send.status === "failed") {
     return { status: "failed" as const, error: send.error };
@@ -220,18 +235,19 @@ export async function deliverInboundReplyWithMessageSendContext(
     };
   }
 
-  const delivery = createChannelDeliveryResultFromReceipt({
+  const receiptDelivery = createChannelDeliveryResultFromReceipt({
     receipt: send.receipt,
     threadId: stringifyThreadId(threadId),
     ...(replyToId ? { replyToId } : {}),
     visibleReplySent: send.status === "sent",
     ...(send.deliveryIntent ? { deliveryIntent: toDeliveryIntent(send.deliveryIntent) } : {}),
   });
+  const delivery: ChannelDeliveryResult =
+    send.status === "suppressed"
+      ? { ...receiptDelivery, suppression: resolveDurableSuppression(send) }
+      : receiptDelivery;
   if (send.status === "suppressed") {
     return { status: "handled_no_send", reason: "no_visible_result", delivery };
   }
   return { status: "handled_visible", delivery };
 }
-
-/** @deprecated Use `deliverInboundReplyWithMessageSendContext`. */
-export const deliverDurableInboundReplyPayload = deliverInboundReplyWithMessageSendContext;

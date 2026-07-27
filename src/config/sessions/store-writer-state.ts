@@ -1,25 +1,21 @@
+// Shared session-store writer queue state and test-only drains.
 import {
   clearStoreWriterQueuesForTest,
   drainStoreWriterQueuesForTest,
   type StoreWriterQueue,
-  type StoreWriterTask,
 } from "../../shared/store-writer-queue.js";
-import { clearSessionStoreCaches } from "./store-cache.js";
+import { clearSessionSkillPromptRefCache } from "./skill-prompt-blobs.js";
 
-export type SessionStoreWriterTask = StoreWriterTask;
-export type SessionStoreWriterQueue = StoreWriterQueue;
+type SessionStoreWriterQueue = StoreWriterQueue;
 
 export const WRITER_QUEUES = new Map<string, SessionStoreWriterQueue>();
 
+/** Clears legacy session writer queues and prompt-blob caches for tests. */
 export function clearSessionStoreCacheForTest(): void {
-  clearSessionStoreCaches();
+  clearSessionSkillPromptRefCache();
   clearStoreWriterQueuesForTest(WRITER_QUEUES, "session store queue cleared for test");
 }
 
 export async function drainSessionStoreWriterQueuesForTest(): Promise<void> {
   await drainStoreWriterQueuesForTest(WRITER_QUEUES, "session store queue cleared for test");
-}
-
-export function getSessionStoreWriterQueueSizeForTest(): number {
-  return WRITER_QUEUES.size;
 }

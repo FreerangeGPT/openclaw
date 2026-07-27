@@ -1,113 +1,32 @@
+// Covers plugin install path validation and normalization.
 import fs from "node:fs";
 import path from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { runCommandWithTimeout } from "../process/exec.js";
-import { initializeGlobalHookRunner, resetGlobalHookRunner } from "./hook-runner-global.js";
-import { createMockPluginRegistry } from "./hooks.test-helpers.js";
-import {
-  installPluginFromFile,
-  installPluginFromPath,
-  PLUGIN_INSTALL_ERROR_CODE,
-} from "./install.js";
+import { installPluginFromPath, PLUGIN_INSTALL_ERROR_CODE } from "./install.js";
 import { packToArchive } from "./test-helpers/archive-fixtures.js";
 import { createSuiteTempRootTracker } from "./test-helpers/fs-fixtures.js";
+import {
+  createBundleInstallFixtureFactory,
+  createDualFormatInstallFixtureFactory,
+} from "./test-helpers/install-fixtures.js";
 
 vi.mock("../process/exec.js", () => ({
   runCommandWithTimeout: vi.fn(),
 }));
 
 const suiteTempRootTracker = createSuiteTempRootTracker("openclaw-plugin-install-path");
+const setupBundleInstallFixture = createBundleInstallFixtureFactory(
+  suiteTempRootTracker.makeTempDir,
+);
+const setupDualFormatInstallFixture = createDualFormatInstallFixtureFactory(
+  suiteTempRootTracker.makeTempDir,
+);
 let dualFormatArchiveCase: {
   nodeModulesExists: boolean;
   result: Awaited<ReturnType<typeof installPluginFromPath>>;
   runCalls: unknown[][];
 };
-
-function setupBundleInstallFixture(params: {
-  bundleFormat: "codex" | "claude" | "cursor";
-  name: string;
-}) {
-  const caseDir = suiteTempRootTracker.makeTempDir();
-  const stateDir = path.join(caseDir, "state");
-  const pluginDir = path.join(caseDir, "plugin-src");
-  fs.mkdirSync(stateDir, { recursive: true });
-  fs.mkdirSync(path.join(pluginDir, "skills"), { recursive: true });
-  const manifestDir = path.join(
-    pluginDir,
-    params.bundleFormat === "codex"
-      ? ".codex-plugin"
-      : params.bundleFormat === "cursor"
-        ? ".cursor-plugin"
-        : ".claude-plugin",
-  );
-  fs.mkdirSync(manifestDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(manifestDir, "plugin.json"),
-    JSON.stringify({
-      name: params.name,
-      description: `${params.bundleFormat} bundle fixture`,
-      ...(params.bundleFormat === "codex" ? { skills: "skills" } : {}),
-    }),
-    "utf-8",
-  );
-  if (params.bundleFormat === "cursor") {
-    fs.mkdirSync(path.join(pluginDir, ".cursor", "commands"), { recursive: true });
-    fs.writeFileSync(
-      path.join(pluginDir, ".cursor", "commands", "review.md"),
-      "---\ndescription: fixture\n---\n",
-      "utf-8",
-    );
-  }
-  fs.writeFileSync(
-    path.join(pluginDir, "skills", "SKILL.md"),
-    "---\ndescription: fixture\n---\n",
-    "utf-8",
-  );
-  return { pluginDir, extensionsDir: path.join(stateDir, "extensions") };
-}
-
-function setupDualFormatInstallFixture(params: { bundleFormat: "codex" | "claude" }) {
-  const caseDir = suiteTempRootTracker.makeTempDir();
-  const stateDir = path.join(caseDir, "state");
-  const pluginDir = path.join(caseDir, "plugin-src");
-  fs.mkdirSync(path.join(pluginDir, "dist"), { recursive: true });
-  fs.mkdirSync(path.join(pluginDir, "skills"), { recursive: true });
-  const manifestDir = path.join(
-    pluginDir,
-    params.bundleFormat === "codex" ? ".codex-plugin" : ".claude-plugin",
-  );
-  fs.mkdirSync(manifestDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(pluginDir, "package.json"),
-    JSON.stringify({
-      name: "@openclaw/native-dual",
-      version: "0.0.1",
-      openclaw: { extensions: ["./dist/index.js"] },
-      dependencies: { "left-pad": "1.3.0" },
-    }),
-    "utf-8",
-  );
-  fs.writeFileSync(
-    path.join(pluginDir, "openclaw.plugin.json"),
-    JSON.stringify({
-      id: "native-dual",
-      configSchema: { type: "object", properties: {} },
-      skills: ["skills"],
-    }),
-    "utf-8",
-  );
-  fs.writeFileSync(path.join(pluginDir, "dist", "index.js"), "export {};", "utf-8");
-  fs.writeFileSync(path.join(pluginDir, "skills", "SKILL.md"), "---\ndescription: fixture\n---\n");
-  fs.writeFileSync(
-    path.join(manifestDir, "plugin.json"),
-    JSON.stringify({
-      name: "Bundle Fallback",
-      ...(params.bundleFormat === "codex" ? { skills: "skills" } : {}),
-    }),
-    "utf-8",
-  );
-  return { pluginDir, extensionsDir: path.join(stateDir, "extensions") };
-}
 
 function setupNativePluginInstallFixture() {
   const caseDir = suiteTempRootTracker.makeTempDir();
@@ -133,24 +52,6 @@ function setupNativePluginInstallFixture() {
   );
   fs.writeFileSync(path.join(pluginDir, "dist", "index.js"), "export {};\n", "utf-8");
   return { caseDir, pluginDir, extensionsDir: path.join(stateDir, "extensions") };
-}
-
-async function installFromFileWithWarnings(params: {
-  extensionsDir: string;
-  filePath: string;
-  dangerouslyForceUnsafeInstall?: boolean;
-}) {
-  const warnings: string[] = [];
-  const result = await installPluginFromFile({
-    dangerouslyForceUnsafeInstall: params.dangerouslyForceUnsafeInstall,
-    filePath: params.filePath,
-    extensionsDir: params.extensionsDir,
-    logger: {
-      info: () => {},
-      warn: (msg: string) => warnings.push(msg),
-    },
-  });
-  return { result, warnings };
 }
 
 afterAll(() => {
@@ -192,148 +93,32 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-  resetGlobalHookRunner();
   vi.clearAllMocks();
   vi.unstubAllEnvs();
 });
 
 describe("installPluginFromPath", () => {
-  it("runs before_install for plain file plugins with file provenance metadata", async () => {
-    const handler = vi.fn().mockReturnValue({
-      findings: [
-        {
-          ruleId: "manual-review",
-          severity: "warn",
-          file: "payload.js",
-          line: 1,
-          message: "Review single-file plugin before install",
-        },
-      ],
-    });
-    initializeGlobalHookRunner(createMockPluginRegistry([{ hookName: "before_install", handler }]));
-
+  it("rejects managed plain file plugin installs through path install", async () => {
     const baseDir = suiteTempRootTracker.makeTempDir();
     const extensionsDir = path.join(baseDir, "extensions");
     fs.mkdirSync(extensionsDir, { recursive: true });
 
     const sourcePath = path.join(baseDir, "payload.js");
     fs.writeFileSync(sourcePath, "console.log('SAFE');\n", "utf-8");
-
-    const result = await installPluginFromFile({
-      filePath: sourcePath,
-      extensionsDir,
-    });
-
-    expect(result.ok).toBe(true);
-    expect(handler).toHaveBeenCalledTimes(1);
-    const [installContext, installMetadata] = handler.mock.calls[0] ?? [];
-    expect(installContext).toEqual({
-      targetName: "payload",
-      targetType: "plugin",
-      origin: "plugin-file",
-      sourcePath,
-      sourcePathKind: "file",
-      request: {
-        kind: "plugin-file",
-        mode: "install",
-        requestedSpecifier: sourcePath,
-      },
-      builtinScan: {
-        status: "ok",
-        scannedFiles: 1,
-        critical: 0,
-        warn: 0,
-        info: 0,
-        findings: [],
-      },
-      plugin: {
-        contentType: "file",
-        pluginId: "payload",
-        extensions: ["payload.js"],
-      },
-    });
-    expect(installMetadata).toEqual({
-      origin: "plugin-file",
-      targetType: "plugin",
-      requestKind: "plugin-file",
-    });
-  });
-
-  it("blocks plain file installs when the scanner finds dangerous code patterns", async () => {
-    const baseDir = suiteTempRootTracker.makeTempDir();
-    const extensionsDir = path.join(baseDir, "extensions");
-    fs.mkdirSync(extensionsDir, { recursive: true });
-
-    const sourcePath = path.join(baseDir, "payload.js");
-    fs.writeFileSync(sourcePath, "eval('danger');\n", "utf-8");
-    const expectedFinding = `Dynamic code execution detected (${sourcePath}:1)`;
-
-    const { result, warnings } = await installFromFileWithWarnings({
-      filePath: sourcePath,
-      extensionsDir,
-    });
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.code).toBe(PLUGIN_INSTALL_ERROR_CODE.SECURITY_SCAN_BLOCKED);
-      expect(result.error).toBe(
-        `Plugin file "payload" installation blocked: dangerous code patterns detected: ${expectedFinding}`,
-      );
-    }
-    expect(warnings).toEqual([
-      `WARNING: Plugin file "payload" contains dangerous code patterns: ${expectedFinding}`,
-    ]);
-  });
-
-  it("allows plain file installs with dangerous code patterns when forced unsafe install is set", async () => {
-    const baseDir = suiteTempRootTracker.makeTempDir();
-    const extensionsDir = path.join(baseDir, "extensions");
-    fs.mkdirSync(extensionsDir, { recursive: true });
-
-    const sourcePath = path.join(baseDir, "payload.js");
-    fs.writeFileSync(sourcePath, "eval('danger');\n", "utf-8");
-    const expectedFinding = `Dynamic code execution detected (${sourcePath}:1)`;
-
-    const { result, warnings } = await installFromFileWithWarnings({
-      filePath: sourcePath,
-      extensionsDir,
-      dangerouslyForceUnsafeInstall: true,
-    });
-
-    expect(result.ok).toBe(true);
-    expect(warnings).toEqual([
-      `WARNING: Plugin file "payload" contains dangerous code patterns: ${expectedFinding}`,
-      `WARNING: Plugin file "payload" installation forced despite dangerous code patterns via --dangerously-force-unsafe-install: ${expectedFinding}`,
-    ]);
-  });
-
-  it("blocks hardlink alias overwrites when installing a plain file plugin", async () => {
-    const baseDir = suiteTempRootTracker.makeTempDir();
-    const extensionsDir = path.join(baseDir, "extensions");
-    const outsideDir = path.join(baseDir, "outside");
-    fs.mkdirSync(extensionsDir, { recursive: true });
-    fs.mkdirSync(outsideDir, { recursive: true });
-
-    const sourcePath = path.join(baseDir, "payload.js");
-    fs.writeFileSync(sourcePath, "console.log('SAFE');\n", "utf-8");
-    const victimPath = path.join(outsideDir, "victim.js");
-    fs.writeFileSync(victimPath, "ORIGINAL", "utf-8");
-
-    const targetPath = path.join(extensionsDir, "payload.js");
-    fs.linkSync(victimPath, targetPath);
 
     const result = await installPluginFromPath({
       path: sourcePath,
       extensionsDir,
-      mode: "update",
     });
 
     expect(result.ok).toBe(false);
     if (result.ok) {
       return;
     }
-    expect(result.error.toLowerCase()).toMatch(/hardlink|path alias escape/);
-    expect(fs.readFileSync(victimPath, "utf-8")).toBe("ORIGINAL");
+    expect(result.code).toBe(PLUGIN_INSTALL_ERROR_CODE.UNSUPPORTED_PLAIN_FILE_PLUGIN);
+    expect(result.error).toBe(
+      "Plain file plugin installs are not supported. Install a plugin directory or archive that contains openclaw.plugin.json, or list standalone plugin files in plugins.load.paths.",
+    );
   });
 
   it.runIf(process.platform !== "win32")(

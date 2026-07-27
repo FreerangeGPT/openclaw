@@ -1,3 +1,4 @@
+/** Tests plugin-specific runtime config secret collectors. */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import type { PluginOrigin } from "../plugins/types.js";
@@ -22,7 +23,10 @@ vi.mock("../plugins/bundled-plugin-metadata.js", () => ({
 }));
 
 function asConfig(value: unknown): OpenClawConfig {
-  return value as OpenClawConfig;
+  return {
+    agents: { list: [{ id: "main", default: true }] },
+    ...(value as OpenClawConfig),
+  };
 }
 
 function makeContext(sourceConfig: OpenClawConfig): ResolverContext {

@@ -1,8 +1,7 @@
-import { execFile } from "node:child_process";
+/** Platform-specific doctor notes for macOS gateway launchd state and startup tuning. */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { note } from "../../packages/terminal-core/src/note.js";
 import { formatCliCommand } from "../cli/command-format.js";
@@ -10,15 +9,17 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { hasConfiguredSecretInput } from "../config/types.secrets.js";
 import { findStaleOpenClawUpdateLaunchdJobs } from "../daemon/launchd.js";
 import { resolveGatewayService, type GatewayService } from "../daemon/service.js";
+import { runExec } from "../process/exec.js";
 import { shortenHomePath } from "../utils.js";
 
-const execFileAsync = promisify(execFile);
+const DOCTOR_LAUNCHCTL_TIMEOUT_MS = 5_000;
 
 function resolveHomeDir(): string {
   return process.env.HOME ?? os.homedir();
 }
 
-export function collectMacLaunchAgentOverrideWarning(deps?: {
+/** Returns the macOS marker warning when LaunchAgent writes are locally disabled. */
+function collectMacLaunchAgentOverrideWarning(deps?: {
   platform?: NodeJS.Platform;
   homeDir?: string;
   exists?: (candidate: string) => boolean;
@@ -42,6 +43,7 @@ export function collectMacLaunchAgentOverrideWarning(deps?: {
   ].join("\n");
 }
 
+/** Emits the macOS LaunchAgent override warning when present. */
 export async function noteMacLaunchAgentOverrides() {
   const warning = collectMacLaunchAgentOverrideWarning();
   if (warning) {
@@ -49,7 +51,8 @@ export async function noteMacLaunchAgentOverrides() {
   }
 }
 
-export async function collectMacStaleOpenClawUpdateLaunchdJobsWarning(deps?: {
+/** Returns a warning for stale OpenClaw updater launchd jobs left after interrupted updates. */
+async function collectMacStaleOpenClawUpdateLaunchdJobsWarning(deps?: {
   platform?: NodeJS.Platform;
   findJobs?: typeof findStaleOpenClawUpdateLaunchdJobs;
   env?: NodeJS.ProcessEnv;
@@ -80,6 +83,7 @@ export async function collectMacStaleOpenClawUpdateLaunchdJobsWarning(deps?: {
   ].join("\n");
 }
 
+/** Emits stale updater launchd job notes using the gateway service environment when available. */
 export async function noteMacStaleOpenClawUpdateLaunchdJobs(deps?: {
   platform?: NodeJS.Platform;
   findJobs?: typeof findStaleOpenClawUpdateLaunchdJobs;
@@ -102,8 +106,11 @@ export async function noteMacStaleOpenClawUpdateLaunchdJobs(deps?: {
 
 async function launchctlGetenv(name: string): Promise<string | undefined> {
   try {
-    const result = await execFileAsync("/bin/launchctl", ["getenv", name], { encoding: "utf8" });
-    const value = normalizeOptionalString(result.stdout ?? "") ?? "";
+    const result = await runExec("/bin/launchctl", ["getenv", name], {
+      logOutput: false,
+      timeoutMs: DOCTOR_LAUNCHCTL_TIMEOUT_MS,
+    });
+    const value = normalizeOptionalString(result.stdout) ?? "";
     return value.length > 0 ? value : undefined;
   } catch {
     return undefined;
@@ -122,7 +129,8 @@ function hasConfigGatewayCreds(cfg: OpenClawConfig): boolean {
   );
 }
 
-export async function collectMacLaunchctlGatewayEnvOverrideWarning(
+/** Returns a warning for host-wide launchctl gateway auth env overrides. */
+async function collectMacLaunchctlGatewayEnvOverrideWarning(
   cfg: OpenClawConfig,
   deps?: {
     platform?: NodeJS.Platform;
@@ -158,10 +166,10 @@ export async function collectMacLaunchctlGatewayEnvOverrideWarning(
     "- Host-wide launchctl gateway auth overrides detected.",
     "- Current managed Gateway installs do not need these values unless config intentionally references the env var.",
     envToken && envTokenKey
-      ? `- \`${envTokenKey}\` is set; it can make local clients use a different token than gateway.auth.token.`
+      ? `- \`${envTokenKey}\` is set; explicit environment URL or node-host targets can use a different token than gateway.auth.token.`
       : undefined,
     envPassword
-      ? `- \`${envPasswordKey ?? "OPENCLAW_GATEWAY_PASSWORD"}\` is set; it can make local clients use a different password than gateway.auth.password.`
+      ? `- \`${envPasswordKey ?? "OPENCLAW_GATEWAY_PASSWORD"}\` is set; explicit environment URL or node-host targets can use a different password than gateway.auth.password.`
       : undefined,
     "- Clear overrides and restart the app/gateway:",
     envTokenKey ? `  launchctl unsetenv ${envTokenKey}` : undefined,
@@ -171,6 +179,7 @@ export async function collectMacLaunchctlGatewayEnvOverrideWarning(
     .join("\n");
 }
 
+/** Emits macOS launchctl gateway auth override warnings. */
 export async function noteMacLaunchctlGatewayEnvOverrides(
   cfg: OpenClawConfig,
   deps?: {
@@ -200,6 +209,7 @@ async function resolveGatewayServiceEnvForPlatformNotes(deps?: {
     : baseEnv;
 }
 
+/** Collects all macOS gateway platform warnings without emitting notes. */
 export async function collectMacGatewayPlatformWarnings(
   cfg: OpenClawConfig,
   deps?: {
@@ -246,6 +256,7 @@ function isTmpCompileCachePath(cachePath: string): boolean {
   );
 }
 
+/** Emits startup tuning hints for low-power Linux hosts when env settings are suboptimal. */
 export function noteStartupOptimizationHints(
   env: NodeJS.ProcessEnv = process.env,
   deps?: {

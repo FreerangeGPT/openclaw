@@ -1,3 +1,4 @@
+// Verifies graceful plugin init failure handling and reporting.
 import fs from "node:fs";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -6,7 +7,7 @@ import { cleanupTrackedTempDirs, makeTrackedTempDir } from "./test-helpers/fs-fi
 const fixtureTempDirs: string[] = [];
 const fixtureRoot = makeTrackedTempDir("openclaw-plugin-graceful", fixtureTempDirs);
 let tempDirIndex = 0;
-const { loadOpenClawPlugins, clearPluginLoaderCache } = await import("./loader.js");
+const { loadOpenClawPlugins, clearPluginLoaderCache } = await import("./loader.test-fixtures.js");
 
 afterAll(() => {
   cleanupTrackedTempDirs(fixtureTempDirs);

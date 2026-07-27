@@ -1,22 +1,30 @@
+/** Leases and formats completed subagent results for injection into requester turns. */
+import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { sanitizeForPromptLiteral, wrapPromptDataBlock } from "./sanitize-for-prompt.js";
 import type {
   PendingFinalDeliveryPayload,
   SubagentCompletionDeliveryState,
   SubagentRunRecord,
 } from "./subagent-registry.types.js";
+import { selectDeliverableSessionsReply } from "./tools/sessions-send-tokens.js";
 
+// Steering queue utilities for delivering completed subagent results back into
+// the requester session. Items are leased before injection to avoid duplicate
+// parent-turn prompts.
 const STALE_STEERING_LEASE_MS = 5 * 60 * 1000;
 const MAX_MERGED_STEERING_CHARS = 24_000;
 const MAX_RESULT_CHARS_PER_ITEM = 6_000;
 const MAX_METADATA_CHARS = 500;
 
-export type AgentSteeringQueueItem = {
+/** Pending subagent completion selected for requester-session steering. */
+type AgentSteeringQueueItem = {
   runId: string;
   entry: SubagentRunRecord;
   payload: PendingFinalDeliveryPayload;
 };
 
-export type LeasedAgentSteeringBatch = {
+/** A batch of leased subagent completions plus the prompt to inject upstream. */
+type LeasedAgentSteeringBatch = {
   runIds: string[];
   prompt: string;
 };
@@ -26,6 +34,8 @@ function isTerminalDeliveryStatus(status: SubagentCompletionDeliveryState["statu
 }
 
 function isStaleLease(delivery: SubagentCompletionDeliveryState, now: number): boolean {
+  // Leases are process-local coordination hints. Stale leases re-enter the queue
+  // so a restarted or failed requester turn does not strand completed results.
   return (
     delivery.status === "in_progress" &&
     typeof delivery.steeringLeasedAt === "number" &&
@@ -34,7 +44,7 @@ function isStaleLease(delivery: SubagentCompletionDeliveryState, now: number): b
 }
 
 function selectResultText(payload: PendingFinalDeliveryPayload): string | undefined {
-  return payload.frozenResultText?.trim() || payload.fallbackFrozenResultText?.trim() || undefined;
+  return selectDeliverableSessionsReply(payload.frozenResultText, payload.fallbackFrozenResultText);
 }
 
 function describeOutcome(payload: PendingFinalDeliveryPayload): string {
@@ -50,10 +60,14 @@ function describeOutcome(payload: PendingFinalDeliveryPayload): string {
 
 function promptLiteral(value: string): string {
   const literal = sanitizeForPromptLiteral(value).trim();
-  return literal.length > MAX_METADATA_CHARS ? literal.slice(0, MAX_METADATA_CHARS) : literal;
+  return literal.length > MAX_METADATA_CHARS
+    ? truncateUtf16Safe(literal, MAX_METADATA_CHARS)
+    : literal;
 }
 
 function sortPendingSteeringItems(a: AgentSteeringQueueItem, b: AgentSteeringQueueItem): number {
+  // Deliver oldest completed work first, then use creation time and run id for
+  // deterministic prompt-cache-friendly ordering.
   const aEnded = a.payload.endedAt ?? a.entry.endedAt ?? Number.MAX_SAFE_INTEGER;
   const bEnded = b.payload.endedAt ?? b.entry.endedAt ?? Number.MAX_SAFE_INTEGER;
   if (aEnded !== bEnded) {
@@ -67,7 +81,8 @@ function sortPendingSteeringItems(a: AgentSteeringQueueItem, b: AgentSteeringQue
   return a.runId.localeCompare(b.runId);
 }
 
-export function listPendingAgentSteeringItemsFromSubagentRuns(params: {
+/** List pending completion payloads that should be steered into a requester turn. */
+function listPendingAgentSteeringItemsFromSubagentRuns(params: {
   runs: Map<string, SubagentRunRecord>;
   requesterSessionKey: string;
   now?: number;
@@ -99,7 +114,8 @@ export function listPendingAgentSteeringItemsFromSubagentRuns(params: {
   return items.toSorted(sortPendingSteeringItems);
 }
 
-export function buildMergedAgentSteeringPrompt(
+/** Build the merged runtime prompt for one or more pending steering items. */
+function buildMergedAgentSteeringPrompt(
   items: readonly AgentSteeringQueueItem[],
 ): string | undefined {
   const sections: string[] = [];
@@ -149,6 +165,8 @@ function selectPromptBoundedItems(
       continue;
     }
     if (selected.length === 0) {
+      // Always deliver at least one item; its result body is individually
+      // bounded, even if metadata pushes the merged prompt over the soft cap.
       selected.push(item);
     }
     break;
@@ -156,6 +174,7 @@ function selectPromptBoundedItems(
   return selected;
 }
 
+/** Leases pending steering items and returns the prompt to prepend to the requester turn. */
 export function leasePendingAgentSteeringItemsFromSubagentRuns(params: {
   runs: Map<string, SubagentRunRecord>;
   requesterSessionKey: string;
@@ -192,6 +211,7 @@ export function leasePendingAgentSteeringItemsFromSubagentRuns(params: {
   };
 }
 
+/** Marks leased steering items delivered after successful requester injection. */
 export function ackLeasedAgentSteeringItemsFromSubagentRuns(params: {
   runs: Map<string, SubagentRunRecord>;
   runIds: readonly string[];
@@ -220,6 +240,7 @@ export function ackLeasedAgentSteeringItemsFromSubagentRuns(params: {
   return updated;
 }
 
+/** Releases leased steering items when requester injection fails or is abandoned. */
 export function releaseLeasedAgentSteeringItemsFromSubagentRuns(params: {
   runs: Map<string, SubagentRunRecord>;
   runIds: readonly string[];
@@ -239,6 +260,7 @@ export function releaseLeasedAgentSteeringItemsFromSubagentRuns(params: {
     delivery.lastError = params.error ?? delivery.lastError ?? null;
     const entry = params.runs.get(runId);
     if (entry && typeof entry.cleanupCompletedAt !== "number") {
+      // Non-finalized runs can be retried by cleanup/delivery after release.
       entry.cleanupHandled = false;
     }
     updated += 1;
@@ -246,6 +268,8 @@ export function releaseLeasedAgentSteeringItemsFromSubagentRuns(params: {
   return updated;
 }
 
+/** Prepend steering runtime data before the current parent-turn prompt. */
+/** Prepends a steering prompt to an existing user prompt when pending results exist. */
 export function prependAgentSteeringPrompt(params: {
   steeringPrompt: string;
   prompt: string;

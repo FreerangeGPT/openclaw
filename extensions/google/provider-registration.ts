@@ -1,3 +1,4 @@
+// Google provider module implements model/runtime integration.
 import type {
   OpenClawPluginApi,
   ProviderReasoningOutputModeContext,
@@ -7,6 +8,7 @@ import type { ProviderPlugin } from "openclaw/plugin-sdk/provider-model-shared";
 import { normalizeGoogleModelId } from "./model-id.js";
 import { GOOGLE_GEMINI_DEFAULT_MODEL, applyGoogleGeminiModelDefault } from "./onboard.js";
 import {
+  buildGoogleLiveCatalogProvider,
   buildGoogleStaticCatalogProvider,
   buildGoogleVertexStaticCatalogProvider,
 } from "./provider-catalog.js";
@@ -21,6 +23,7 @@ import {
   createGoogleGenerativeAiTransportStreamFn,
   createGoogleVertexTransportStreamFn,
 } from "./transport-stream.js";
+import { resolveGoogleVertexConfigApiKey } from "./vertex-adc.js";
 
 function resolveGoogleReasoningOutputMode(
   ctx: ProviderReasoningOutputModeContext,
@@ -46,7 +49,7 @@ export function buildGoogleProvider(): ProviderPlugin {
         providerId: "google",
         methodId: "api-key",
         label: "Google Gemini API key",
-        hint: "AI Studio / Gemini API key",
+        hint: "Free API key from aistudio.google.com/apikey",
         optionKey: "geminiApiKey",
         flagName: "--gemini-api-key",
         envVar: "GEMINI_API_KEY",
@@ -67,6 +70,8 @@ export function buildGoogleProvider(): ProviderPlugin {
       resolveGoogleGenerativeAiTransport({ provider, api, baseUrl }),
     normalizeConfig: ({ provider, providerConfig }) =>
       normalizeGoogleProviderConfig(provider, providerConfig),
+    resolveConfigApiKey: ({ provider, env }) =>
+      provider === "google-vertex" ? resolveGoogleVertexConfigApiKey(env) : undefined,
     staticCatalog: {
       order: "simple",
       run: async () => ({
@@ -75,6 +80,24 @@ export function buildGoogleProvider(): ProviderPlugin {
           "google-vertex": buildGoogleVertexStaticCatalogProvider(),
         },
       }),
+    },
+    catalog: {
+      order: "simple",
+      run: async (ctx) => {
+        const auth = ctx.resolveProviderApiKey("google");
+        if (!auth.apiKey) {
+          return null;
+        }
+        return {
+          providers: {
+            google: await buildGoogleLiveCatalogProvider({
+              apiKey: auth.apiKey,
+              discoveryApiKey: auth.discoveryApiKey,
+            }),
+            "google-vertex": buildGoogleVertexStaticCatalogProvider(),
+          },
+        };
+      },
     },
     normalizeModelId: ({ modelId }) => normalizeGoogleModelId(modelId),
     resolveDynamicModel: (ctx) =>

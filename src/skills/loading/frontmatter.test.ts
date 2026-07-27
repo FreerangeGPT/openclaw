@@ -1,3 +1,4 @@
+// Frontmatter tests cover skill metadata parsing and validation.
 import { describe, expect, it } from "vitest";
 import {
   parseFrontmatter,
@@ -19,6 +20,136 @@ describe("resolveSkillInvocationPolicy", () => {
     });
     expect(policy.userInvocable).toBe(false);
     expect(policy.disableModelInvocation).toBe(true);
+  });
+});
+
+describe("parseFrontmatter", () => {
+  it("keeps recoverable colon-rich scalar values", () => {
+    const frontmatter = parseFrontmatter(`---
+name: sample-skill
+description: Use anime style IMPORTANT: Must be kawaii
+---`);
+
+    expect(frontmatter.description).toBe("Use anime style IMPORTANT: Must be kawaii");
+  });
+
+  it("keeps recoverable description values beginning with punctuation", () => {
+    const frontmatter = parseFrontmatter(`---
+name: sample-skill
+description: [Beta] Builds prereleases
+---`);
+
+    expect(frontmatter.description).toBe("[Beta] Builds prereleases");
+  });
+
+  it("keeps recoverable description values beginning with YAML-reserved characters", () => {
+    const frontmatter = parseFrontmatter(`---
+name: sample-skill
+description: @scope/package helper
+---`);
+
+    expect(frontmatter.description).toBe("@scope/package helper");
+  });
+
+  it("keeps recoverable description values that resemble YAML aliases", () => {
+    const frontmatter = parseFrontmatter(`---
+name: sample-skill
+description: *Experimental
+---`);
+
+    expect(frontmatter.description).toBe("*Experimental");
+  });
+
+  it("rejects malformed structured fallback values with the YAML parse error", () => {
+    expect(() =>
+      parseFrontmatter(`---
+name: [broken
+description: Broken skill
+---`),
+    ).toThrow("invalid frontmatter: BAD_INDENT");
+  });
+
+  it("rejects unresolved YAML aliases", () => {
+    expect(() =>
+      parseFrontmatter(`---
+name: sample-skill
+description: Broken skill
+metadata: *missing
+---`),
+    ).toThrow("invalid frontmatter: YAML_EXCEPTION: Unresolved alias");
+  });
+
+  it("rejects duplicate keys after a recoverable description", () => {
+    expect(() =>
+      parseFrontmatter(`---
+name: first
+description: Working skill
+name: second
+---`),
+    ).toThrow("invalid frontmatter: DUPLICATE_KEY");
+  });
+
+  it("rejects invalid structured values under quoted keys", () => {
+    expect(() =>
+      parseFrontmatter(`---
+name: sample-skill
+description: Working skill
+"metadata": *missing
+---`),
+    ).toThrow("invalid frontmatter: YAML_EXCEPTION: Unresolved alias");
+  });
+
+  it("does not let a description alias mask a later structured alias", () => {
+    expect(() =>
+      parseFrontmatter(`---
+name: sample-skill
+description: *legacy
+metadata: *missing
+---`),
+    ).toThrow("invalid frontmatter: YAML_EXCEPTION: Unresolved alias");
+  });
+
+  it("does not let a colon-rich description mask a structured alias", () => {
+    expect(() =>
+      parseFrontmatter(`---
+name: sample-skill
+description: Use anime style IMPORTANT: Must be kawaii
+metadata: *missing
+---`),
+    ).toThrow("invalid frontmatter: YAML_EXCEPTION: Unresolved alias");
+  });
+
+  it("rejects indentation errors following a description", () => {
+    expect(() =>
+      parseFrontmatter(`---
+name: sample-skill
+description: Working skill
+\tmetadata: {}
+---`),
+    ).toThrow(/invalid frontmatter.*(?:TAB_AS_INDENT|BAD_INDENT)/);
+  });
+
+  it("rejects unresolved aliases under explicit YAML keys", () => {
+    expect(() =>
+      parseFrontmatter(`---
+name: sample-skill
+description: Working skill
+? metadata
+: *missing
+---`),
+    ).toThrow(/invalid frontmatter.*YAML_EXCEPTION: Unresolved alias/);
+  });
+
+  it("does not recover nested description keys inside malformed metadata", () => {
+    expect(() =>
+      parseFrontmatter(`---
+name: sample-skill
+description: Working skill
+metadata: {
+description: *missing
+}
+---`),
+    ).toThrow(/invalid frontmatter/);
   });
 });
 

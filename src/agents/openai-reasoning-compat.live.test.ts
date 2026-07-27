@@ -1,9 +1,9 @@
+// Live checks for OpenAI reasoning compatibility and repaired tool replay payloads.
 import type { AgentMessage } from "openclaw/plugin-sdk/agent-core";
 import { SessionManager } from "openclaw/plugin-sdk/agent-sessions";
 import type { Model } from "openclaw/plugin-sdk/llm";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { getRuntimeConfig } from "../config/config.js";
 import { discoverAuthStorage, discoverModels } from "./agent-model-discovery.js";
 import { resolveDefaultAgentDir } from "./agent-scope.js";
 import { sanitizeSessionHistory } from "./embedded-agent-runner/replay-history.js";
@@ -13,6 +13,7 @@ import {
   isLiveTestEnabled,
   logLiveProgress,
   requiresLiveProfileCredential,
+  readLiveTestConfig,
   resolveLiveCredentialPrecedence,
 } from "./live-test-helpers.js";
 import { getApiKeyForModel, requireApiKey } from "./model-auth.js";
@@ -32,6 +33,7 @@ async function completeReplyWithRetry(params: {
   apiKey: string;
   message: string;
 }): Promise<{ text: string; errorMessage?: string }> {
+  // Some reasoning targets spend the first tiny budget without visible text.
   const runOnce = async (maxTokens: number) => {
     const response = await completeSimpleWithTimeout(
       params.model,
@@ -74,6 +76,7 @@ async function completeReplyWithRetry(params: {
 }
 
 function isKnownLiveBlocker(errorMessage: string): boolean {
+  // Live lane should skip account/usage blockers rather than fail unrelated compat checks.
   return (
     /not supported when using codex with a chatgpt account/i.test(errorMessage) ||
     /hit your chatgpt usage limit/i.test(errorMessage)
@@ -81,6 +84,7 @@ function isKnownLiveBlocker(errorMessage: string): boolean {
 }
 
 function resolveTargetModelRef(): { provider: string; modelId: string } {
+  // Keep env override parsing strict so live runs never silently target the wrong model.
   const [provider, ...rest] = TARGET_MODEL_REF.split("/");
   const modelId = rest.join("/").trim();
   if (!provider?.trim() || !modelId) {
@@ -99,7 +103,7 @@ describeLive("openai reasoning compat live", () => {
     "remaps low reasoning for the configured OpenAI mini target",
     async () => {
       const { provider, modelId } = resolveTargetModelRef();
-      const cfg = getRuntimeConfig();
+      const cfg = await readLiveTestConfig();
       await ensureOpenClawModelsJson(cfg);
 
       const agentDir = resolveDefaultAgentDir(cfg);
@@ -159,7 +163,7 @@ describeLive("openai reasoning compat live", () => {
     "accepts repaired OpenAI Codex parallel tool replay with aborted missing results",
     async () => {
       const { provider, modelId } = resolveTargetModelRef();
-      const cfg = getRuntimeConfig();
+      const cfg = await readLiveTestConfig();
       await ensureOpenClawModelsJson(cfg);
 
       const agentDir = resolveDefaultAgentDir(cfg);

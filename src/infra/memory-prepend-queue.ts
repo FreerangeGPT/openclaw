@@ -230,8 +230,7 @@ export async function prepareMemoryPrependQueueDrain(params: {
   let totalChars = 0;
   let truncated = false;
 
-  for (let index = 0; index < parsedLines.length; index += 1) {
-    const parsedLine = parsedLines[index];
+  for (const [index, parsedLine] of parsedLines.entries()) {
     if (parsedLine.kind === "invalid") {
       malformedLines += 1;
       consumedIndices.add(index);

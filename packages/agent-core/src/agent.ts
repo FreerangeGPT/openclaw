@@ -1,3 +1,4 @@
+// Agent Core module implements agent behavior.
 import type {
   ImageContent,
   Message,
@@ -6,9 +7,16 @@ import type {
   TextContent,
   ThinkingBudgets,
   Transport,
-} from "../../llm-core/src/index.js";
+} from "@openclaw/llm-core";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
+import { TranscriptNotContinuableError } from "./errors.js";
+import { resolveAgentReasoningOption } from "./reasoning.js";
 import { type AgentCoreStreamRuntimeDeps, resolveAgentCoreStreamFn } from "./runtime-deps.js";
+import {
+  appendInterruptedTurnMessage,
+  createFailureMessage,
+  isTurnHandoffAbort,
+} from "./turn-interruption.js";
 import type {
   AfterToolCallContext,
   AfterToolCallResult,
@@ -21,6 +29,7 @@ import type {
   AgentTool,
   BeforeToolCallContext,
   BeforeToolCallResult,
+  PrepareNextTurnContext,
   QueueMode,
   StreamFn,
   ToolExecutionMode,
@@ -34,15 +43,6 @@ function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
       message.role === "user" || message.role === "assistant" || message.role === "toolResult",
   );
 }
-
-const EMPTY_USAGE = {
-  input: 0,
-  output: 0,
-  cacheRead: 0,
-  cacheWrite: 0,
-  totalTokens: 0,
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-};
 
 const DEFAULT_MODEL = {
   id: "unknown",
@@ -123,6 +123,8 @@ export interface AgentOptions {
     context: BeforeToolCallContext,
     signal?: AbortSignal,
   ) => Promise<BeforeToolCallResult | undefined>;
+  /** Hook that may hydrate a deferred authorized tool call into an executable tool. */
+  resolveDeferredTool?: AgentLoopConfig["resolveDeferredTool"];
   /** Hook that may alter a tool result after execution. */
   afterToolCall?: (
     context: AfterToolCallContext,
@@ -130,6 +132,11 @@ export interface AgentOptions {
   ) => Promise<AfterToolCallResult | undefined>;
   /** Hook that may update model, reasoning, or context after a turn. */
   prepareNextTurn?: (
+    signal?: AbortSignal,
+  ) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+  /** Context-aware turn hook. Takes precedence over `prepareNextTurn` when both are provided. */
+  prepareNextTurnWithContext?: (
+    context: PrepareNextTurnContext,
     signal?: AbortSignal,
   ) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
   /** Queue drain mode for steering messages injected before the next assistant response. */
@@ -219,11 +226,16 @@ export class Agent {
     context: BeforeToolCallContext,
     signal?: AbortSignal,
   ) => Promise<BeforeToolCallResult | undefined>;
+  public resolveDeferredTool?: AgentLoopConfig["resolveDeferredTool"];
   public afterToolCall?: (
     context: AfterToolCallContext,
     signal?: AbortSignal,
   ) => Promise<AfterToolCallResult | undefined>;
   public prepareNextTurn?: (
+    signal?: AbortSignal,
+  ) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+  public prepareNextTurnWithContext?: (
+    context: PrepareNextTurnContext,
     signal?: AbortSignal,
   ) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
   private activeRun?: ActiveRun;
@@ -248,8 +260,10 @@ export class Agent {
     this.onPayload = options.onPayload;
     this.onResponse = options.onResponse;
     this.beforeToolCall = options.beforeToolCall;
+    this.resolveDeferredTool = options.resolveDeferredTool;
     this.afterToolCall = options.afterToolCall;
     this.prepareNextTurn = options.prepareNextTurn;
+    this.prepareNextTurnWithContext = options.prepareNextTurnWithContext;
     this.steeringQueue = new PendingMessageQueue(options.steeringMode ?? "one-at-a-time");
     this.followUpQueue = new PendingMessageQueue(options.followUpMode ?? "one-at-a-time");
     this.sessionId = options.sessionId;
@@ -340,8 +354,8 @@ export class Agent {
   }
 
   /** Abort the current run, if one is active. */
-  abort(): void {
-    this.activeRun?.abortController.abort();
+  abort(reason?: unknown): void {
+    this.activeRun?.abortController.abort(reason);
   }
 
   /**
@@ -391,7 +405,7 @@ export class Agent {
       throw new Error("No messages to continue from");
     }
 
-    if (lastMessage.role === "assistant") {
+    if (lastMessage.role === "assistant" || lastMessage.role === "toolResult") {
       const queuedSteering = this.steeringQueue.drain();
       if (queuedSteering.length > 0) {
         await this.runPromptMessages(queuedSteering, { skipInitialSteeringPoll: true });
@@ -403,8 +417,10 @@ export class Agent {
         await this.runPromptMessages(queuedFollowUps);
         return;
       }
+    }
 
-      throw new Error("Cannot continue from message role: assistant");
+    if (lastMessage.role === "assistant") {
+      throw new TranscriptNotContinuableError(lastMessage.role);
     }
 
     await this.runContinuation();
@@ -469,8 +485,11 @@ export class Agent {
     let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
     return {
       model: this.mutableState.model,
-      reasoning:
-        this.mutableState.thinkingLevel === "off" ? undefined : this.mutableState.thinkingLevel,
+      thinkingLevel: this.mutableState.thinkingLevel,
+      reasoning: resolveAgentReasoningOption(
+        this.mutableState.model,
+        this.mutableState.thinkingLevel,
+      ),
       sessionId: this.sessionId,
       onPayload: this.onPayload,
       onResponse: this.onResponse,
@@ -479,10 +498,17 @@ export class Agent {
       maxRetryDelayMs: this.maxRetryDelayMs,
       toolExecution: this.toolExecution,
       beforeToolCall: this.beforeToolCall,
+      resolveDeferredTool: this.resolveDeferredTool,
       afterToolCall: this.afterToolCall,
-      prepareNextTurn: this.prepareNextTurn
-        ? async () => await this.prepareNextTurn?.(this.signal)
-        : undefined,
+      prepareNextTurn:
+        this.prepareNextTurnWithContext || this.prepareNextTurn
+          ? async (context) => {
+              if (this.prepareNextTurnWithContext) {
+                return await this.prepareNextTurnWithContext(context, this.signal);
+              }
+              return await this.prepareNextTurn?.(this.signal);
+            }
+          : undefined,
       convertToLlm: this.convertToLlm,
       transformContext: this.transformContext,
       getApiKey: this.getApiKey,
@@ -523,21 +549,15 @@ export class Agent {
   }
 
   private async handleRunFailure(error: unknown, aborted: boolean): Promise<void> {
-    const failureMessage = {
-      role: "assistant",
-      content: [{ type: "text", text: "" }],
-      api: this.mutableState.model.api,
-      provider: this.mutableState.model.provider,
-      model: this.mutableState.model.id,
-      usage: EMPTY_USAGE,
-      stopReason: aborted ? "aborted" : "error",
-      errorMessage: error instanceof Error ? error.message : String(error),
-      timestamp: Date.now(),
-    } satisfies AgentMessage;
+    const failureMessage = createFailureMessage(this.mutableState.model, error, aborted);
     await this.processEvents({ type: "message_start", message: failureMessage });
     await this.processEvents({ type: "message_end", message: failureMessage });
     await this.processEvents({ type: "turn_end", message: failureMessage, toolResults: [] });
-    await this.processEvents({ type: "agent_end", messages: [failureMessage] });
+    const messages: AgentMessage[] = [failureMessage];
+    if (aborted && !isTurnHandoffAbort(this.signal)) {
+      await appendInterruptedTurnMessage(messages, (event) => this.processEvents(event));
+    }
+    await this.processEvents({ type: "agent_end", messages });
   }
 
   private finishRun(): void {

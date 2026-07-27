@@ -1,3 +1,7 @@
+/**
+ * Regression coverage for provider auth alias resolution.
+ * Verifies plugin metadata aliases, origin priority, trust, and cache behavior.
+ */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const pluginRegistryMocks = vi.hoisted(() => {
@@ -45,14 +49,13 @@ import {
   clearCurrentPluginMetadataSnapshot,
   setCurrentPluginMetadataSnapshot,
 } from "../plugins/current-plugin-metadata-snapshot.js";
-import type { InstalledPluginIndexRecord } from "../plugins/installed-plugin-index.js";
 import { resolveInstalledPluginIndexPolicyHash } from "../plugins/installed-plugin-index-policy.js";
+import type { InstalledPluginIndexRecord } from "../plugins/installed-plugin-index.js";
 import type { PluginManifestRecord } from "../plugins/manifest-registry.js";
+import { clearPluginMetadataLifecycleCaches } from "../plugins/plugin-metadata-lifecycle.js";
 import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.types.js";
-import {
-  resetProviderAuthAliasMapCacheForTest,
-  resolveProviderIdForAuth,
-} from "./provider-auth-aliases.js";
+import { resolveProviderIdForAuth } from "./provider-auth-aliases.js";
+import { resetProviderAuthAliasMapCacheForTest } from "./provider-auth-aliases.test-support.js";
 
 function createPluginManifestRecord(
   plugin: Partial<PluginManifestRecord> & Pick<PluginManifestRecord, "id" | "origin">,
@@ -207,6 +210,36 @@ describe("provider auth aliases", () => {
     );
 
     expect(resolveProviderIdForAuth("fixture", { config, env })).toBe("provider-two");
+  });
+
+  it("refreshes cached aliases when plugin metadata changes without changing config or env", () => {
+    const config = {};
+    const env = { HOME: "/home/test" } as NodeJS.ProcessEnv;
+
+    const setProviderAuthAlias = (target: string) => {
+      setCurrentPluginMetadataSnapshot(
+        createPluginMetadataSnapshot({
+          config,
+          plugins: [
+            createPluginManifestRecord({
+              id: "alias-owner",
+              origin: "global",
+              providerAuthAliases: { fixture: target },
+            }),
+          ],
+        }),
+        { config, env },
+      );
+    };
+
+    setProviderAuthAlias("provider-one");
+    expect(resolveProviderIdForAuth("fixture", { config, env })).toBe("provider-one");
+
+    clearPluginMetadataLifecycleCaches();
+    setProviderAuthAlias("provider-two");
+
+    expect(resolveProviderIdForAuth("fixture", { config, env })).toBe("provider-two");
+    expect(pluginRegistryMocks.loadPluginMetadataSnapshot).not.toHaveBeenCalled();
   });
 
   it("uses caller-provided metadata snapshots without loading plugin metadata", () => {

@@ -1,3 +1,4 @@
+// Xai tests cover realtime transcription provider plugin behavior.
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -248,6 +249,14 @@ describe("xai realtime transcription provider", () => {
       provider: "xai",
       cfg: {},
     });
+  });
+
+  it("does not treat a blank environment api key as configured", () => {
+    vi.stubEnv("XAI_API_KEY", "   ");
+    isProviderAuthProfileConfiguredMock.mockReturnValue(false);
+    const provider = buildXaiRealtimeTranscriptionProvider();
+
+    expect(provider.isConfigured({ cfg: {}, providerConfig: {} })).toBe(false);
   });
 
   it("threads cfg into the lazy WebSocket bearer resolver", async () => {

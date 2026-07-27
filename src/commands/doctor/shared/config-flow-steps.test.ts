@@ -1,3 +1,4 @@
+// Config-flow step tests cover doctor repair step ordering and mutation planning.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../../config/config.js";
 import type { DoctorConfigPreflightResult } from "../../doctor-config-preflight.js";
@@ -71,6 +72,40 @@ describe("doctor config flow steps", () => {
       'Run "openclaw doctor --fix" to migrate legacy config keys.',
     ]);
     expect(result.state.pendingChanges).toBe(true);
+  });
+
+  it("migrates the resolved config so single-file include values are repairable", () => {
+    const sourceConfig = {
+      mcp: { servers: { local: { command: "node", disabled: true } } },
+    } as unknown as OpenClawConfig;
+    migrateLegacyConfigMock.mockReturnValueOnce({
+      config: {
+        commands: { native: "auto" },
+        mcp: { servers: { local: { command: "node", enabled: false } } },
+      },
+      sourceConfig: { mcp: { servers: { local: { command: "node", enabled: false } } } },
+      changes: ["Moved mcp.servers.local.disabled true → enabled false."],
+    });
+
+    const result = createLegacyStepResult({
+      exists: true,
+      parsed: { mcp: { $include: "./mcp.json5" } },
+      legacyIssues: [{ path: "mcp.servers", message: "disabled is legacy" }],
+      path: "/tmp/config.json",
+      valid: false,
+      issues: [],
+      raw: "{}",
+      resolved: sourceConfig,
+      sourceConfig,
+      config: sourceConfig,
+      runtimeConfig: sourceConfig,
+      warnings: [],
+    } satisfies DoctorConfigPreflightResult["snapshot"]);
+
+    expect(migrateLegacyConfigMock).toHaveBeenCalledWith(sourceConfig);
+    expect(result.state.pendingChanges).toBe(true);
+    expect(result.state.candidate.mcp?.servers?.local?.enabled).toBe(false);
+    expect(result.state.candidate.commands).toBeUndefined();
   });
 
   it("keeps pending repair state for legacy issues even when the snapshot is already normalized", () => {

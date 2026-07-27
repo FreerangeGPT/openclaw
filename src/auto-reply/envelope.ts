@@ -1,3 +1,4 @@
+/** Formats inbound message envelopes with sender, timing, and channel metadata for agent prompts. */
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
@@ -13,7 +14,7 @@ import {
 } from "../infra/format-time/format-datetime.ts";
 import { formatTimeAgo } from "../infra/format-time/format-relative.ts";
 
-type AgentEnvelopeParams = {
+export type AgentEnvelopeParams = {
   channel: string;
   from?: string;
   timestamp?: number | Date;
@@ -24,6 +25,7 @@ type AgentEnvelopeParams = {
   envelope?: EnvelopeFormatOptions;
 };
 
+/** User/config-facing controls for timestamp rendering in prompt envelopes. */
 export type EnvelopeFormatOptions = {
   /**
    * "local" (default), "utc", "user", or an explicit IANA timezone string.
@@ -66,12 +68,13 @@ function sanitizeEnvelopeHeaderPart(value: string): string {
     .trim();
 }
 
+/** Resolves envelope formatting defaults from agent config. */
 export function resolveEnvelopeFormatOptions(cfg?: OpenClawConfig): EnvelopeFormatOptions {
   const defaults = cfg?.agents?.defaults;
   return {
-    timezone: defaults?.envelopeTimezone,
-    includeTimestamp: defaults?.envelopeTimestamp !== "off",
-    includeElapsed: defaults?.envelopeElapsed !== "off",
+    timezone: defaults?.userTimezone,
+    includeTimestamp: true,
+    includeElapsed: true,
     userTimezone: defaults?.userTimezone,
   };
 }
@@ -106,11 +109,12 @@ function resolveEnvelopeTimezone(options: NormalizedEnvelopeOptions): ResolvedEn
   return explicit ? { mode: "iana", timeZone: explicit } : { mode: "utc" };
 }
 
+/** Formats an envelope timestamp using local, UTC, user, or explicit IANA timezone rules. */
 export function formatEnvelopeTimestamp(
   ts: number | Date | undefined,
   options?: EnvelopeFormatOptions,
 ): string | undefined {
-  if (!ts) {
+  if (ts === undefined) {
     return undefined;
   }
   const resolved = normalizeEnvelopeOptions(options);
@@ -163,6 +167,7 @@ function resolveDirectEnvelopeBodyLabel(from: string | undefined): string {
   return label.includes(":") ? "(sender)" : label;
 }
 
+/** Formats the generic bracketed envelope prepended to agent-visible messages. */
 export function formatAgentEnvelope(params: AgentEnvelopeParams): string {
   const channel = sanitizeEnvelopeHeaderPart(normalizeOptionalString(params.channel) || "Channel");
   const parts: string[] = [channel];
@@ -204,6 +209,7 @@ export function formatAgentEnvelope(params: AgentEnvelopeParams): string {
   return `${header} ${params.body}`;
 }
 
+/** Formats an inbound message body with sender attribution appropriate for direct/group chats. */
 export function formatInboundEnvelope(params: {
   channel: string;
   from: string;
@@ -240,6 +246,7 @@ export function formatInboundEnvelope(params: {
   });
 }
 
+/** Builds the compact `from` label used in inbound envelope headers. */
 export function formatInboundFromLabel(params: {
   isGroup: boolean;
   groupLabel?: string;

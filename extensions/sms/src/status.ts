@@ -1,3 +1,4 @@
+// Sms plugin module implements status behavior.
 import {
   listTwilioIncomingPhoneNumbers,
   listTwilioMessages,
@@ -15,7 +16,7 @@ type ChannelCapabilitiesDisplayLine = {
   tone?: "default" | "muted" | "success" | "warn" | "error";
 };
 
-export type SmsTwilioWebhookProbe =
+type SmsTwilioWebhookProbe =
   | {
       status: "skipped";
       reason: string;

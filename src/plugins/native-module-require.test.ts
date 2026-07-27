@@ -1,3 +1,4 @@
+/** Tests native module require behavior for plugin runtime loading. */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -76,7 +77,7 @@ describe("tryNativeRequireJavaScriptModule", () => {
   it("declines missing dependency errors when source-transform fallback is available", () => {
     const dir = makeTempDir();
     const modulePath = path.join(dir, "plugin.cjs");
-    fs.writeFileSync(modulePath, 'require("openclaw/plugin-sdk");\n', "utf8");
+    fs.writeFileSync(modulePath, 'require("openclaw/plugin-sdk/core");\n', "utf8");
 
     expect(
       tryNativeRequireJavaScriptModule(modulePath, {

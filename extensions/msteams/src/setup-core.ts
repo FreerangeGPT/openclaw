@@ -1,3 +1,5 @@
+import { defineChannelSetupContract } from "openclaw/plugin-sdk/channel-setup";
+// Msteams plugin module implements setup core behavior.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
   createStandardChannelSetupStatus,
@@ -26,6 +28,11 @@ export const msteamsSetupAdapter: ChannelSetupAdapter = {
     },
   }),
 };
+
+export const msteamsSetupContract = defineChannelSetupContract({
+  fields: {},
+  legacyAdapter: msteamsSetupAdapter,
+});
 
 const channel = "msteams" as const;
 

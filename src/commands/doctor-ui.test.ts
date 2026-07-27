@@ -1,3 +1,4 @@
+// Doctor UI tests cover control UI asset checks, repair hints, and filesystem diagnostics.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -6,10 +7,10 @@ import {
   detectUiProtocolFreshnessIssues,
   uiProtocolFreshnessIssueToHealthFinding,
   uiProtocolFreshnessIssueToRepairEffects,
-  type UiProtocolFreshnessIssue,
 } from "./doctor-ui.js";
 
 const tempRoots: string[] = [];
+type UiProtocolFreshnessIssue = Awaited<ReturnType<typeof detectUiProtocolFreshnessIssues>>[number];
 
 function issue(overrides: Partial<UiProtocolFreshnessIssue> = {}): UiProtocolFreshnessIssue {
   return {

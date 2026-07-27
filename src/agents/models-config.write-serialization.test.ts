@@ -1,3 +1,4 @@
+// Verifies models.json writes, plugin catalog writes, and ready-cache serialization.
 import fs from "node:fs/promises";
 import path from "node:path";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -12,9 +13,14 @@ import {
 import { readGeneratedModelsJson } from "./models-config.test-utils.js";
 import {
   encodePluginModelCatalogRelativePath,
-  PLUGIN_MODEL_CATALOG_FILE,
+  loadPersistedPluginModelCatalogs,
   PLUGIN_MODEL_CATALOG_GENERATED_BY,
+  replacePersistedPluginModelCatalogs,
 } from "./plugin-model-catalog.js";
+
+function listPersistedPluginModelCatalogs(agentDir: string) {
+  return loadPersistedPluginModelCatalogs(agentDir).catalogs;
+}
 
 const planOpenClawModelsJsonMock = vi.fn();
 const writePrivateStoreTextWriteMock = vi.fn();
@@ -29,6 +35,7 @@ let clearCurrentPluginMetadataSnapshot: typeof import("../plugins/current-plugin
 let setCurrentPluginMetadataSnapshot: typeof import("../plugins/current-plugin-metadata-snapshot.js").setCurrentPluginMetadataSnapshot;
 
 function createPluginMetadataSnapshot(workspaceDir: string): PluginMetadataSnapshot {
+  // Minimal process snapshot used to prove when metadata may be reused.
   const policyHash = resolveInstalledPluginIndexPolicyHash({});
   return {
     policyHash,
@@ -72,6 +79,7 @@ function createPluginMetadataSnapshot(workspaceDir: string): PluginMetadataSnaps
 }
 
 async function expectMissingPath(operation: Promise<unknown>) {
+  // Filesystem deletion assertions should fail on the errno, not path text.
   let error: NodeJS.ErrnoException | undefined;
   try {
     await operation;
@@ -87,6 +95,7 @@ function planParamsAt(callIndex: number): {
   providerDiscoveryTimeoutMs?: number;
   workspaceDir?: string;
 } {
+  // Planner call shape is the contract between ensureOpenClawModelsJson and planning.
   const call = planOpenClawModelsJsonMock.mock.calls[callIndex];
   if (!call) {
     throw new Error(`expected models planner call #${callIndex + 1}`);
@@ -216,7 +225,114 @@ describe("models-config write serialization", () => {
     });
   });
 
-  it("writes plugin-owned model catalogs beside the agent plugin state", async () => {
+  it("migrates released provider credentials before model planning can regenerate a catalog", async () => {
+    await withModelsTempHome(async (home) => {
+      const agentDir = path.join(home, "agent");
+      const relativePath = encodePluginModelCatalogRelativePath("zai");
+      const sourcePath = path.join(agentDir, relativePath);
+      const contents = `${JSON.stringify({
+        generatedBy: PLUGIN_MODEL_CATALOG_GENERATED_BY,
+        providers: {
+          zai: {
+            baseUrl: "https://api.z.ai/api/paas/v4",
+            api: "openai-completions",
+            apiKey: "released-zai-provider-test-key",
+            models: [{ id: "glm-5.1", name: "GLM 5.1" }],
+          },
+        },
+      })}\n`;
+      await fs.mkdir(path.dirname(sourcePath), { recursive: true });
+      await fs.writeFile(sourcePath, contents, "utf8");
+      planOpenClawModelsJsonMock.mockImplementation(async () => {
+        expect(listPersistedPluginModelCatalogs(agentDir)).toEqual([{ pluginId: "zai", contents }]);
+        return { action: "skip" };
+      });
+
+      await ensureOpenClawModelsJson({}, agentDir);
+
+      expect(planOpenClawModelsJsonMock).toHaveBeenCalledOnce();
+      await expectMissingPath(fs.access(sourcePath));
+      expect(listPersistedPluginModelCatalogs(agentDir)).toEqual([{ pluginId: "zai", contents }]);
+    });
+  });
+
+  it("refuses to regenerate provider catalogs while released credentials cannot be read", async () => {
+    if (process.getuid?.() === 0) {
+      return;
+    }
+    await withModelsTempHome(async (home) => {
+      const agentDir = path.join(home, "agent");
+      const sourcePath = path.join(agentDir, encodePluginModelCatalogRelativePath("zai"));
+      await fs.mkdir(path.dirname(sourcePath), { recursive: true });
+      await fs.writeFile(
+        sourcePath,
+        JSON.stringify({
+          generatedBy: PLUGIN_MODEL_CATALOG_GENERATED_BY,
+          providers: { zai: { apiKey: "unreadable-released-provider-test-key" } },
+        }),
+        "utf8",
+      );
+      await fs.chmod(sourcePath, 0o000);
+
+      try {
+        await expect(ensureOpenClawModelsJson({}, agentDir)).rejects.toThrow(
+          "Cannot safely prepare provider models until legacy catalog migration succeeds",
+        );
+        expect(planOpenClawModelsJsonMock).not.toHaveBeenCalled();
+      } finally {
+        await fs.chmod(sourcePath, 0o600);
+      }
+
+      await expect(fs.access(sourcePath)).resolves.toBeUndefined();
+    });
+  });
+
+  it("never promotes an unmarked cached plugin catalog into model planning", async () => {
+    await withModelsTempHome(async (home) => {
+      const agentDir = path.join(home, "agent");
+      await fs.mkdir(agentDir, { recursive: true });
+      await fs.writeFile(path.join(agentDir, "models.json"), JSON.stringify({ providers: {} }));
+      replacePersistedPluginModelCatalogs({
+        agentDir,
+        pluginCatalogWrites: {
+          [encodePluginModelCatalogRelativePath("zai")]: JSON.stringify({
+            providers: {
+              zai: {
+                baseUrl: "https://unmarked.example/v1",
+                api: "openai-completions",
+                apiKey: "unmarked-provider-test-key",
+                models: [{ id: "unmarked-model" }],
+              },
+            },
+          }),
+        },
+      });
+      const pluginMetadataSnapshot = {
+        index: { plugins: [{ pluginId: "zai", enabled: true }] },
+        normalizePluginId: (pluginId: string) => pluginId,
+        manifestRegistry: { plugins: [], diagnostics: [] },
+        owners: {
+          providers: new Map([["zai", ["zai"]]]),
+          modelCatalogProviders: new Map([["zai", ["zai"]]]),
+          setupProviders: new Map(),
+        },
+      } as unknown as Pick<PluginMetadataSnapshot, "index" | "manifestRegistry" | "owners">;
+      planOpenClawModelsJsonMock.mockImplementation(
+        async (params: { existingParsed?: unknown }) => {
+          expect(params.existingParsed).toEqual({ providers: {} });
+          return { action: "skip" };
+        },
+      );
+
+      await ensureOpenClawModelsJson({ models: { providers: {} } }, agentDir, {
+        pluginMetadataSnapshot,
+      });
+
+      expect(planOpenClawModelsJsonMock).toHaveBeenCalledOnce();
+    });
+  });
+
+  it("writes plugin-owned model catalogs into the agent SQLite cache", async () => {
     await withModelsTempHome(async (home) => {
       const agentDir = path.join(home, "agent");
       planOpenClawModelsJsonMock.mockImplementation(async () => ({
@@ -246,33 +362,33 @@ describe("models-config write serialization", () => {
       const root = JSON.parse(await fs.readFile(path.join(agentDir, "models.json"), "utf8")) as {
         providers?: Record<string, unknown>;
       };
-      const catalog = JSON.parse(
-        await fs.readFile(path.join(agentDir, "plugins", "zai", PLUGIN_MODEL_CATALOG_FILE), "utf8"),
-      ) as { providers?: Record<string, unknown> };
+      const stored = listPersistedPluginModelCatalogs(agentDir);
+      expect(stored).toHaveLength(1);
+      expect(stored[0]?.pluginId).toBe("zai");
+      const catalog = JSON.parse(stored[0]?.contents ?? "{}") as {
+        providers?: Record<string, unknown>;
+      };
       expect(root.providers).toEqual({});
       expect(root).not.toHaveProperty("pluginCatalogs");
       expect(Object.keys(catalog.providers ?? {})).toEqual(["zai"]);
+      await expect(fs.access(path.join(agentDir, "plugins"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
     });
   });
 
-  it("removes stale plugin-owned model catalogs", async () => {
+  it("removes stale plugin-owned model catalogs from the agent SQLite cache", async () => {
     await withModelsTempHome(async (home) => {
       const agentDir = path.join(home, "agent");
-      const staleCatalog = path.join(
+      replacePersistedPluginModelCatalogs({
         agentDir,
-        "plugins",
-        "old-provider",
-        PLUGIN_MODEL_CATALOG_FILE,
-      );
-      await fs.mkdir(path.dirname(staleCatalog), { recursive: true });
-      await fs.writeFile(
-        staleCatalog,
-        `${JSON.stringify(
-          { generatedBy: PLUGIN_MODEL_CATALOG_GENERATED_BY, providers: {} },
-          null,
-          2,
-        )}\n`,
-      );
+        pluginCatalogWrites: {
+          [encodePluginModelCatalogRelativePath("old-provider")]: `${JSON.stringify({
+            generatedBy: PLUGIN_MODEL_CATALOG_GENERATED_BY,
+            providers: {},
+          })}\n`,
+        },
+      });
       planOpenClawModelsJsonMock.mockImplementation(async () => ({
         action: "noop",
         pluginCatalogWrites: {},
@@ -286,29 +402,30 @@ describe("models-config write serialization", () => {
       const result = await ensureOpenClawModelsJson({}, agentDir);
 
       expect(result.wrote).toBe(true);
-      await expect(fs.access(staleCatalog)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(listPersistedPluginModelCatalogs(agentDir)).toEqual([]);
     });
   });
 
-  it("keeps generated plugin catalogs on non-authoritative skip plans", async () => {
+  it("keeps generated SQLite plugin catalogs on non-authoritative skip plans", async () => {
     await withModelsTempHome(async (home) => {
       const agentDir = path.join(home, "agent");
-      const catalogPath = path.join(agentDir, "plugins", "zai", PLUGIN_MODEL_CATALOG_FILE);
-      await fs.mkdir(path.dirname(catalogPath), { recursive: true });
-      await fs.writeFile(
-        catalogPath,
-        `${JSON.stringify(
-          { generatedBy: PLUGIN_MODEL_CATALOG_GENERATED_BY, providers: {} },
-          null,
-          2,
-        )}\n`,
-      );
+      replacePersistedPluginModelCatalogs({
+        agentDir,
+        pluginCatalogWrites: {
+          [encodePluginModelCatalogRelativePath("zai")]: `${JSON.stringify({
+            generatedBy: PLUGIN_MODEL_CATALOG_GENERATED_BY,
+            providers: {},
+          })}\n`,
+        },
+      });
       planOpenClawModelsJsonMock.mockImplementation(async () => ({ action: "skip" }));
 
       const result = await ensureOpenClawModelsJson({}, agentDir);
 
       expect(result.wrote).toBe(false);
-      await expect(fs.access(catalogPath)).resolves.toBeUndefined();
+      expect(listPersistedPluginModelCatalogs(agentDir)).toEqual([
+        expect.objectContaining({ pluginId: "zai" }),
+      ]);
     });
   });
 
@@ -397,6 +514,7 @@ describe("models-config write serialization", () => {
       let modelsWriteCount = 0;
       writePrivateStoreTextWriteMock.mockImplementation(
         async (params: { filePath: string; rootDir: string; content: string | Uint8Array }) => {
+          // Hold both writes at the store boundary to prove the outer serializer works.
           const isModelsWrite = path.basename(params.filePath) === "models.json";
           if (isModelsWrite) {
             modelsWriteCount += 1;

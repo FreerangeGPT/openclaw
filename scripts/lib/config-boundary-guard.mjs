@@ -1,3 +1,4 @@
+// Scans source files for deprecated config API and runtime config-loading boundary violations.
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +8,7 @@ const sourceCache = new Map();
 
 const COMPAT_CONFIG_API_FILES = new Set([
   "src/config/config.ts",
+  "src/config/io.runtime.ts",
   "src/config/io.ts",
   "src/config/mutate.ts",
   "src/memory-host-sdk/runtime-core.ts",
@@ -229,6 +231,7 @@ function pushBroadConfigRuntimeSpecifierViolations(violations, files) {
   }
 }
 
+/** Collect config-boundary violations for deprecated internal config APIs. */
 export function collectDeprecatedInternalConfigApiViolations({
   repoRoot = DEFAULT_REPO_ROOT,
 } = {}) {
@@ -497,6 +500,7 @@ function isRuntimeActionLoadConfigCandidate(relPath) {
   return RUNTIME_HELPER_BASENAME_PATTERNS.some((pattern) => pattern.test(basename));
 }
 
+/** Collect extension runtime-action files that still load config through forbidden helpers. */
 export function collectRuntimeActionLoadConfigViolations({ repoRoot = DEFAULT_REPO_ROOT } = {}) {
   return collectTypeScriptFiles(resolve(repoRoot, "extensions"))
     .map((filePath) => ({ filePath, relPath: repoRelative(repoRoot, filePath) }))

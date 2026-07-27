@@ -1,12 +1,22 @@
+/**
+ * Anthropic stream wrappers. They add beta headers, service tier/fast-mode
+ * payload fields, and thinking-prefill cleanup around provider stream functions.
+ */
 import type { StreamFn } from "openclaw/plugin-sdk/agent-core";
 import { streamSimple } from "openclaw/plugin-sdk/llm";
 import type { ProviderWrapStreamFnContext } from "openclaw/plugin-sdk/plugin-entry";
+import {
+  resolveProviderEndpoint,
+  resolveClaudeOpus5ModelIdentity,
+  resolveClaudeSonnet5ModelIdentity,
+  supportsClaude1MContext,
+  supportsClaudeFastMode,
+} from "openclaw/plugin-sdk/provider-model-shared";
 import {
   applyAnthropicPayloadPolicyToParams,
   composeProviderStreamWrappers,
   createAnthropicThinkingPrefillPayloadWrapper,
   resolveAnthropicPayloadPolicy,
-  stripTrailingAnthropicAssistantPrefillWhenThinking,
   streamWithPayloadPatch,
 } from "openclaw/plugin-sdk/provider-stream-shared";
 import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
@@ -19,16 +29,8 @@ import {
 const log = createSubsystemLogger("anthropic-stream");
 
 const ANTHROPIC_CONTEXT_1M_BETA_LEGACY = "context-1m-2025-08-07";
-const ANTHROPIC_GA_1M_MODEL_PREFIXES = [
-  "claude-opus-4-8",
-  "claude-opus-4.8",
-  "claude-opus-4-6",
-  "claude-opus-4.6",
-  "claude-opus-4-7",
-  "claude-opus-4.7",
-  "claude-sonnet-4-6",
-  "claude-sonnet-4.6",
-] as const;
+const ANTHROPIC_FAST_MODE_BETA = "fast-mode-2026-02-01";
+const ANTHROPIC_FAST_MODE_COST_MULTIPLIER = 2;
 const OPENCLAW_DEFAULT_ANTHROPIC_BETAS = [
   "fine-grained-tool-streaming-2025-05-14",
   "interleaved-thinking-2025-05-14",
@@ -40,10 +42,10 @@ const OPENCLAW_OAUTH_ANTHROPIC_BETAS = [
 ] as const;
 
 type AnthropicServiceTier = "auto" | "standard_only";
+type DynamicFastMode = boolean | (() => boolean | undefined);
 
 function isAnthropic1MModel(modelId: string): boolean {
-  const normalized = normalizeLowercaseStringOrEmpty(modelId);
-  return ANTHROPIC_GA_1M_MODEL_PREFIXES.some((prefix) => normalized.startsWith(prefix));
+  return supportsClaude1MContext({ id: modelId });
 }
 
 function parseHeaderList(value: unknown): string[] {
@@ -71,12 +73,40 @@ function mergeAnthropicBetaHeader(
   return merged;
 }
 
-function isAnthropicOAuthApiKey(apiKey: unknown): boolean {
+/**
+ * Claude subscription credentials are OAuth access tokens rather than API keys.
+ * Anthropic authenticates them through `Authorization: Bearer`, so every caller
+ * that builds request auth must branch on this instead of assuming `x-api-key`.
+ */
+export function isAnthropicOAuthApiKey(apiKey: unknown): boolean {
   return typeof apiKey === "string" && apiKey.includes("sk-ant-oat");
 }
 
 function resolveAnthropicFastServiceTier(enabled: boolean): AnthropicServiceTier {
   return enabled ? "auto" : "standard_only";
+}
+
+function isDirectAnthropicApiModel(model: Parameters<StreamFn>[0]): boolean {
+  if (
+    normalizeLowercaseStringOrEmpty(model.provider) !== "anthropic" ||
+    normalizeLowercaseStringOrEmpty(model.api) !== "anthropic-messages"
+  ) {
+    return false;
+  }
+  const endpointClass = resolveProviderEndpoint(model.baseUrl).endpointClass;
+  return endpointClass === "default" || endpointClass === "anthropic-public";
+}
+
+function applyAnthropicFastModePricing(model: Parameters<StreamFn>[0]): Parameters<StreamFn>[0] {
+  return {
+    ...model,
+    cost: {
+      input: model.cost.input * ANTHROPIC_FAST_MODE_COST_MULTIPLIER,
+      output: model.cost.output * ANTHROPIC_FAST_MODE_COST_MULTIPLIER,
+      cacheRead: model.cost.cacheRead * ANTHROPIC_FAST_MODE_COST_MULTIPLIER,
+      cacheWrite: model.cost.cacheWrite * ANTHROPIC_FAST_MODE_COST_MULTIPLIER,
+    },
+  };
 }
 
 function normalizeAnthropicServiceTier(value: unknown): AnthropicServiceTier | undefined {
@@ -101,6 +131,7 @@ function hasConfiguredAnthropicBeta(extraParams: Record<string, unknown> | undef
   return configured.some((beta) => typeof beta === "string" && beta.trim().length > 0);
 }
 
+/** Resolve configured Anthropic beta headers from extra model params. */
 export function resolveAnthropicBetas(
   extraParams: Record<string, unknown> | undefined,
   _modelId: string,
@@ -128,6 +159,7 @@ export function resolveAnthropicBetas(
   return betas.size > 0 ? [...betas] : undefined;
 }
 
+/** Wrap a stream function to merge OpenClaw and configured Anthropic beta headers. */
 export function createAnthropicBetaHeadersWrapper(
   baseStreamFn: StreamFn | undefined,
   betas: string[],
@@ -148,20 +180,60 @@ export function createAnthropicBetaHeadersWrapper(
   };
 }
 
+/** Wrap a stream function with native fast mode or the legacy Priority Tier mapping. */
 export function createAnthropicFastModeWrapper(
   baseStreamFn: StreamFn | undefined,
-  enabled: boolean,
+  enabled: DynamicFastMode,
 ): StreamFn {
-  return createAnthropicServiceTierWrapper(baseStreamFn, resolveAnthropicFastServiceTier(enabled));
+  const underlying = baseStreamFn ?? streamSimple;
+  return (model, context, options) => {
+    const resolved = typeof enabled === "function" ? enabled() : enabled;
+    if (resolved === undefined) {
+      return underlying(model, context, options);
+    }
+    if (supportsClaudeFastMode(model)) {
+      if (
+        !resolved ||
+        isAnthropicOAuthApiKey(options?.apiKey) ||
+        !isDirectAnthropicApiModel(model)
+      ) {
+        return underlying(model, context, options);
+      }
+      return streamWithPayloadPatch(
+        underlying,
+        applyAnthropicFastModePricing(model),
+        context,
+        {
+          ...options,
+          headers: mergeAnthropicBetaHeader(options?.headers, [ANTHROPIC_FAST_MODE_BETA]),
+        },
+        (payloadObj) => {
+          delete payloadObj.service_tier;
+          payloadObj.speed = "fast";
+        },
+      );
+    }
+    return createAnthropicServiceTierWrapper(underlying, resolveAnthropicFastServiceTier(resolved))(
+      model,
+      context,
+      options,
+    );
+  };
 }
 
+/** Wrap a stream function with an explicit Anthropic service tier when allowed. */
 export function createAnthropicServiceTierWrapper(
   baseStreamFn: StreamFn | undefined,
   serviceTier: AnthropicServiceTier,
 ): StreamFn {
   const underlying = baseStreamFn ?? streamSimple;
   return (model, context, options) => {
-    if (isAnthropicOAuthApiKey(options?.apiKey)) {
+    // Opus 5 and Sonnet 5 do not support Priority Tier; omit service_tier entirely.
+    if (
+      isAnthropicOAuthApiKey(options?.apiKey) ||
+      resolveClaudeOpus5ModelIdentity(model) !== undefined ||
+      resolveClaudeSonnet5ModelIdentity(model) !== undefined
+    ) {
       return underlying(model, context, options);
     }
 
@@ -176,14 +248,13 @@ export function createAnthropicServiceTierWrapper(
     }
 
     return streamWithPayloadPatch(underlying, model, context, options, (payloadObj) =>
-      applyAnthropicPayloadPolicyToParams(payloadObj, payloadPolicy),
+      applyAnthropicPayloadPolicyToParams(payloadObj, payloadPolicy, new Set()),
     );
   };
 }
 
-export function createAnthropicThinkingPrefillWrapper(
-  baseStreamFn: StreamFn | undefined,
-): StreamFn {
+/** Wrap a stream function to strip trailing assistant prefill before thinking requests. */
+function createAnthropicThinkingPrefillWrapper(baseStreamFn: StreamFn | undefined): StreamFn {
   return createAnthropicThinkingPrefillPayloadWrapper(baseStreamFn, (stripped) => {
     log.warn(
       `removed ${stripped} trailing assistant prefill message${stripped === 1 ? "" : "s"} because Anthropic extended thinking requires conversations to end with a user turn`,
@@ -191,14 +262,19 @@ export function createAnthropicThinkingPrefillWrapper(
   });
 }
 
+/** Resolve Anthropic fast-mode setting from model extra params. */
 export function resolveAnthropicFastMode(
   extraParams: Record<string, unknown> | undefined,
 ): boolean | undefined {
-  return normalizeFastMode(
-    (extraParams?.fastMode ?? extraParams?.fast_mode) as string | boolean | null | undefined,
-  );
+  const raw = extraParams?.fastMode ?? extraParams?.fast_mode;
+  const fastMode =
+    typeof raw === "function"
+      ? normalizeFastMode((raw as () => unknown)() as string | boolean | null | undefined)
+      : normalizeFastMode(raw as string | boolean | null | undefined);
+  return fastMode === "auto" ? undefined : fastMode;
 }
 
+/** Resolve Anthropic service tier from model extra params. */
 export function resolveAnthropicServiceTier(
   extraParams: Record<string, unknown> | undefined,
 ): AnthropicServiceTier | undefined {
@@ -211,6 +287,7 @@ export function resolveAnthropicServiceTier(
   return normalized;
 }
 
+/** Compose all Anthropic stream wrappers for one provider/model context. */
 export function wrapAnthropicProviderStream(
   ctx: ProviderWrapStreamFnContext,
 ): StreamFn | undefined {
@@ -220,7 +297,9 @@ export function wrapAnthropicProviderStream(
     hasConfiguredAnthropicBeta(ctx.extraParams) ||
     (ctx.extraParams?.context1m === true && isAnthropic1MModel(ctx.modelId));
   const serviceTier = resolveAnthropicServiceTier(ctx.extraParams);
-  const fastMode = resolveAnthropicFastMode(ctx.extraParams);
+  const hasFastModeParam =
+    ctx.extraParams !== undefined &&
+    (Object.hasOwn(ctx.extraParams, "fastMode") || Object.hasOwn(ctx.extraParams, "fast_mode"));
   return composeProviderStreamWrappers(
     ctx.streamFn,
     needsAnthropicBetaWrapper
@@ -229,15 +308,10 @@ export function wrapAnthropicProviderStream(
     serviceTier
       ? (streamFn) => createAnthropicServiceTierWrapper(streamFn, serviceTier)
       : undefined,
-    fastMode !== undefined
-      ? (streamFn) => createAnthropicFastModeWrapper(streamFn, fastMode)
+    hasFastModeParam && serviceTier === undefined
+      ? (streamFn) =>
+          createAnthropicFastModeWrapper(streamFn, () => resolveAnthropicFastMode(ctx.extraParams))
       : undefined,
     (streamFn) => createAnthropicThinkingPrefillWrapper(streamFn),
   );
 }
-
-export const testing = {
-  log,
-  stripTrailingAssistantPrefillWhenThinking: stripTrailingAnthropicAssistantPrefillWhenThinking,
-};
-export { testing as __testing };

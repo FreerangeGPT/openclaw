@@ -1,3 +1,9 @@
+/**
+ * Session listing command.
+ *
+ * It loads one or more agent session stores, enriches rows with model/runtime
+ * metadata, and emits JSON or fixed-width terminal tables.
+ */
 import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
@@ -9,7 +15,13 @@ import { DEFAULT_CONTEXT_TOKENS } from "../agents/defaults.js";
 import { resolveRuntimePolicySessionKey } from "../auto-reply/reply/runtime-policy-session-key.js";
 import { normalizeChatType } from "../channels/chat-type.js";
 import { getRuntimeConfig } from "../config/config.js";
-import { loadSessionStore, resolveSessionTotalTokens } from "../config/sessions.js";
+import { resolveSessionTotalTokens } from "../config/sessions.js";
+import { listSessionEntriesReadOnly } from "../config/sessions/session-accessor.js";
+import { resolveSqliteTargetFromSessionStorePath } from "../config/sessions/session-sqlite-target.js";
+import {
+  formatSqliteSessionFileMarker,
+  parseSqliteSessionFileMarker,
+} from "../config/sessions/sqlite-marker.js";
 import type { SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveStoredSessionKeyForAgentStore } from "../gateway/session-store-key.js";
@@ -21,6 +33,10 @@ import { classifySessionKind, type SessionKind } from "../sessions/classify-sess
 import { isAcpSessionKey } from "../sessions/session-key-utils.js";
 import { createLazyImportLoader } from "../shared/lazy-promise.js";
 import { resolveAgentRuntimeLabel } from "../status/agent-runtime-label.js";
+import {
+  deliveryContextFromSession,
+  sessionDeliveryOrigin,
+} from "../utils/delivery-context.shared.js";
 import { resolveSessionStoreTargetsOrExit } from "./session-store-targets.js";
 import {
   resolveSessionDisplayModelRef,
@@ -106,6 +122,8 @@ function selectNewestSessionRows(rows: SessionRow[], limit: number | undefined):
   if (limit > TOP_N_SELECTION_LIMIT) {
     return rows.toSorted(compareSessionRowsByUpdatedAt).slice(0, limit);
   }
+  // For small limits, keep only the top N rows without sorting the full store;
+  // large limits use the simpler full sort above.
   const selected: SessionRow[] = [];
   for (const row of rows) {
     const insertAt = selected.findIndex(
@@ -220,9 +238,24 @@ function formatRuntimeCell(runtimeLabel: string, rich: boolean): string {
   return rich ? theme.info(label) : label;
 }
 
+function resolveSessionStoreDisplayPath(target: { agentId: string; storePath: string }): string {
+  return resolveSqliteTargetFromSessionStorePath(target.storePath, {
+    agentId: target.agentId,
+  }).path;
+}
+
 function toJsonSessionRow(row: SessionRow): Omit<SessionRow, "runtimeLabel"> {
   const { runtimeLabel, ...jsonRow } = row;
   void runtimeLabel;
+  const marker = parseSqliteSessionFileMarker(jsonRow.sessionFile);
+  if (marker) {
+    jsonRow.sessionFile = formatSqliteSessionFileMarker({
+      ...marker,
+      storePath: resolveSqliteTargetFromSessionStorePath(marker.storePath, {
+        agentId: marker.agentId,
+      }).path,
+    });
+  }
   return jsonRow;
 }
 
@@ -241,6 +274,8 @@ function stripChannelRecipientPrefix(
   }
   const stripped = raw.slice(prefix.length);
   const topicMarkerIndex = stripped.toLowerCase().indexOf(":topic:");
+  // Topic suffixes are routing detail, not the peer id used by runtime-policy
+  // session-key display.
   return topicMarkerIndex >= 0 ? stripped.slice(0, topicMarkerIndex) : stripped;
 }
 
@@ -250,21 +285,17 @@ function resolveDisplayRuntimePolicySessionKey(params: {
   entry: SessionEntry;
 }): string | undefined {
   const { cfg, entry, key } = params;
-  const origin = entry.origin;
-  const deliveryContext = entry.deliveryContext;
+  const origin = sessionDeliveryOrigin(entry);
+  const deliveryContext = deliveryContextFromSession(entry);
   const chatType = normalizeChatType(origin?.chatType ?? entry.chatType);
   if (chatType !== "direct") {
     return undefined;
   }
 
   const channel = normalizeOptionalString(
-    origin?.provider ??
-      deliveryContext?.channel ??
-      entry.lastChannel ??
-      entry.channel ??
-      origin?.surface,
+    origin?.provider ?? deliveryContext?.channel ?? origin?.surface,
   );
-  const to = normalizeOptionalString(origin?.to ?? deliveryContext?.to ?? entry.lastTo);
+  const to = normalizeOptionalString(origin?.to ?? deliveryContext?.to);
   const from = normalizeOptionalString(origin?.from);
   const nativeDirectUserId = normalizeOptionalString(origin?.nativeDirectUserId);
   const peerId =
@@ -272,6 +303,8 @@ function resolveDisplayRuntimePolicySessionKey(params: {
     stripChannelRecipientPrefix(to, channel) ??
     stripChannelRecipientPrefix(from, channel);
 
+  // Direct-message runtime policy can route by native user id, stripped
+  // recipient, or sender; expose the derived key when it differs from the row.
   const runtimePolicySessionKey = resolveRuntimePolicySessionKey({
     cfg,
     sessionKey: key,
@@ -279,9 +312,7 @@ function resolveDisplayRuntimePolicySessionKey(params: {
       SessionKey: key,
       Provider: channel,
       Surface: normalizeOptionalString(origin?.surface),
-      AccountId: normalizeOptionalString(
-        origin?.accountId ?? deliveryContext?.accountId ?? entry.lastAccountId,
-      ),
+      AccountId: normalizeOptionalString(origin?.accountId ?? deliveryContext?.accountId),
       ChatType: chatType,
       NativeDirectUserId: nativeDirectUserId,
       SenderId: peerId,
@@ -296,6 +327,7 @@ function resolveDisplayRuntimePolicySessionKey(params: {
     : undefined;
 }
 
+/** Lists sessions across selected stores with optional JSON output. */
 export async function sessionsCommand(
   opts: {
     json?: boolean;
@@ -347,17 +379,16 @@ export async function sessionsCommand(
   }
 
   const allRows = targets.flatMap((target) => {
-    const store = loadSessionStore(target.storePath);
-    return Object.entries(store)
-      .filter(([, entry]) => {
+    return listSessionEntriesReadOnly({ agentId: target.agentId, storePath: target.storePath })
+      .filter(({ entry }) => {
         if (activeMinutes === undefined) {
           return true;
         }
         const updatedAt = entry?.updatedAt;
         return typeof updatedAt === "number" && Date.now() - updatedAt <= activeMinutes * 60_000;
       })
-      .map(([key, entry]) => {
-        const row = toSessionDisplayRow(key, entry);
+      .map(({ sessionKey, entry }) => {
+        const row = toSessionDisplayRow(sessionKey, entry);
         const agentId = parseAgentSessionKey(row.key)?.agentId ?? target.agentId;
         const acpSessionKey = resolveStoredSessionKeyForAgentStore({
           cfg,
@@ -369,6 +400,8 @@ export async function sessionsCommand(
           entry,
         });
         const acpRuntime = acpMeta != null;
+        // ACP rows need stored-key metadata before model/runtime resolution so
+        // bridge sessions and true ACP runtime sessions display differently.
         const modelRef = applyAcpModelOverlayIfNeeded(
           resolveSessionDisplayModelRef(cfg, row),
           acpSessionKey,
@@ -377,6 +410,7 @@ export async function sessionsCommand(
         const agentRuntime = resolveModelAgentRuntimeMetadata({
           cfg,
           agentId,
+          sessionEntry: entry,
           provider: modelRef.provider,
           model: modelRef.model,
           sessionKey: acpSessionKey,
@@ -387,7 +421,7 @@ export async function sessionsCommand(
           agentId,
           acpRuntime,
           agentRuntime,
-          kind: classifySessionKind(row.key, store[row.key]),
+          kind: classifySessionKind(row.key, entry),
           runtimePolicySessionKey: resolveDisplayRuntimePolicySessionKey({
             cfg,
             key: row.key,
@@ -413,11 +447,11 @@ export async function sessionsCommand(
     const multi = targets.length > 1;
     const aggregate = aggregateAgents || multi;
     writeRuntimeJson(runtime, {
-      path: aggregate ? null : (targets[0]?.storePath ?? null),
+      path: aggregate || !targets[0] ? null : resolveSessionStoreDisplayPath(targets[0]),
       stores: aggregate
         ? targets.map((target) => ({
             agentId: target.agentId,
-            path: target.storePath,
+            path: resolveSessionStoreDisplayPath(target),
           }))
         : undefined,
       allAgents: aggregateAgents ? true : undefined,
@@ -443,6 +477,8 @@ export async function sessionsCommand(
             totalTokens: resolveSessionTotalTokens(r) ?? null,
             totalTokensFresh:
               typeof r.totalTokens === "number" ? r.totalTokensFresh !== false : false,
+            // Prefer row-level context tokens, then config/model lookup, so JSON
+            // mirrors the terminal percentage calculation.
             contextTokens:
               r.contextTokens ??
               configuredContextTokens ??
@@ -458,8 +494,9 @@ export async function sessionsCommand(
     return;
   }
 
-  if (targets.length === 1 && !aggregateAgents) {
-    runtime.log(info(`Session store: ${targets[0]?.storePath}`));
+  const primaryTarget = targets[0];
+  if (primaryTarget && targets.length === 1 && !aggregateAgents) {
+    runtime.log(info(`Session store: ${resolveSessionStoreDisplayPath(primaryTarget)}`));
   } else {
     runtime.log(
       info(`Session stores: ${targets.length} (${targets.map((t) => t.agentId).join(", ")})`),
@@ -529,7 +566,11 @@ export async function sessionsCommand(
   }
 }
 
-export const testing = {
+const testing = {
   parseSessionsLimit,
 } as const;
-export { testing as __testing };
+
+if (process.env.VITEST || process.env.NODE_ENV === "test") {
+  (globalThis as Record<PropertyKey, unknown>)[Symbol.for("openclaw.sessionsCommandTestApi")] =
+    testing;
+}

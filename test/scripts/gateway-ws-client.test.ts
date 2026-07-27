@@ -1,7 +1,9 @@
+// Gateway Ws Client tests cover gateway ws client script behavior.
 import { createServer, type Server } from "node:http";
+import type { Duplex } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
-import { createGatewayWsClient } from "../../scripts/dev/gateway-ws-client.js";
+import { createGatewayWsClient, rawDataToString } from "../../scripts/dev/gateway-ws-client.js";
 
 let server: Server | undefined;
 let wss: WebSocketServer | undefined;
@@ -46,13 +48,23 @@ async function listen(handler: (ws: WebSocket) => void): Promise<string> {
 
 async function listenStalledUpgrade(): Promise<{ close: () => Promise<void>; url: string }> {
   const stalledServer = createServer();
-  const sockets = new Set<import("node:net").Socket>();
-  stalledServer.on("upgrade", (_req, socket) => {
-    // Keep the socket open without completing the websocket handshake.
+  const sockets = new Set<Duplex>();
+  let closing = false;
+  stalledServer.on("connection", (socket) => {
     sockets.add(socket);
     socket.once("close", () => {
       sockets.delete(socket);
     });
+    if (closing) {
+      socket.destroy();
+    }
+  });
+  stalledServer.on("upgrade", (_req, socket) => {
+    // Keep the socket open without completing the websocket handshake.
+    sockets.add(socket);
+    if (closing) {
+      socket.destroy();
+    }
   });
   await new Promise<void>((resolve) => {
     stalledServer.listen(0, "127.0.0.1", resolve);
@@ -63,6 +75,7 @@ async function listenStalledUpgrade(): Promise<{ close: () => Promise<void>; url
   }
   return {
     close: async () => {
+      closing = true;
       for (const socket of sockets) {
         socket.destroy();
       }
@@ -75,6 +88,14 @@ async function listenStalledUpgrade(): Promise<{ close: () => Promise<void>; url
 }
 
 describe("createGatewayWsClient", () => {
+  it("decodes every ws raw-data shape without core source files", () => {
+    expect(rawDataToString(Buffer.from("buffer"))).toBe("buffer");
+    expect(rawDataToString(Uint8Array.from(Buffer.from("array-buffer")).buffer)).toBe(
+      "array-buffer",
+    );
+    expect(rawDataToString([Buffer.from("frag"), Buffer.from("ments")])).toBe("fragments");
+  });
+
   it("rejects pending RPC requests when the client closes", async () => {
     const url = await listen(() => {});
     const client = createGatewayWsClient({ url });
@@ -101,12 +122,54 @@ describe("createGatewayWsClient", () => {
     client.close();
   });
 
+  it("rejects pending RPC requests when the socket errors", async () => {
+    const url = await listen(() => {});
+    const client = createGatewayWsClient({ url });
+    await client.waitOpen();
+
+    const pending = client.request("health", {}, 1000);
+    client.ws.emit("error", new Error("socket exploded"));
+
+    await expect(pending).rejects.toThrow("socket exploded");
+    client.close();
+  });
+
+  it("rejects websocket closes before opening", async () => {
+    const stalled = await listenStalledUpgrade();
+    const client = createGatewayWsClient({ openTimeoutMs: 1000, url: stalled.url });
+    const opened = client.waitOpen();
+
+    client.ws.emit("close", 1006, Buffer.from("bye"));
+
+    try {
+      await expect(opened).rejects.toThrow("closed before open (1006): bye");
+    } finally {
+      client.close();
+      await stalled.close();
+    }
+  });
+
   it("terminates stalled websocket handshakes after the open timeout", async () => {
     const stalled = await listenStalledUpgrade();
     const client = createGatewayWsClient({ openTimeoutMs: 5, url: stalled.url });
     try {
       await expect(client.waitOpen()).rejects.toThrow("ws open timeout");
       await waitFor(() => client.ws.readyState === WebSocket.CLOSED);
+    } finally {
+      client.close();
+      await stalled.close();
+    }
+  });
+
+  it("uses caller-specific websocket open timeout messages", async () => {
+    const stalled = await listenStalledUpgrade();
+    const client = createGatewayWsClient({
+      openTimeoutMessage: "gateway ws open timeout",
+      openTimeoutMs: 5,
+      url: stalled.url,
+    });
+    try {
+      await expect(client.waitOpen()).rejects.toThrow("gateway ws open timeout");
     } finally {
       client.close();
       await stalled.close();

@@ -1,3 +1,4 @@
+/** Builds dry-run cron delivery labels for CLI/UI list surfaces. */
 import { resolveDefaultAgentId } from "../agents/agent-scope-config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { hasExplicitCronDeliveryTarget, resolveCronDeliveryPlan } from "./delivery-plan.js";
@@ -35,7 +36,7 @@ function formatDeliveryDetail(params: {
 }
 
 /** Builds the user-visible cron delivery preview for one job without sending anything. */
-export async function resolveCronDeliveryPreview(params: {
+async function resolveCronDeliveryPreview(params: {
   cfg: OpenClawConfig;
   defaultAgentId?: string;
   job: CronJob;
@@ -45,6 +46,7 @@ export async function resolveCronDeliveryPreview(params: {
     return { label: "not requested", detail: "not requested" };
   }
   if (plan.mode === "webhook") {
+    // Webhook previews do not resolve channel targets; runtime only needs the configured URL.
     const target = plan.to ? `webhook:${plan.to}` : "webhook";
     return { label: target, detail: plan.to ? "webhook" : "webhook target missing" };
   }

@@ -1,12 +1,10 @@
-import {
-  findNormalizedProviderValue,
-  normalizeProviderId,
-} from "@openclaw/model-catalog-core/provider-id";
+// Runtime bridge for invoking provider hooks supplied by plugins.
+import { findNormalizedProviderValue } from "@openclaw/model-catalog-core/provider-id";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
-import { resolveModelCatalogScope } from "../agents/model-catalog-scope.js";
+import { resolveModelCatalogScope } from "../agents/model-discovery-context.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { getLoadedRuntimePluginRegistry } from "./active-runtime-registry.js";
 import {
@@ -17,6 +15,7 @@ import {
 import { resolvePluginControlPlaneFingerprint } from "./plugin-control-plane-context.js";
 import type { PluginMetadataRegistryView } from "./plugin-metadata-snapshot.types.js";
 import { resolveProviderConfigApiOwnerHint } from "./provider-config-owner.js";
+import { matchesProviderPluginRef } from "./provider-registry-shared.js";
 import { isPluginProvidersLoadInFlight, resolvePluginProviders } from "./providers.runtime.js";
 import type { PluginRegistry } from "./registry-types.js";
 import {
@@ -37,7 +36,7 @@ let providerRuntimePluginCache: ConfigScopedRuntimeCache<ProviderPlugin | null> 
 const defaultProviderRuntimePluginCache = new PluginLruCache<ProviderPlugin | null>(128);
 const PREPARED_PROVIDER_RUNTIME_SURFACES = ["channel"] as const;
 
-export type ProviderRuntimePluginLookupParams = {
+type ProviderRuntimePluginLookupParams = {
   provider: string;
   modelId?: string | null;
   config?: OpenClawConfig;
@@ -52,26 +51,13 @@ export type ProviderRuntimePluginHandle = ProviderRuntimePluginLookupParams & {
   plugin?: ProviderPlugin;
 };
 
-export type ProviderRuntimePluginHandleParams = ProviderRuntimePluginLookupParams & {
+type ProviderRuntimePluginHandleParams = ProviderRuntimePluginLookupParams & {
   runtimeHandle?: ProviderRuntimePluginHandle;
 };
 
 export function clearProviderRuntimePluginCacheForTest(): void {
   providerRuntimePluginCache = new WeakMap();
   defaultProviderRuntimePluginCache.clear();
-}
-
-function matchesProviderId(provider: ProviderPlugin, providerId: string): boolean {
-  const normalized = normalizeProviderId(providerId);
-  if (!normalized) {
-    return false;
-  }
-  if (normalizeProviderId(provider.id) === normalized) {
-    return true;
-  }
-  return [...(provider.aliases ?? []), ...(provider.hookAliases ?? [])].some(
-    (alias) => normalizeProviderId(alias) === normalized,
-  );
 }
 
 function resolveProviderRuntimePluginCacheKey(
@@ -185,10 +171,10 @@ function findProviderRuntimePluginInRegistry(params: {
       if (params.apiOwnerHint) {
         return (
           matchesProviderLiteralId(plugin, params.provider) ||
-          matchesProviderId(plugin, params.apiOwnerHint)
+          matchesProviderPluginRef(plugin, params.apiOwnerHint)
         );
       }
-      return matchesProviderId(plugin, params.provider);
+      return matchesProviderPluginRef(plugin, params.provider);
     });
 }
 
@@ -275,10 +261,10 @@ export function resolveProviderRuntimePlugin(
         if (apiOwnerHint) {
           return (
             matchesProviderLiteralId(plugin, params.provider) ||
-            matchesProviderId(plugin, apiOwnerHint)
+            matchesProviderPluginRef(plugin, apiOwnerHint)
           );
         }
-        return matchesProviderId(plugin, params.provider);
+        return matchesProviderPluginRef(plugin, params.provider);
       }) ?? null
     );
   };
@@ -334,7 +320,7 @@ export function resolveProviderHookPlugin(params: {
     config: params.config,
     workspaceDir: params.workspaceDir,
     env: params.env,
-  }).find((candidate) => matchesProviderId(candidate, params.provider));
+  }).find((candidate) => matchesProviderPluginRef(candidate, params.provider));
 }
 
 export function resolveProviderRuntimePluginHandle(
@@ -445,5 +431,20 @@ export function wrapProviderStreamFn(params: {
 }) {
   return (
     ensureProviderRuntimePluginHandle(params).plugin?.wrapStreamFn?.(params.context) ?? undefined
+  );
+}
+
+export function wrapProviderSimpleCompletionStreamFn(params: {
+  provider: string;
+  config?: OpenClawConfig;
+  workspaceDir?: string;
+  env?: NodeJS.ProcessEnv;
+  runtimeHandle?: ProviderRuntimePluginHandle;
+  context: ProviderWrapStreamFnContext;
+}) {
+  return (
+    ensureProviderRuntimePluginHandle(params).plugin?.wrapSimpleCompletionStreamFn?.(
+      params.context,
+    ) ?? undefined
   );
 }

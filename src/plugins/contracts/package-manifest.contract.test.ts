@@ -1,8 +1,14 @@
+// Package manifest contract tests cover plugin package manifest requirements.
 import { describePackageManifestContract } from "openclaw/plugin-sdk/plugin-test-contracts";
 
 type PackageManifestContractParams = Parameters<typeof describePackageManifestContract>[0];
 
 const packageManifestContractTests: PackageManifestContractParams[] = [
+  {
+    pluginId: "buzz",
+    pluginLocalRuntimeDeps: ["nostr-tools"],
+    minHostVersionBaseline: "2026.7.2",
+  },
   {
     pluginId: "discord",
     pluginLocalRuntimeDeps: ["@discordjs/voice", "discord-api-types", "libopus-wasm"],
@@ -17,7 +23,7 @@ const packageManifestContractTests: PackageManifestContractParams[] = [
   { pluginId: "google-meet" },
   {
     pluginId: "googlechat",
-    pluginLocalRuntimeDeps: ["gaxios", "google-auth-library"],
+    pluginLocalRuntimeDeps: ["google-auth-library"],
     minHostVersionBaseline: "2026.3.22",
   },
   { pluginId: "irc", minHostVersionBaseline: "2026.3.22" },
@@ -26,7 +32,7 @@ const packageManifestContractTests: PackageManifestContractParams[] = [
   { pluginId: "amazon-bedrock-mantle" },
   {
     pluginId: "diffs",
-    pluginLocalRuntimeDeps: ["@pierre/diffs", "@pierre/theme"],
+    pluginLocalRuntimeDeps: ["@pierre/diffs"],
   },
   { pluginId: "file-transfer" },
   {

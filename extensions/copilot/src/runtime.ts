@@ -1,3 +1,4 @@
+// Copilot plugin module implements runtime behavior.
 import { normalize, resolve, sep } from "node:path";
 import type { CopilotClient, CopilotClientOptions } from "@github/copilot-sdk";
 import { loadCopilotSdk } from "./sdk-loader.js";
@@ -13,9 +14,11 @@ const POOL_DISPOSED_MESSAGE = "[copilot-pool] pool disposed";
 export interface PoolKey {
   readonly agentId: string;
   readonly copilotHome: string;
-  readonly authMode: "useLoggedInUser" | "gitHubToken";
+  readonly authMode: "useLoggedInUser" | "gitHubToken" | "byok";
   readonly authProfileId?: string;
   readonly authProfileVersion?: string;
+  /** Distinguishes hardened empty-mode clients from normal Copilot CLI clients. */
+  readonly clientMode?: CopilotClientOptions["mode"];
 }
 
 export interface ClientCreateOptions extends Omit<
@@ -197,7 +200,7 @@ export function createCopilotClientPool(options: CopilotClientPoolOptions = {}):
     inputKey: PoolKey,
     optionsForCreate: ClientCreateOptions,
   ): Promise<PooledClient> => {
-    const key = normalizePoolKey(inputKey, optionsForCreate.copilotHome);
+    const key = normalizePoolKey(inputKey, optionsForCreate.copilotHome, optionsForCreate.mode);
     const cacheKey = JSON.stringify(key);
     const clientOptions = normalizeClientCreateOptions(optionsForCreate, key.copilotHome);
 
@@ -347,13 +350,20 @@ export function createCopilotClientPool(options: CopilotClientPoolOptions = {}):
   };
 }
 
-function normalizePoolKey(key: PoolKey, rawCopilotHome: string): PoolKey {
+function normalizePoolKey(
+  key: PoolKey,
+  rawCopilotHome: string,
+  clientMode: CopilotClientOptions["mode"],
+): PoolKey {
   return {
     agentId: key.agentId,
     copilotHome: normalizeCopilotHome(rawCopilotHome),
     authMode: key.authMode,
     authProfileId: key.authProfileId,
     authProfileVersion: key.authProfileVersion,
+    // Undefined and `copilot-cli` are equivalent SDK defaults. Preserve the
+    // existing cache identity while keeping empty-mode finalizers isolated.
+    ...(clientMode === "empty" ? { clientMode } : {}),
   };
 }
 

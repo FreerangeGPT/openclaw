@@ -1,8 +1,10 @@
+// Browser tests cover agent.snapshot.timeout plugin behavior.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createBrowserRouteApp, createBrowserRouteResponse } from "./test-helpers.js";
 
 const cdpMocks = vi.hoisted(() => ({
   captureScreenshot: vi.fn(),
+  getMainFrameDocumentIdentityViaCdp: vi.fn(async () => "cdp:test-document"),
   snapshotAria: vi.fn(async () => ({ nodes: [] })),
   snapshotRoleViaCdp: vi.fn(async () => ({
     snapshot: "button Continue",
@@ -32,6 +34,7 @@ const profileContext = vi.hoisted(() => ({
 
 vi.mock("../cdp.js", () => ({
   captureScreenshot: cdpMocks.captureScreenshot,
+  getMainFrameDocumentIdentityViaCdp: cdpMocks.getMainFrameDocumentIdentityViaCdp,
   snapshotAria: cdpMocks.snapshotAria,
   snapshotRoleViaCdp: cdpMocks.snapshotRoleViaCdp,
 }));

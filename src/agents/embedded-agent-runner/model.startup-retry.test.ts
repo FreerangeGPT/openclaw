@@ -1,3 +1,4 @@
+// Coverage for retrying transient model-runtime misses during startup.
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const discoverAuthStorageMock = vi.fn<(agentDir?: string) => { mocked: true }>(() => ({
@@ -10,6 +11,8 @@ const discoverModelsMock = vi.fn<
 const prepareProviderDynamicModelMock = vi.fn<(params: unknown) => Promise<void>>(async () => {});
 let dynamicAttempts = 0;
 const runProviderDynamicModelMock = vi.fn<(params: unknown) => unknown>(() =>
+  // First dynamic lookup simulates startup catalog warmup; the retry path must
+  // resolve on the second attempt only when explicitly enabled.
   dynamicAttempts > 1
     ? {
         id: "gpt-5.4",
@@ -29,6 +32,21 @@ const runProviderDynamicModelMock = vi.fn<(params: unknown) => unknown>(() =>
 vi.mock("../agent-model-discovery.js", () => ({
   discoverAuthStorage: discoverAuthStorageMock,
   discoverModels: discoverModelsMock,
+}));
+
+vi.mock("../prepared-model-runtime.js", () => ({
+  getPreparedModelRuntimeSnapshot: () => undefined,
+  loadPreparedModelRuntimeSnapshot: async ({ agentDir }: { agentDir: string }) => {
+    const authStorage = discoverAuthStorageMock(agentDir);
+    return {
+      agentDir,
+      config: {},
+      createStores: () => ({
+        authStorage,
+        modelRegistry: discoverModelsMock(authStorage, agentDir),
+      }),
+    };
+  },
 }));
 
 vi.mock("../../plugins/provider-runtime.js", () => ({
@@ -76,6 +94,7 @@ describe("resolveModelAsync startup retry", () => {
       "/tmp/agent",
       {},
       {
+        agentRuntimeId: "openclaw",
         retryTransientProviderRuntimeMiss: true,
         runtimeHooks,
       },
@@ -87,9 +106,18 @@ describe("resolveModelAsync startup retry", () => {
     expect(result.model?.api).toBe("openai-chatgpt-responses");
     expect(prepareProviderDynamicModelMock).toHaveBeenCalledTimes(2);
     expect(runProviderDynamicModelMock).toHaveBeenCalledTimes(2);
+    for (const call of [prepareProviderDynamicModelMock, runProviderDynamicModelMock]) {
+      expect(call).toHaveBeenCalledWith(
+        expect.objectContaining({
+          context: expect.objectContaining({ agentRuntimeId: "openclaw" }),
+        }),
+      );
+    }
   });
 
   it("does not retry during steady-state misses", async () => {
+    // Normal runtime lookups should not double-hit providers after startup; that
+    // would add latency and duplicate plugin side effects.
     const result = await resolveModelAsync("openai", "gpt-5.4", "/tmp/agent", {}, { runtimeHooks });
 
     expect(result.model).toBeUndefined();

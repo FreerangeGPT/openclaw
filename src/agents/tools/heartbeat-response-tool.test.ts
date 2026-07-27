@@ -1,3 +1,5 @@
+// Heartbeat response tool tests cover the one-shot heartbeat contract and
+// provider-portable schema shape.
 import { describe, expect, it } from "vitest";
 import { HEARTBEAT_RESPONSE_TOOL_NAME } from "../../auto-reply/heartbeat-tool-response.js";
 import { createHeartbeatResponseTool } from "./heartbeat-response-tool.js";
@@ -19,10 +21,13 @@ type HeartbeatResponseDetails = {
   notificationText?: string;
   priority?: string;
   nextCheck?: string;
+  scratch?: string;
 };
 
 describe("createHeartbeatResponseTool", () => {
   it("uses flat enum schemas for provider portability", () => {
+    // Some providers reject anyOf literal unions in tool schemas; flat enums are
+    // the portable contract for heartbeat status fields.
     const tool = createHeartbeatResponseTool();
 
     const outcome = readSchemaProperty(tool.parameters, "outcome");
@@ -54,6 +59,8 @@ describe("createHeartbeatResponseTool", () => {
   });
 
   it("rejects repeated heartbeat responses from the same tool instance", async () => {
+    // A heartbeat turn has one final outcome; accepting multiple writes would
+    // make notification delivery ambiguous.
     const tool = createHeartbeatResponseTool();
 
     await tool.execute("call-1", {
@@ -69,6 +76,26 @@ describe("createHeartbeatResponseTool", () => {
         summary: "Nothing needs attention.",
       }),
     ).rejects.toThrow("heartbeat_respond already recorded");
+  });
+
+  it("captures scratch without echoing future prompt content to the model", async () => {
+    const tool = createHeartbeatResponseTool();
+    const scratch = "Private monitor context that must not enter tool output.";
+
+    const result = await tool.execute("call-1", {
+      outcome: "progress",
+      notify: false,
+      summary: "Updated monitor context.",
+      scratch,
+    });
+
+    const details = result.details as HeartbeatResponseDetails;
+    expect(details.scratch).toBe(scratch);
+    expect(JSON.stringify(result.content)).not.toContain(scratch);
+    expect(JSON.stringify(details)).not.toContain(scratch);
+    expect(result.content).toEqual([
+      expect.objectContaining({ text: expect.stringContaining('"scratchPending": true') }),
+    ]);
   });
 
   it("accepts notification text and optional scheduling metadata", async () => {

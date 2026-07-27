@@ -1,3 +1,4 @@
+// Doctor runtime error tests cover error handling in core runtime checks.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AnyAgentTool } from "../agents/tools/common.js";
 import { setPluginToolMeta } from "../plugins/tools.js";
@@ -17,7 +18,10 @@ vi.mock("../agents/model-catalog.js", () => ({
     provider: string,
     modelId: string,
   ) => catalog.find((entry) => entry.provider === provider && entry.id === modelId),
-  loadModelCatalog: mocks.loadModelCatalog,
+}));
+
+vi.mock("../agents/prepared-model-catalog.js", () => ({
+  loadPreparedModelCatalog: mocks.loadModelCatalog,
 }));
 
 vi.mock("../agents/model-selection.js", async (importOriginal) => ({

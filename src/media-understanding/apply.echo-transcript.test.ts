@@ -1,5 +1,8 @@
+// Apply echo-transcript tests cover integrated audio media understanding with
+// best-effort transcript delivery.
 import fs from "node:fs/promises";
 import path from "node:path";
+import { expectDefined } from "@openclaw/normalization-core";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MsgContext } from "../auto-reply/templating.js";
 import type { OpenClawConfig } from "../config/types.js";
@@ -65,8 +68,7 @@ async function createTempAudioFile(): Promise<string> {
 function createAudioCtxWithProvider(mediaPath: string, extra?: Partial<MsgContext>): MsgContext {
   return {
     Body: "<media:audio>",
-    MediaPath: mediaPath,
-    MediaType: "audio/ogg",
+    media: [{ path: mediaPath, contentType: "audio/ogg" }],
     Provider: "voicechat",
     From: "+10000000001",
     AccountId: "acc1",
@@ -85,10 +87,10 @@ function createAudioConfigWithEcho(opts?: {
   const cfg: OpenClawConfig = {
     tools: {
       media: {
+        models: [{ provider: "groq", capabilities: ["audio"] }],
         audio: {
           enabled: true,
           maxBytes: 1024 * 1024,
-          models: [{ provider: "groq" }],
           echoTranscript: opts?.echoTranscript ?? true,
           ...(opts?.echoFormat !== undefined ? { echoFormat: opts.echoFormat } : {}),
         },
@@ -293,7 +295,9 @@ describe("applyMediaUnderstanding – echo transcript", () => {
     expect(callArgs.to).toBe("+10000000001");
     expect(callArgs.accountId).toBe("acc1");
     expect(callArgs.payloads).toHaveLength(1);
-    expect(callArgs.payloads[0].text).toBe('📝 "hello world"');
+    expect(expectDefined(callArgs.payloads[0], "callArgs.payloads[0] test invariant").text).toBe(
+      '📝 "hello world"',
+    );
   });
 
   it("does NOT echo when there are no audio attachments", async () => {
@@ -304,8 +308,7 @@ describe("applyMediaUnderstanding – echo transcript", () => {
 
     const ctx: MsgContext = {
       Body: "<media:image>",
-      MediaPath: imgPath,
-      MediaType: "image/jpeg",
+      media: [{ path: imgPath, contentType: "image/jpeg" }],
       Provider: "voicechat",
       From: "+10000000001",
     };
@@ -327,7 +330,7 @@ describe("applyMediaUnderstanding – echo transcript", () => {
     const mediaPath = await createTempAudioFile();
     const ctx = createAudioCtxWithProvider(mediaPath);
     const { cfg, providers } = createAudioConfigWithEcho({ echoTranscript: true });
-    providers.groq.transcribeAudio = async () => {
+    expectDefined(providers.groq, "providers.groq test invariant").transcribeAudio = async () => {
       throw new Error("transcription provider failure");
     };
 

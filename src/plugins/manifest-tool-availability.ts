@@ -1,3 +1,4 @@
+// Normalizes tool availability metadata from plugin manifests.
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -10,8 +11,8 @@ import type {
 } from "./manifest.js";
 
 type ToolMetadata = NonNullable<PluginManifestRecord["toolMetadata"]>[string];
-export type ManifestConfigAvailabilitySignal = PluginManifestCapabilityProviderConfigSignal;
-export type ManifestAuthAvailabilitySignal = PluginManifestCapabilityProviderAuthSignal;
+type ManifestConfigAvailabilitySignal = PluginManifestCapabilityProviderConfigSignal;
+type ManifestAuthAvailabilitySignal = PluginManifestCapabilityProviderAuthSignal;
 
 function readPath(root: unknown, path: string | undefined): unknown {
   if (!path?.trim()) {
@@ -209,11 +210,7 @@ export function manifestPluginSetupProviderEnvVars(
   plugin: PluginManifestRecord,
   providerId: string,
 ): readonly string[] {
-  const direct = plugin.setup?.providers?.find((provider) => provider.id === providerId)?.envVars;
-  if (direct && direct.length > 0) {
-    return direct;
-  }
-  return plugin.providerAuthEnvVars?.[providerId] ?? [];
+  return plugin.setup?.providers?.find((provider) => provider.id === providerId)?.envVars ?? [];
 }
 
 export function hasNonEmptyManifestEnvCandidate(

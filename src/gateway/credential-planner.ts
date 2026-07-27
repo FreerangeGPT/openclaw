@@ -1,3 +1,5 @@
+// Gateway credential planning helpers.
+// Classifies local/remote auth inputs before SecretRef resolution.
 import { normalizeOptionalString } from "../../packages/normalization-core/src/string-coerce.js";
 import { containsEnvVarReference } from "../config/env-substitution.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -60,16 +62,6 @@ export function trimCredentialToUndefined(value: unknown): string | undefined {
     return undefined;
   }
   return trimmed;
-}
-
-/** True when the process env supplies a nonempty Gateway token candidate. */
-export function hasGatewayTokenEnvCandidate(env: NodeJS.ProcessEnv = process.env): boolean {
-  return Boolean(trimToUndefined(env.OPENCLAW_GATEWAY_TOKEN));
-}
-
-/** True when the process env supplies a nonempty Gateway password candidate. */
-export function hasGatewayPasswordEnvCandidate(env: NodeJS.ProcessEnv = process.env): boolean {
-  return Boolean(trimToUndefined(env.OPENCLAW_GATEWAY_PASSWORD));
 }
 
 /** Classify one configured credential input without resolving secret refs. */
@@ -137,7 +129,6 @@ export function createGatewayCredentialPlan(params: {
     (authMode !== "token" && authMode !== "none" && !tokenCanWin);
   const localTokenSurfaceActive =
     localTokenCanWin &&
-    !envToken &&
     (authMode === "token" ||
       (authMode === undefined && !(envPassword || localPassword.configured)));
 
@@ -145,6 +136,8 @@ export function createGatewayCredentialPlan(params: {
   const remoteUrlConfigured = Boolean(trimToUndefined(remote?.url));
   const tailscaleRemoteExposure =
     gateway?.tailscale?.mode === "serve" || gateway?.tailscale?.mode === "funnel";
+  // Remote credential surfaces are considered active when the gateway is used
+  // remotely or when local auth may be borrowed for a published Tailscale URL.
   const remoteConfiguredSurface = remoteMode || remoteUrlConfigured || tailscaleRemoteExposure;
   // Remote credentials may borrow local auth credentials only when the remote
   // surface exists but no explicit remote/env candidate can satisfy the mode.

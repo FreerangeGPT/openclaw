@@ -1,3 +1,5 @@
+// Transport params runtime-contract tests cover default extra params and
+// provider transport patching for embedded OpenClaw/OpenAI execution paths.
 import type { StreamFn } from "openclaw/plugin-sdk/agent-core";
 import type { Context, Model } from "openclaw/plugin-sdk/llm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,12 +12,11 @@ import {
 } from "../../test/helpers/agents/transport-params-runtime-contract.js";
 import { createOpenAIThinkingLevelWrapper } from "../llm/providers/stream-wrappers/openai.js";
 import {
-  testing as extraParamsTesting,
   applyExtraParamsToAgent,
   resolveExtraParams,
   resolvePreparedExtraParams,
 } from "./embedded-agent-runner/extra-params.js";
-import { supportsGptParallelToolCallsPayload } from "./provider-api-families.js";
+import { testing as extraParamsTesting } from "./embedded-agent-runner/extra-params.test-support.js";
 
 beforeEach(() => {
   installNoopProviderRuntimeDeps();
@@ -72,14 +73,14 @@ describe("transport params runtime contract (embedded OpenClaw/OpenAI path)", ()
   it.each(GPT_PARALLEL_TOOL_CALLS_PAYLOAD_APIS)(
     "advertises %s as accepting the GPT parallel_tool_calls payload patch",
     (api) => {
-      expect(supportsGptParallelToolCallsPayload(api)).toBe(true);
+      expect(extraParamsTesting.supportsGptParallelToolCallsPayload(api)).toBe(true);
     },
   );
 
   it.each(UNRELATED_TOOL_CALLS_PAYLOAD_APIS)(
     "does not advertise %s as accepting the GPT parallel_tool_calls payload patch",
     (api) => {
-      expect(supportsGptParallelToolCallsPayload(api)).toBe(false);
+      expect(extraParamsTesting.supportsGptParallelToolCallsPayload(api)).toBe(false);
     },
   );
 
@@ -122,6 +123,8 @@ describe("transport params runtime contract (embedded OpenClaw/OpenAI path)", ()
   });
 
   it("composes provider preparation before transport patch resolution", () => {
+    // Provider preparation can rewrite transport context; transport-specific
+    // patches must see that prepared context before final payload mutation.
     const resolveProviderExtraParamsForTransport = vi.fn((_params: unknown) => ({
       patch: {
         parallel_tool_calls: false,

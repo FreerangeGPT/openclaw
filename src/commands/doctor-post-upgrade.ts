@@ -1,7 +1,9 @@
+/** Post-upgrade validation probes for persisted plugin index and package extension entries. */
 import crypto from "node:crypto";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { formatConsoleDiagnosticLine } from "../logging/json-console-line.js";
 import { readPersistedInstalledPluginIndex } from "../plugins/installed-plugin-index-store.js";
 import type { PackageManifest } from "../plugins/manifest.js";
 import { validatePackageExtensionEntriesForInstall } from "../plugins/package-entry-resolution.js";
@@ -147,6 +149,7 @@ async function sha256OfFile(absPath: string): Promise<string | null> {
   }
 }
 
+/** Runs post-upgrade plugin probes and returns structured findings for the caller to render. */
 export async function runPostUpgradeProbes(params: {
   installsPath?: string;
   stateDir?: string;
@@ -173,9 +176,8 @@ export async function runPostUpgradeProbes(params: {
       try {
         pkg = await readInstalledPackageJson(record.rootDir, pkgRelPath);
       } catch (err) {
-        process.stderr.write(
-          `[doctor-post-upgrade] could not read package.json for ${record.pluginId} at ${record.rootDir}: ${err instanceof Error ? err.message : String(err)}\n`,
-        );
+        const message = `[doctor-post-upgrade] could not read package.json for ${record.pluginId} at ${record.rootDir}: ${err instanceof Error ? err.message : String(err)}`;
+        process.stderr.write(`${formatConsoleDiagnosticLine({ level: "warn", message })}\n`);
         continue;
       }
       const entries = pkg.openclaw?.extensions ?? [];

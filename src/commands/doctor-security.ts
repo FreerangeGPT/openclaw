@@ -1,3 +1,4 @@
+/** Security warnings for gateway exposure, exec policy drift, channel DMs, and plaintext secrets. */
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { note } from "../../packages/terminal-core/src/note.js";
 import { resolveDmAllowAuditState } from "../channels/message-access/dm-allow-state.js";
@@ -13,6 +14,7 @@ import { isLoopbackHost, resolveGatewayBindHost } from "../gateway/net.js";
 import { resolveExecPolicyScopeSnapshot } from "../infra/exec-approvals-effective.js";
 import {
   loadExecApprovals,
+  resolveExecApprovalsDisplayPath,
   type ExecAsk,
   type ExecMode,
   type ExecSecurity,
@@ -117,7 +119,7 @@ function collectExecPolicyConflictWarnings(cfg: OpenClawConfig): string[] {
       configPath:
         params.scopeLabel === "tools.exec"
           ? "tools.exec"
-          : `agents.list.${params.agentId}.tools.exec`,
+          : `agents.entries.${params.agentId}.tools.exec`,
       scopeLabel: params.scopeLabel,
       agentId: params.agentId,
     });
@@ -134,12 +136,24 @@ function collectExecPolicyConflictWarnings(cfg: OpenClawConfig): string[] {
 
     const configParts: string[] = [];
     const hostParts: string[] = [];
+    const canonicalModeSource =
+      snapshot.security.requestedSource === snapshot.ask.requestedSource &&
+      snapshot.security.requestedSource.endsWith(".mode")
+        ? snapshot.security.requestedSource
+        : undefined;
+    if (canonicalModeSource) {
+      configParts.push(`${canonicalModeSource}="${snapshot.mode.requested}"`);
+    }
     if (securityConflict) {
-      configParts.push(`${snapshot.security.requestedSource}="${snapshot.security.requested}"`);
+      if (!canonicalModeSource) {
+        configParts.push(`${snapshot.security.requestedSource}="${snapshot.security.requested}"`);
+      }
       hostParts.push(`${snapshot.security.hostSource}="${snapshot.security.host}"`);
     }
     if (askConflict) {
-      configParts.push(`${snapshot.ask.requestedSource}="${snapshot.ask.requested}"`);
+      if (!canonicalModeSource) {
+        configParts.push(`${snapshot.ask.requestedSource}="${snapshot.ask.requested}"`);
+      }
       hostParts.push(`${snapshot.ask.hostSource}="${snapshot.ask.host}"`);
     }
 
@@ -160,13 +174,13 @@ function collectExecPolicyConflictWarnings(cfg: OpenClawConfig): string[] {
     scopeExecConfig: cfg.tools?.exec,
   });
 
-  const agents = Array.isArray(cfg.agents?.list) ? cfg.agents.list : [];
-  for (const agent of agents) {
+  const agents = cfg.agents?.entries ?? {};
+  for (const [agentId, agent] of Object.entries(agents)) {
     maybeWarn({
-      scopeLabel: `agents.list.${agent.id}.tools.exec`,
+      scopeLabel: `agents.entries.${agentId}.tools.exec`,
       scopeExecConfig: agent.tools?.exec,
       globalExecConfig: cfg.tools?.exec,
-      agentId: agent.id,
+      agentId,
     });
   }
 
@@ -235,6 +249,7 @@ function collectPlaintextConfigSecretWarnings(cfg: OpenClawConfig): string[] {
   ];
 }
 
+/** Collects doctor security warnings without emitting terminal notes. */
 export async function collectSecurityWarnings(
   cfg: OpenClawConfig,
   env: NodeJS.ProcessEnv = process.env,
@@ -244,7 +259,7 @@ export async function collectSecurityWarnings(
   if (cfg.approvals?.exec?.enabled === false) {
     warnings.push(
       "- Note: approvals.exec.enabled=false disables approval forwarding only.",
-      "  Host exec gating still comes from ~/.openclaw/exec-approvals.json.",
+      `  Host exec gating still comes from ${resolveExecApprovalsDisplayPath()}.`,
       `  Check local policy with: ${formatCliCommand("openclaw approvals get --gateway")}`,
     );
   }
@@ -255,12 +270,7 @@ export async function collectSecurityWarnings(
   warnings.push(...collectPlaintextConfigSecretWarnings(cfg));
   warnings.push(...collectDurableExecApprovalWarnings(cfg));
 
-  // ===========================================
-  // GATEWAY NETWORK EXPOSURE CHECK
-  // ===========================================
-  // Check for dangerous gateway binding configurations
-  // that expose the gateway to network without proper auth
-
+  // Network exposure needs auth proof before doctor can treat non-loopback bind as intentional.
   const tailscaleMode = cfg.gateway?.tailscale?.mode ?? "off";
   const gatewayBind = (cfg.gateway?.bind ?? "loopback") as string;
   const customBindHost = cfg.gateway?.customBindHost?.trim();
@@ -438,11 +448,11 @@ export async function collectSecurityWarnings(
   return warnings;
 }
 
+/** Emits security warnings plus the deep audit follow-up command. */
 export async function noteSecurityWarnings(cfg: OpenClawConfig) {
   const warnings = await collectSecurityWarnings(cfg);
-  const auditHint = `- Run: ${formatCliCommand("openclaw security audit --deep")}`;
-
-  const lines = warnings.length > 0 ? warnings : ["- No channel security warnings detected."];
-  lines.push(auditHint);
-  note(lines.join("\n"), "Security");
+  if (warnings.length > 0) {
+    warnings.push(`- Run: ${formatCliCommand("openclaw security audit --deep")}`);
+    note(warnings.join("\n"), "Security");
+  }
 }

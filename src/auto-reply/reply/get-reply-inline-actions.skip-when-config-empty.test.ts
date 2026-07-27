@@ -1,11 +1,14 @@
+// Tests inline action skipping when channel config does not define actions.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionEntry } from "../../config/sessions.js";
+import { replaceSessionEntry } from "../../config/sessions/session-accessor.js";
 import type { SkillCommandSpec } from "../../skills/types.js";
 import { getReplyPayloadMetadata } from "../reply-payload.js";
 import type { TemplateContext } from "../templating.js";
+import { markCommandSessionMetadataChanged } from "./command-session-metadata.js";
 import { clearInlineDirectives } from "./get-reply-directives-utils.js";
 import { handleInlineActions } from "./get-reply-inline-actions.js";
 import { stripInlineStatus } from "./reply-inline.js";
@@ -67,8 +70,9 @@ async function writeSessionStore(
   entries: Record<string, unknown>,
 ) {
   const storePath = storeTemplate.replaceAll("{agentId}", agentId);
-  await fs.mkdir(path.dirname(storePath), { recursive: true });
-  await fs.writeFile(storePath, JSON.stringify(entries, null, 2), "utf-8");
+  for (const [sessionKey, entry] of Object.entries(entries)) {
+    await replaceSessionEntry({ agentId, sessionKey, storePath }, entry as SessionEntry);
+  }
 }
 
 const createHandleInlineActionsInput = (params: {
@@ -259,6 +263,43 @@ describe("handleInlineActions", () => {
       cleanedBody: "hi",
       command: { to: "whatsapp:+123" },
     });
+  });
+
+  it("notifies session metadata changes before continuing after a command", async () => {
+    const typing = createTypingController();
+    const ctx = buildTestCtx({
+      Body: "/goal build the thing",
+      CommandBody: "/goal build the thing",
+    });
+    const onSessionMetadataChanges = vi.fn();
+    handleCommandsMock.mockImplementationOnce(async (params) => {
+      markCommandSessionMetadataChanged(params);
+      return { shouldContinue: true };
+    });
+
+    const result = await handleInlineActions(
+      createHandleInlineActionsInput({
+        ctx,
+        typing,
+        cleanedBody: "/goal build the thing",
+        command: {
+          isAuthorizedSender: true,
+          rawBodyNormalized: "/goal build the thing",
+          commandBodyNormalized: "/goal build the thing",
+        },
+        overrides: {
+          allowTextCommands: true,
+          opts: {
+            onSessionMetadataChanges,
+          } as unknown as HandleInlineActionsInput["opts"],
+        },
+      }),
+    );
+
+    expect(result.kind).toBe("continue");
+    expect(onSessionMetadataChanges).toHaveBeenCalledWith([
+      { sessionKey: "s:main", agentId: "main", reason: "command-metadata" },
+    ]);
   });
 
   it("forwards agentDir into handleCommands", async () => {
@@ -738,6 +779,37 @@ describe("handleInlineActions", () => {
     expect(commandArgs.skillCommands).toEqual(skillCommands);
   });
 
+  it("reloads preloaded skill commands when final exec overrides are present", async () => {
+    const typing = createTypingController();
+    handleCommandsMock.mockResolvedValue({ shouldContinue: false, reply: { text: "done" } });
+    const ctx = buildTestCtx({ Body: "/office_hours help", CommandBody: "/office_hours help" });
+    const skillCommands = officeHoursSkillCommands();
+    listSkillCommandsForWorkspaceMock.mockReturnValue(skillCommands);
+
+    await handleInlineActions(
+      createHandleInlineActionsInput({
+        ctx,
+        typing,
+        cleanedBody: "/office_hours help",
+        command: {
+          isAuthorizedSender: true,
+          rawBodyNormalized: "/office_hours help",
+          commandBodyNormalized: "/office_hours help",
+        },
+        overrides: {
+          allowTextCommands: true,
+          cfg: { commands: { text: true } },
+          execOverrides: { security: "deny" },
+          skillCommands,
+        },
+      }),
+    );
+
+    expect(listSkillCommandsForWorkspaceMock).toHaveBeenCalledWith(
+      expect.objectContaining({ execOverrides: { security: "deny" } }),
+    );
+  });
+
   it("passes requesterAgentIdOverride into inline tool runtimes", async () => {
     const typing = createTypingController();
     const toolExecute = vi.fn(async () => ({ text: "spawned" }));
@@ -808,6 +880,7 @@ describe("handleInlineActions", () => {
     const ctx = buildTestCtx({
       Body: "/set_profile display name",
       CommandBody: "/set_profile display name",
+      NativeChannelId: "oc_native_chat",
     });
     const skillCommands: SkillCommandSpec[] = [
       {
@@ -848,6 +921,7 @@ describe("handleInlineActions", () => {
     expect(result).toEqual({ kind: "reply", reply: { text: "✅ Done." } });
     const toolsArgs = mockObjectArg(createOpenClawToolsMock, "createOpenClawTools");
     expect(toolsArgs).not.toHaveProperty("senderIsOwner");
+    expect(toolsArgs.nativeChannelId).toBe("oc_native_chat");
     expect(toolsArgs.beforeToolCallHookContext).toMatchObject({
       cwd: "/tmp",
       workspaceDir: "/tmp",
@@ -1324,3 +1398,4 @@ describe("handleInlineActions", () => {
     ).toBe(true);
   });
 });
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

@@ -1,9 +1,18 @@
+/**
+ * Tests Anthropic payload diagnostics redaction.
+ * Ensures request payloads, usage records, errors, and digests are safe before
+ * JSONL logging.
+ */
 import crypto from "node:crypto";
 import type { StreamFn } from "openclaw/plugin-sdk/agent-core";
 import { describe, expect, it } from "vitest";
 import { createAnthropicPayloadLogger } from "./anthropic-payload-log.js";
 
 describe("createAnthropicPayloadLogger", () => {
+  const bareAnthropicKey = "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWx"; // pragma: allowlist secret
+  const bareGithubKey = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz1234567890"; // pragma: allowlist secret
+  const bareGoogleKey = "AIzaSyA1bC2dE3fG4hI5jK6lM7nO8pQrStUvW"; // pragma: allowlist secret
+
   it("sanitizes credential fields and image base64 payload data before writing logs", async () => {
     const lines: string[] = [];
     const logger = createAnthropicPayloadLogger({
@@ -21,6 +30,7 @@ describe("createAnthropicPayloadLogger", () => {
         {
           role: "user",
           authorization: "Bearer sk-secret", // pragma: allowlist secret
+          diagnosticText: bareAnthropicKey,
           content: [
             {
               type: "image",
@@ -33,6 +43,7 @@ describe("createAnthropicPayloadLogger", () => {
         api_key: "sk-test", // pragma: allowlist secret
         nestedToken: "shh", // pragma: allowlist secret
         tokenBudget: 1024,
+        diagnosticText: bareGithubKey,
       },
     };
     const streamFn: StreamFn = ((model, __, options) => {
@@ -56,13 +67,22 @@ describe("createAnthropicPayloadLogger", () => {
       ?.source ?? {}) as Record<string, unknown>;
     const metadata = (sanitizedPayload.metadata ?? {}) as Record<string, unknown>;
     expect(message[0]).not.toHaveProperty("authorization");
+    expect(message[0]?.diagnosticText).toBeTypeOf("string");
+    expect(message[0]?.diagnosticText).not.toBe(bareAnthropicKey);
+    expect(message[0]?.diagnosticText).not.toContain(bareAnthropicKey);
     expect(metadata).not.toHaveProperty("api_key");
     expect(metadata).not.toHaveProperty("nestedToken");
     expect(metadata.tokenBudget).toBe(1024);
+    expect(metadata.diagnosticText).toBeTypeOf("string");
+    expect(metadata.diagnosticText).not.toBe(bareGithubKey);
+    expect(metadata.diagnosticText).not.toContain(bareGithubKey);
     expect(source.data).toBe("<redacted>");
     expect(source.bytes).toBe(4);
     expect(source.sha256).toBe(crypto.createHash("sha256").update("QUJDRA==").digest("hex"));
     expect(event.payloadDigest).toMatch(/^[a-f0-9]{64}$/u);
+    const serialized = JSON.stringify(event);
+    expect(serialized).not.toContain(bareAnthropicKey);
+    expect(serialized).not.toContain(bareGithubKey);
   });
 
   it("sanitizes usage and error fields before writing logs", () => {
@@ -84,67 +104,49 @@ describe("createAnthropicPayloadLogger", () => {
           usage: {
             input: 1,
             authorization: "Bearer sk-secret", // pragma: allowlist secret
+            diagnosticText: bareGithubKey,
           },
         } as never,
       ],
-      new Error("failed with Bearer sk-secret"), // pragma: allowlist secret
+      new Error(`failed with Bearer sk-secret and ${bareGoogleKey}`), // pragma: allowlist secret
     );
 
     const event = JSON.parse(lines[0]?.trim() ?? "{}") as Record<string, unknown>;
-    expect(event.error).toBe("failed with Bearer <redacted>");
-    expect(event.usage).toEqual({ input: 1 });
+    expect(event.error).toBeTypeOf("string");
+    expect(event.error).toContain("failed with Bearer <redacted> and ");
+    expect(event.error).not.toContain(bareGoogleKey);
+    expect(event.usage).toEqual({ input: 1, diagnosticText: expect.any(String) });
+    expect((event.usage as { diagnosticText?: string }).diagnosticText).not.toBe(bareGithubKey);
+    expect((event.usage as { diagnosticText?: string }).diagnosticText).not.toContain(
+      bareGithubKey,
+    );
+    const serialized = JSON.stringify(event);
+    expect(serialized).not.toContain(bareGithubKey);
+    expect(serialized).not.toContain(bareGoogleKey);
   });
 
-  it("honors diagnostics.providerPayloadLog for non-Anthropic request and response logs", async () => {
+  it("records the final replacement payload returned by downstream hooks", async () => {
     const lines: string[] = [];
     const logger = createAnthropicPayloadLogger({
-      cfg: {
-        diagnostics: {
-          providerPayloadLog: {
-            enabled: true,
-          },
-        },
-      },
-      env: {},
+      env: { OPENCLAW_ANTHROPIC_PAYLOAD_LOG: "1" },
       writer: {
         filePath: "memory",
         write: (line) => lines.push(line),
+        flush: async () => undefined,
       },
     });
-    expect(logger).not.toBeNull();
-
-    const payload = {
-      input: [{ role: "user", content: "hello" }],
-      apiKey: "sk-request-secret",
-    };
-    const streamFn: StreamFn = ((model, __, options) => {
-      options?.onPayload?.(payload, model);
+    const streamFn: StreamFn = (async (model, __, options) => {
+      await options?.onPayload?.({ system: "before" }, model);
       return {} as never;
     }) as StreamFn;
 
     const wrapped = logger?.wrapStreamFn(streamFn);
-    await wrapped?.({ api: "openai-responses" } as never, { messages: [] } as never, {});
-    logger?.recordUsage([
-      {
-        role: "assistant",
-        content: [{ type: "text", text: "response" }],
-        usage: { input: 10, output: 2 },
-        token: "assistant-secret-token",
-      } as never,
-    ]);
+    await wrapped?.({ api: "anthropic-messages" } as never, { messages: [] } as never, {
+      onPayload: () => ({ system: "after" }),
+    });
 
-    const events = lines.map((line) => JSON.parse(line.trim()) as Record<string, unknown>);
-    expect(events.map((event) => event.stage)).toEqual(["request", "response", "usage"]);
-    expect(events[0]?.payload).toEqual({
-      input: [{ role: "user", content: "hello" }],
-    });
-    expect(events[1]?.response).toEqual({
-      role: "assistant",
-      content: [{ type: "text", text: "response" }],
-      usage: { input: 10, output: 2 },
-    });
-    expect(events[1]?.responseDigest).toBeDefined();
-    expect(events[2]?.usage).toEqual({ input: 10, output: 2 });
+    const event = JSON.parse(lines[0]?.trim() ?? "{}") as Record<string, unknown>;
+    expect(event.payload).toEqual({ system: "after" });
   });
 
   it("keeps legacy Anthropic env logging scoped to anthropic-messages models", async () => {
@@ -154,6 +156,7 @@ describe("createAnthropicPayloadLogger", () => {
       writer: {
         filePath: "memory",
         write: (line) => lines.push(line),
+        flush: async () => undefined,
       },
     });
     const streamFn: StreamFn = ((model, __, options) => {

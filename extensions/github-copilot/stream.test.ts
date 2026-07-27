@@ -1,11 +1,8 @@
+// Github Copilot tests cover stream plugin behavior.
+import type { Context } from "openclaw/plugin-sdk/llm";
+import { buildCopilotIdeHeaders, COPILOT_INTEGRATION_ID } from "openclaw/plugin-sdk/provider-auth";
 import { describe, expect, it, vi } from "vitest";
-import { buildCopilotDynamicHeaders } from "./stream.js";
-import {
-  wrapCopilotAnthropicStream,
-  wrapCopilotOpenAICompletionsStream,
-  wrapCopilotOpenAIResponsesStream,
-  wrapCopilotProviderStream,
-} from "./stream.js";
+import { wrapCopilotAnthropicStream, wrapCopilotProviderStream } from "./stream.js";
 
 function requireStreamFn(streamFn: ReturnType<typeof wrapCopilotProviderStream>) {
   expect(streamFn).toBeTypeOf("function");
@@ -27,8 +24,21 @@ function requireFirstStreamOptions(mock: ReturnType<typeof vi.fn>, label: string
   return options as { headers?: Record<string, unknown>; onPayload?: unknown };
 }
 
+function buildExpectedCopilotHeaders(
+  initiator: "agent" | "user",
+  hasImages: boolean,
+): Record<string, string> {
+  return {
+    ...buildCopilotIdeHeaders(),
+    "Copilot-Integration-Id": COPILOT_INTEGRATION_ID,
+    "Openai-Organization": "github-copilot",
+    "x-initiator": initiator,
+    ...(hasImages ? { "Copilot-Vision-Request": "true" } : {}),
+  };
+}
+
 describe("wrapCopilotAnthropicStream", () => {
-  it("adds Copilot headers and Anthropic cache markers for Claude payloads", () => {
+  it("adds Copilot headers, strips thinking replay, and marks cache for Claude payloads", () => {
     const payloads: Array<{
       messages: Array<Record<string, unknown>>;
     }> = [];
@@ -38,7 +48,11 @@ describe("wrapCopilotAnthropicStream", () => {
           { role: "system", content: "system prompt" },
           {
             role: "assistant",
-            content: [{ type: "thinking", text: "draft", cache_control: { type: "ephemeral" } }],
+            content: [
+              { type: "thinking", thinking: "draft", cache_control: { type: "ephemeral" } },
+              { type: "redacted_thinking", data: "opaque" },
+              { type: "text", text: "visible reply" },
+            ],
           },
         ],
       };
@@ -58,12 +72,9 @@ describe("wrapCopilotAnthropicStream", () => {
           { type: "image", image: "data:image/png;base64,abc" },
         ],
       },
-    ] as Parameters<typeof buildCopilotDynamicHeaders>[0]["messages"];
+    ] as Context["messages"];
     const context = { messages };
-    const expectedCopilotHeaders = buildCopilotDynamicHeaders({
-      messages,
-      hasImages: true,
-    });
+    const expectedCopilotHeaders = buildExpectedCopilotHeaders("user", true);
     expect(expectedCopilotHeaders["Accept-Encoding"]).toBe("identity");
 
     void wrapped(
@@ -97,8 +108,51 @@ describe("wrapCopilotAnthropicStream", () => {
       },
       {
         role: "assistant",
-        content: [{ type: "thinking", text: "draft" }],
+        content: [{ type: "text", text: "visible reply" }],
       },
+    ]);
+  });
+
+  it("keeps a non-empty assistant turn when Copilot replay only contains thinking", () => {
+    const payloads: Array<{
+      messages: Array<Record<string, unknown>>;
+    }> = [];
+    const baseStreamFn = vi.fn((model, _context, options) => {
+      const payload = {
+        messages: [
+          { role: "user", content: "use the tool result" },
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "private" },
+              { type: "redacted_thinking", data: "opaque" },
+            ],
+          },
+          { role: "user", content: [{ type: "tool_result", content: "done" }] },
+        ],
+      };
+      options?.onPayload?.(payload, model);
+      payloads.push(payload);
+      return {
+        async *[Symbol.asyncIterator]() {},
+      } as never;
+    });
+
+    const wrapped = requireStreamFn(wrapCopilotAnthropicStream(baseStreamFn));
+    void wrapped(
+      {
+        provider: "github-copilot",
+        api: "anthropic-messages",
+        id: "claude-haiku-4.5",
+      } as never,
+      { messages: [{ role: "user", content: "hi" }] } as never,
+      {},
+    );
+
+    expect(payloads[0]?.messages).toEqual([
+      { role: "user", content: "use the tool result" },
+      { role: "assistant", content: [{ type: "text", text: "[assistant reasoning omitted]" }] },
+      { role: "user", content: [{ type: "tool_result", content: "done" }] },
     ]);
   });
 
@@ -144,7 +198,7 @@ describe("wrapCopilotAnthropicStream", () => {
       } as never;
     });
 
-    const wrapped = requireStreamFn(wrapCopilotOpenAIResponsesStream(baseStreamFn));
+    const wrapped = requireStreamFn(wrapCopilotProviderStream({ streamFn: baseStreamFn } as never));
     const messages = [
       {
         role: "toolResult",
@@ -153,11 +207,8 @@ describe("wrapCopilotAnthropicStream", () => {
           { type: "image", image: "data:image/png;base64,abc" },
         ],
       },
-    ] as Parameters<typeof buildCopilotDynamicHeaders>[0]["messages"];
-    const expectedCopilotHeaders = buildCopilotDynamicHeaders({
-      messages,
-      hasImages: true,
-    });
+    ] as Context["messages"];
+    const expectedCopilotHeaders = buildExpectedCopilotHeaders("agent", true);
 
     void wrapped(
       {
@@ -189,6 +240,8 @@ describe("wrapCopilotAnthropicStream", () => {
     ]);
     expect(payloads[0]?.input[1]?.id).toBeUndefined();
     expect(payloads[0]?.input[2]?.id).toMatch(/^msg_[a-f0-9]{16}$/);
+    expect(payloads[0]?.input[0]).not.toHaveProperty("encrypted_content");
+    expect(payloads[0]?.input[1]).not.toHaveProperty("encrypted_content");
   });
 
   it("rewrites Copilot Responses IDs returned by an existing payload hook", async () => {
@@ -201,7 +254,7 @@ describe("wrapCopilotAnthropicStream", () => {
       } as never;
     });
 
-    const wrapped = requireStreamFn(wrapCopilotOpenAIResponsesStream(baseStreamFn));
+    const wrapped = requireStreamFn(wrapCopilotProviderStream({ streamFn: baseStreamFn } as never));
 
     await wrapped(
       {
@@ -222,7 +275,7 @@ describe("wrapCopilotAnthropicStream", () => {
 
   it("adds Copilot headers for Chat Completions models", () => {
     const baseStreamFn = vi.fn(() => ({ async *[Symbol.asyncIterator]() {} }) as never);
-    const wrapped = requireStreamFn(wrapCopilotOpenAICompletionsStream(baseStreamFn));
+    const wrapped = requireStreamFn(wrapCopilotProviderStream({ streamFn: baseStreamFn } as never));
     const messages = [
       {
         role: "user",
@@ -231,11 +284,8 @@ describe("wrapCopilotAnthropicStream", () => {
           { type: "image", data: "abc", mimeType: "image/png" },
         ],
       },
-    ] as Parameters<typeof buildCopilotDynamicHeaders>[0]["messages"];
-    const expectedCopilotHeaders = buildCopilotDynamicHeaders({
-      messages,
-      hasImages: true,
-    });
+    ] as Context["messages"];
+    const expectedCopilotHeaders = buildExpectedCopilotHeaders("user", true);
 
     void wrapped(
       {

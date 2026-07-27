@@ -1,13 +1,22 @@
-import { describe, expect, it } from "vitest";
+/** Covers bundled plugin compatibility modes and their activation defaults. */
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import { withBundledPluginEnablementCompat } from "./bundled-compat.js";
 
+const readBundledDiscoveryMode = vi.hoisted(() => vi.fn<() => "compat" | "allowlist">());
+
+vi.mock("./bundled-discovery-state.js", () => ({ readBundledDiscoveryMode }));
+
 describe("withBundledPluginEnablementCompat", () => {
+  beforeEach(() => {
+    readBundledDiscoveryMode.mockReturnValue("allowlist");
+  });
+
   it("honors bundledDiscovery compat before plugin allowlists", () => {
+    readBundledDiscoveryMode.mockReturnValue("compat");
     const config = {
       plugins: {
         allow: ["discord"],
-        bundledDiscovery: "compat",
       },
     } satisfies OpenClawConfig;
 
@@ -27,7 +36,6 @@ describe("withBundledPluginEnablementCompat", () => {
     const config = {
       plugins: {
         allow: ["openai"],
-        bundledDiscovery: "allowlist",
       },
     } satisfies OpenClawConfig;
 
@@ -42,10 +50,10 @@ describe("withBundledPluginEnablementCompat", () => {
   });
 
   it("adds compat allow entries for plugins that already have entries", () => {
+    readBundledDiscoveryMode.mockReturnValue("compat");
     const config = {
       plugins: {
         allow: ["openai"],
-        bundledDiscovery: "compat",
         entries: {
           deepseek: { enabled: true },
         },

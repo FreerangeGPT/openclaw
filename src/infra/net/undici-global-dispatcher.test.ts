@@ -1,3 +1,5 @@
+// Covers global Undici dispatcher policy: proxy bootstrap, stream timeouts,
+// WSL2 address-family handling, and managed-dispatcher wrapping.
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -162,7 +164,6 @@ import {
   resolveEnvHttpProxyUrl,
 } from "./proxy-env.js";
 import {
-  resetActiveManagedProxyStateForTests,
   registerActiveManagedProxyUrl,
   stopActiveManagedProxyRegistration,
 } from "./proxy/active-proxy-state.js";
@@ -213,7 +214,6 @@ describe("ensureGlobalUndiciStreamTimeouts", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetGlobalUndiciStreamTimeoutsForTests();
-    resetActiveManagedProxyStateForTests();
     setCurrentDispatcher(new Agent());
     getDefaultAutoSelectFamily.mockReturnValue(undefined);
     vi.mocked(isWSL2Sync).mockReturnValue(false);
@@ -643,7 +643,6 @@ describe("ensureGlobalUndiciEnvProxyDispatcher", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetGlobalUndiciStreamTimeoutsForTests();
-    resetActiveManagedProxyStateForTests();
     setCurrentDispatcher(new Agent());
     vi.mocked(isWSL2Sync).mockReturnValue(false);
     vi.mocked(hasEnvHttpProxyAgentConfigured).mockReturnValue(false);

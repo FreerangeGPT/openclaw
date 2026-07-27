@@ -1,3 +1,4 @@
+// Status-all channels tests cover plugin-generic channel rows, account inspection, and load failure reporting.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { buildChannelsTable } from "./channels.js";
 
@@ -119,6 +120,52 @@ describe("buildChannelsTable", () => {
     const detailRow = table.details[0]?.rows[0];
     expect(detailRow?.Status).toBe("UNKNOWN");
     expect(detailRow?.Notes).toContain("credential not checked");
+  });
+
+  it("formats human phone identity while preserving raw account ids", async () => {
+    const phonePlugin = {
+      id: "signal",
+      meta: { label: "Signal" },
+      config: {
+        listAccountIds: () => ["work"],
+        defaultAccountId: () => "work",
+        formatAllowFrom: ({ allowFrom }: { allowFrom: Array<string | number> }) =>
+          allowFrom.map((entry) => String(entry).replace(/^\+/u, "")),
+      },
+      configSchema: {
+        schema: { type: "object" },
+        uiHints: { allowFrom: { presentation: "phone-number" } },
+      },
+      status: {
+        buildChannelSummary: async () => ({
+          statusState: "linked",
+          self: { e164: "+15551234567" },
+        }),
+      },
+    };
+    mocks.listReadOnlyChannelPluginsForConfig.mockReturnValue([phonePlugin]);
+    mocks.resolveInspectedChannelAccount.mockResolvedValue({
+      account: {
+        name: "+12133734253",
+        allowFrom: ["+442079460018", "bot-token"],
+      },
+      enabled: true,
+      configured: true,
+    });
+
+    const table = await buildChannelsTable({ channels: { signal: { enabled: true } } });
+
+    expect(table.rows).toContainEqual(
+      expect.objectContaining({
+        id: "signal",
+        detail: "linked · +1 555 123 4567 (id: +15551234567)",
+      }),
+    );
+    expect(table.details[0]?.rows[0]).toEqual({
+      Account: "work (+12133734253)",
+      Status: "OK",
+      Notes: "allow:+44 20 7946 0018 (id: 442079460018),bot-token",
+    });
   });
 
   it("shows configured official external channels when the plugin is missing", async () => {

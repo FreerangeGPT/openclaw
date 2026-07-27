@@ -1,3 +1,4 @@
+// Feishu plugin module implements monitor.bot menu.lifecycle support behavior.
 import { createRuntimeEnv } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "./lifecycle.test-support.js";
@@ -24,7 +25,6 @@ const {
   createEventDispatcherMock,
   createFeishuReplyDispatcherMock,
   dispatchReplyFromConfigMock,
-  finalizeInboundContextMock,
   resolveAgentRouteMock,
   resolveBoundConversationMock,
   sendCardFeishuMock,
@@ -112,11 +112,8 @@ describe("Feishu bot-menu lifecycle", () => {
       replyText: "menu reply once",
     });
 
-    withReplyDispatcherMock.mockImplementation(async ({ run }) => await run());
-
     installFeishuLifecycleReplyRuntime({
       resolveAgentRouteMock,
-      finalizeInboundContextMock,
       dispatchReplyFromConfigMock,
       withReplyDispatcherMock,
       storePath: "/tmp/feishu-bot-menu-sessions.json",
@@ -180,13 +177,14 @@ describe("Feishu bot-menu lifecycle", () => {
         replyToMessageId: undefined,
       }),
     );
-    expect(finalizeInboundContextMock).toHaveBeenCalledWith(
+    expect(dispatchReplyFromConfigMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        AccountId: "acct-menu",
-        SessionKey: "agent:bound-agent:feishu:direct:ou_user1",
-        MessageSid: "bot-menu:quick-actions:1700000000001",
+        ctx: expect.objectContaining({
+          AccountId: "acct-menu",
+          SessionKey: "agent:bound-agent:feishu:direct:ou_user1",
+          MessageSid: "bot-menu:quick-actions:1700000000001",
+        }),
       }),
-      undefined,
     );
     expect(touchBindingMock).toHaveBeenCalledWith("binding-menu");
 

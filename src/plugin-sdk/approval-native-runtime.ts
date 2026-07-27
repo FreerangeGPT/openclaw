@@ -1,9 +1,13 @@
+/**
+ * Runtime SDK subpath for native approval routing, target matching, and forwarding gates.
+ */
 export {
   createChannelApprovalForwardingEvaluator,
   createChannelApproverDmTargetResolver,
   createChannelNativeOriginTargetResolver,
   createNativeApprovalChannelRouteGates,
   createNativeApprovalForwardingFallbackSuppressor,
+  createNativeApprovalMessagingTargetResolvers,
   nativeApprovalTargetsMatch,
   resolveApprovalKind,
   shouldSuppressLocalNativeExecApprovalPrompt,

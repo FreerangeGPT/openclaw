@@ -1,3 +1,4 @@
+// Verifies task-flow owner access checks for parent and child sessions.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   findLatestTaskFlowForOwner,
@@ -5,12 +6,12 @@ import {
   listTaskFlowsForOwner,
   resolveTaskFlowForLookupTokenForOwner,
 } from "./task-flow-owner-access.js";
-import {
-  createManagedTaskFlow as createManagedTaskFlowOrNull,
-  resetTaskFlowRegistryForTests,
-} from "./task-flow-registry.js";
-import { configureTaskFlowRegistryRuntime } from "./task-flow-registry.store.js";
+import { createManagedTaskFlow as createManagedTaskFlowOrNull } from "./task-flow-registry.js";
 import type { TaskFlowRecord } from "./task-flow-registry.types.js";
+import {
+  configureTaskFlowRegistryRuntime,
+  resetTaskFlowRegistryForTests,
+} from "./task-runtime.test-helpers.js";
 
 function createManagedTaskFlow(
   params: Parameters<typeof createManagedTaskFlowOrNull>[0],

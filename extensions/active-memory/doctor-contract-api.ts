@@ -1,7 +1,14 @@
+/**
+ * Doctor migration contract for Active Memory state. It moves legacy per-session
+ * toggle JSON into the plugin state keyed store used by current runtimes.
+ */
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { PluginDoctorStateMigration } from "openclaw/plugin-sdk/runtime-doctor";
+import {
+  archiveLegacyStateSource,
+  type PluginDoctorStateMigration,
+} from "openclaw/plugin-sdk/runtime-doctor";
 
 type ActiveMemoryToggleEntry = {
   sessionKey: string;
@@ -21,13 +28,8 @@ function activeMemoryToggleKey(sessionKey: string): string {
   return crypto.createHash("sha256").update(sessionKey, "utf8").digest("hex");
 }
 
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    const stat = await fs.stat(filePath);
-    return stat.isFile();
-  } catch {
-    return false;
-  }
+function normalizeLegacyUpdatedAt(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : Date.now();
 }
 
 async function readLegacyToggleEntries(filePath: string): Promise<ActiveMemoryToggleEntry[]> {
@@ -48,10 +50,7 @@ async function readLegacyToggleEntries(filePath: string): Promise<ActiveMemoryTo
       if ((value as { disabled?: unknown }).disabled !== true) {
         continue;
       }
-      const updatedAt =
-        typeof (value as { updatedAt?: unknown }).updatedAt === "number"
-          ? (value as { updatedAt: number }).updatedAt
-          : Date.now();
+      const updatedAt = normalizeLegacyUpdatedAt((value as { updatedAt?: unknown }).updatedAt);
       entries.push({ sessionKey, disabled: true, updatedAt });
     }
     return entries;
@@ -60,27 +59,7 @@ async function readLegacyToggleEntries(filePath: string): Promise<ActiveMemoryTo
   }
 }
 
-async function archiveLegacySource(params: {
-  filePath: string;
-  label: string;
-  changes: string[];
-  warnings: string[];
-}): Promise<void> {
-  const archivedPath = `${params.filePath}.migrated`;
-  if (await fileExists(archivedPath)) {
-    params.warnings.push(
-      `Left migrated ${params.label} source in place because ${archivedPath} already exists`,
-    );
-    return;
-  }
-  try {
-    await fs.rename(params.filePath, archivedPath);
-    params.changes.push(`Archived ${params.label} legacy source -> ${archivedPath}`);
-  } catch (err) {
-    params.warnings.push(`Failed archiving ${params.label} legacy source: ${String(err)}`);
-  }
-}
-
+/** State migrations exposed to OpenClaw doctor for Active Memory. */
 export const stateMigrations: PluginDoctorStateMigration[] = [
   {
     id: "active-memory-session-toggles-json-to-plugin-state",
@@ -134,7 +113,7 @@ export const stateMigrations: PluginDoctorStateMigration[] = [
           `Migrated ${imported} Active Memory session toggle ${imported === 1 ? "entry" : "entries"} -> plugin state`,
         );
       }
-      await archiveLegacySource({
+      await archiveLegacyStateSource({
         filePath,
         label: "Active Memory session toggles",
         changes,

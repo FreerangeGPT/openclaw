@@ -1,3 +1,5 @@
+import { resolveDefaultAgentId } from "openclaw/plugin-sdk/agent-runtime";
+// Feishu plugin module implements thread bindings behavior.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
   resolveThreadBindingIdleTimeoutMsForChannel,
@@ -185,7 +187,11 @@ export function createFeishuThreadBindingManager(params: {
         agentId:
           typeof metadata?.agentId === "string" && metadata.agentId.trim()
             ? metadata.agentId.trim()
-            : (existingLocal?.agentId ?? resolveAgentIdFromSessionKey(normalizedTargetSessionKey)),
+            : (existingLocal?.agentId ??
+              resolveAgentIdFromSessionKey(
+                normalizedTargetSessionKey,
+                resolveDefaultAgentId(params.cfg),
+              )),
         label:
           typeof metadata?.label === "string" && metadata.label.trim()
             ? metadata.label.trim()
@@ -328,4 +334,3 @@ export const testing = {
     getState().bindingsByAccountConversation.clear();
   },
 };
-export { testing as __testing };

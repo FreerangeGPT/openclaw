@@ -1,3 +1,4 @@
+// Openai plugin module implements tts behavior.
 import {
   assertOkOrThrowProviderError,
   resolveProviderRequestHeaders,
@@ -65,7 +66,7 @@ export function isValidOpenAIVoice(voice: string, baseUrl?: string): voice is Op
   return OPENAI_TTS_VOICES.includes(voice as OpenAiTtsVoice);
 }
 
-export function resolveOpenAITtsInstructions(
+function resolveOpenAITtsInstructions(
   model: string,
   instructions?: string,
   baseUrl?: string,

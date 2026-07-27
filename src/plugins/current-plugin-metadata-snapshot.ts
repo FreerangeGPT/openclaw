@@ -1,7 +1,8 @@
+/** Tracks the current plugin metadata snapshot for control-plane lookups. */
 import { setCurrentManifestModelIdNormalizationRecords } from "@openclaw/model-catalog-core/provider-model-id-normalization";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
-  clearCurrentPluginMetadataSnapshotState,
+  currentPluginMetadataConfigIdentityCache,
   getCurrentPluginMetadataSnapshotState,
   setCurrentPluginMetadataSnapshotState,
 } from "./current-plugin-metadata-state.js";
@@ -10,7 +11,6 @@ import {
   resolvePluginControlPlaneFingerprint,
   type ResolvePluginControlPlaneContextParams,
 } from "./plugin-control-plane-context.js";
-import { registerPluginMetadataProcessMemoLifecycleClear } from "./plugin-metadata-lifecycle.js";
 import type {
   PluginMetadataSnapshot,
   PluginMetadataSnapshotPluginIdScope,
@@ -18,13 +18,9 @@ import type {
 import { normalizePluginIdScope, serializePluginIdScope } from "./plugin-scope.js";
 
 type CurrentPluginMetadataSnapshotState = ReturnType<typeof getCurrentPluginMetadataSnapshotState>;
-let currentPluginMetadataConfigIdentityCache = new WeakSet<OpenClawConfig>();
+export { clearCurrentPluginMetadataSnapshot } from "./current-plugin-metadata-state.js";
 
-registerPluginMetadataProcessMemoLifecycleClear(() => {
-  setCurrentManifestModelIdNormalizationRecords(undefined);
-});
-
-export function resolvePluginMetadataControlPlaneFingerprint(
+function resolvePluginMetadataControlPlaneFingerprint(
   config?: OpenClawConfig,
   options: Omit<ResolvePluginControlPlaneContextParams, "config"> = {},
 ): string {
@@ -32,12 +28,6 @@ export function resolvePluginMetadataControlPlaneFingerprint(
     config,
     ...options,
   });
-}
-
-export function isReusableCurrentPluginMetadataSnapshot(
-  _snapshot: PluginMetadataSnapshot,
-): boolean {
-  return true;
 }
 
 // Single-slot Gateway-owned handoff. Replace or clear it at lifecycle boundaries;
@@ -51,7 +41,7 @@ export function setCurrentPluginMetadataSnapshot(
     workspaceDir?: string;
   } = {},
 ): void {
-  currentPluginMetadataConfigIdentityCache = new WeakSet();
+  currentPluginMetadataConfigIdentityCache.clear();
   const compatiblePolicyHashes = snapshot
     ? options.compatibleConfigs?.map((config) => resolveInstalledPluginIndexPolicyHash(config))
     : undefined;
@@ -116,12 +106,6 @@ export function setCurrentPluginMetadataSnapshot(
   }
 }
 
-export function clearCurrentPluginMetadataSnapshot(): void {
-  currentPluginMetadataConfigIdentityCache = new WeakSet();
-  setCurrentManifestModelIdNormalizationRecords(undefined);
-  clearCurrentPluginMetadataSnapshotState();
-}
-
 export function captureCurrentPluginMetadataSnapshotState(): CurrentPluginMetadataSnapshotState {
   return getCurrentPluginMetadataSnapshotState();
 }
@@ -129,7 +113,7 @@ export function captureCurrentPluginMetadataSnapshotState(): CurrentPluginMetada
 export function restoreCurrentPluginMetadataSnapshotState(
   state: CurrentPluginMetadataSnapshotState,
 ): void {
-  currentPluginMetadataConfigIdentityCache = new WeakSet();
+  currentPluginMetadataConfigIdentityCache.clear();
   const snapshot = state.snapshot as PluginMetadataSnapshot | undefined;
   const defaultDiscoveryConfigFingerprint = snapshot
     ? resolvePluginMetadataControlPlaneFingerprint(

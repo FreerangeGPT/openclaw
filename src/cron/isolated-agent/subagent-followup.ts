@@ -1,10 +1,12 @@
+/** Reads or waits for descendant subagent summaries after isolated cron orchestration. */
 import { readLatestAssistantReply, waitForAgentRunsToDrain } from "../../agents/run-wait.js";
 import { listDescendantRunsForRequester } from "../../agents/subagent-registry-read.js";
 import { SILENT_REPLY_TOKEN } from "../../auto-reply/tokens.js";
+import { isFastTestRuntimeEnv } from "../../infra/env.js";
 import { isLikelyInterimCronMessage } from "./subagent-followup-hints.js";
 
 function resolveCronSubagentTimings() {
-  const fastTestMode = process.env.OPENCLAW_TEST_FAST === "1";
+  const fastTestMode = isFastTestRuntimeEnv();
   return {
     waitMinMs: fastTestMode ? 10 : 30_000,
     finalReplyGraceMs: fastTestMode ? 50 : 5_000,
@@ -42,6 +44,8 @@ export async function readDescendantSubagentFallbackReply(params: {
   }
 
   const replies: string[] = [];
+  // Limit fallback synthesis to the latest few children so a noisy run does not
+  // flood the cron announce with stale descendant output.
   const latestRuns = [...latestByChild.values()]
     .toSorted((a, b) => (a.endedAt ?? 0) - (b.endedAt ?? 0))
     .slice(-4);
@@ -51,7 +55,7 @@ export async function readDescendantSubagentFallbackReply(params: {
       typeof frozenResultText === "string" && frozenResultText.trim()
         ? frozenResultText.trim()
         : undefined;
-    const usesInternalTranscript = typeof entry.execution?.transcriptFile === "string";
+    const usesInternalTranscript = entry.execution?.transcriptTarget !== undefined;
     let reply = usesInternalTranscript ? frozenReply : undefined;
     if (!reply && !usesInternalTranscript) {
       reply = (await readLatestAssistantReply({ sessionKey: entry.childSessionKey }))?.trim();
@@ -128,6 +132,8 @@ export async function waitForDescendantSubagentSummary(params: {
       latest.toUpperCase() !== SILENT_REPLY_TOKEN.toUpperCase() &&
       (latest !== initialReply || !isLikelyInterimCronMessage(latest))
     ) {
+      // Ignore the original interim acknowledgement; only a new synthesis or a
+      // non-interim reply should replace descendant fallback text.
       return latest;
     }
     return undefined;

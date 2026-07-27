@@ -1,3 +1,8 @@
+/**
+ * Tests filesystem tools when workspaceOnly is disabled.
+ * Confirms host read/write/edit and memory append wrappers allow intended
+ * outside-workspace paths.
+ */
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -171,6 +176,7 @@ describe("FS tools with workspaceOnly=false", () => {
         },
       ],
       details: {
+        kind: "not_found",
         status: "not_found",
         path: "memory/2026-05-15.md",
         optional: true,
@@ -239,7 +245,6 @@ describe("FS tools with workspaceOnly=false", () => {
     await fs.writeFile(allowedAbsolutePath, "seed");
 
     const tools = [
-      createOpenClawReadTool(createReadTool(workspaceDir) as unknown as AnyAgentTool),
       wrapToolMemoryFlushAppendOnlyWrite(createHostWorkspaceWriteTool(workspaceDir), {
         root: workspaceDir,
         relativePath: allowedRelativePath,
@@ -247,7 +252,7 @@ describe("FS tools with workspaceOnly=false", () => {
     ];
 
     const writeTool = requireTool(tools, "write");
-    expect(tools.map((tool) => tool.name).toSorted()).toEqual(["read", "write"]);
+    expect(tools.map((tool) => tool.name)).toEqual(["write"]);
 
     await expect(
       writeTool.execute("test-call-memory-deny", {

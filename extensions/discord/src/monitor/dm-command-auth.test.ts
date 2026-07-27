@@ -1,3 +1,4 @@
+// Discord tests cover dm command auth plugin behavior.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   resolveDiscordDmCommandAccess,
@@ -69,22 +70,6 @@ describe("resolveDiscordTextCommandAccess", () => {
     });
     expect(result.authorized).toBe(false);
     expect(result.shouldBlockControlCommand).toBe(true);
-  });
-
-  it("preserves configured mode when access groups are disabled", async () => {
-    const result = await resolveDiscordTextCommandAccess({
-      accountId: "default",
-      sender,
-      ownerAllowFrom: [],
-      memberAccessConfigured: false,
-      memberAllowed: false,
-      allowNameMatching: false,
-      cfg: { commands: { useAccessGroups: false } },
-      allowTextCommands: true,
-      hasControlCommand: true,
-    });
-    expect(result.authorized).toBe(true);
-    expect(result.shouldBlockControlCommand).toBe(false);
   });
 });
 
@@ -282,7 +267,7 @@ describe("resolveDiscordDmCommandAccess", () => {
       configuredAllowFrom: [],
       sender,
       allowNameMatching: false,
-      cfg: { commands: { useAccessGroups: false } },
+      cfg: {},
       readStoreAllowFrom: async () => [],
     });
 

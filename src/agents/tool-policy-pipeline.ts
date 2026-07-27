@@ -1,3 +1,8 @@
+/**
+ * Applies layered tool policy in runtime resolution order. Policy diagnostics
+ * stay tied to the layer that introduced them, while plugin groups are
+ * expanded only after unknown core/plugin entries are classified.
+ */
 import { filterToolsByPolicy } from "./agent-tools.policy.js";
 import type { AnyAgentTool } from "./agent-tools.types.js";
 import { isKnownCoreToolId } from "./tool-catalog.js";
@@ -7,6 +12,7 @@ import {
   buildPluginToolGroups,
   expandPolicyWithPluginGroups,
   normalizeToolName,
+  type DeclaredToolAllowlistContext,
   type ToolPolicyLike,
 } from "./tool-policy.js";
 
@@ -29,6 +35,7 @@ function rememberToolPolicyWarning(warning: string): boolean {
   return true;
 }
 
+/** One named policy layer in the effective runtime tool policy pipeline. */
 export type ToolPolicyPipelineStep = {
   policy: ToolPolicyLike | undefined;
   label: string;
@@ -38,6 +45,15 @@ export type ToolPolicyPipelineStep = {
   unavailableCoreToolReason?: string;
 };
 
+/** One policy application, exposed for diagnostics that need exclusion provenance. */
+export type ToolPolicyFilterEvent<TTool extends { name: string } = AnyAgentTool> = {
+  step: ToolPolicyPipelineStep;
+  policy: ToolPolicyLike;
+  before: readonly TTool[];
+  after: readonly TTool[];
+};
+
+/** Builds the default profile, provider, agent, group, and sender policy layers. */
 export function buildDefaultToolPolicyPipelineSteps(params: {
   profilePolicy?: ToolPolicyLike;
   profile?: string;
@@ -115,13 +131,16 @@ export function buildDefaultToolPolicyPipelineSteps(params: {
   ];
 }
 
-export function applyToolPolicyPipeline(params: {
-  tools: AnyAgentTool[];
-  toolMeta: (tool: AnyAgentTool) => { pluginId: string } | undefined;
+/** Applies configured policy layers to a tool list and emits deduped warnings/audit events. */
+export function applyToolPolicyPipeline<TTool extends { name: string }>(params: {
+  tools: TTool[];
+  toolMeta: (tool: TTool) => { pluginId: string } | undefined;
   warn: (message: string) => void;
   steps: ToolPolicyPipelineStep[];
   auditLogLevel?: ToolPolicyAuditLogLevel;
-}): AnyAgentTool[] {
+  declaredToolAllowlist?: DeclaredToolAllowlistContext;
+  onFilter?: (event: ToolPolicyFilterEvent<TTool>) => void;
+}): TTool[] {
   const coreToolNames = new Set(
     params.tools
       .filter((tool) => !params.toolMeta(tool))
@@ -142,7 +161,13 @@ export function applyToolPolicyPipeline(params: {
 
     let policy: ToolPolicyLike | undefined = step.policy;
     if (step.stripPluginOnlyAllowlist) {
-      const resolved = analyzeAllowlistByToolType(policy, pluginGroups, coreToolNames);
+      // Plugin-only allowlists are valid for deferred tools; warn only for entries that cannot match.
+      const resolved = analyzeAllowlistByToolType(
+        policy,
+        pluginGroups,
+        coreToolNames,
+        params.declaredToolAllowlist,
+      );
       if (resolved.unknownAllowlist.length > 0) {
         const unavailableCoreWarningAllowlist = new Set(
           (step.suppressUnavailableCoreToolWarningAllowlist ?? []).map((entry) =>
@@ -187,6 +212,7 @@ export function applyToolPolicyPipeline(params: {
     }
     const before = filtered;
     filtered = filterToolsByPolicy(before, expanded);
+    params.onFilter?.({ step, policy: expanded, before, after: filtered });
     auditToolPolicyFilter({
       stepLabel: step.label,
       policy: expanded,
@@ -230,7 +256,14 @@ function describeUnknownAllowlistSuffix(params: {
   return preface ? `${preface} ${detail}` : detail;
 }
 
-export function resetToolPolicyWarningCacheForTest(): void {
+/** Clears process-local warning dedupe state between tests. */
+function resetToolPolicyWarningCacheForTest(): void {
   seenToolPolicyWarnings.clear();
   toolPolicyWarningOrder.length = 0;
+}
+
+if (process.env.VITEST || process.env.NODE_ENV === "test") {
+  (globalThis as Record<PropertyKey, unknown>)[
+    Symbol.for("openclaw.toolPolicyWarningCacheTestApi")
+  ] = { resetToolPolicyWarningCacheForTest };
 }

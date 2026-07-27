@@ -1,9 +1,12 @@
-import { beforeAll, describe, expect, it } from "vitest";
+// Coverage for assembling provider-transformed embedded attempt system prompts.
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 let buildAttemptSystemPrompt: typeof import("./attempt-system-prompt.js").buildAttemptSystemPrompt;
+let prepareEmbeddedAttemptSystemPrompt: typeof import("./attempt-system-prompt-prepare.js").prepareEmbeddedAttemptSystemPrompt;
 
 beforeAll(async () => {
   ({ buildAttemptSystemPrompt } = await import("./attempt-system-prompt.js"));
+  ({ prepareEmbeddedAttemptSystemPrompt } = await import("./attempt-system-prompt-prepare.js"));
 });
 
 const baseProviderTransform = {
@@ -21,7 +24,24 @@ const transformProviderSystemPrompt: Parameters<
 >[0]["transformProviderSystemPrompt"] = ({ context }) => context.systemPrompt;
 
 describe("buildAttemptSystemPrompt", () => {
+  it("does not invoke ambient contributors during settled finalization", async () => {
+    const getProviderRuntimeHandle = vi.fn();
+    const markStage = vi.fn();
+    const result = await prepareEmbeddedAttemptSystemPrompt({
+      attempt: { operation: "settled-tool-finalization" },
+      getProviderRuntimeHandle,
+      markStage,
+    } as never);
+
+    expect(result.systemPromptText).toBe("");
+    expect(result.runtimeChannel).toBeUndefined();
+    expect(getProviderRuntimeHandle).not.toHaveBeenCalled();
+    expect(markStage).toHaveBeenCalledWith("system-prompt");
+  });
+
   it("injects workspace identity context", () => {
+    // Workspace identity files are part of the base system prompt and must
+    // survive provider transformation.
     const result = buildAttemptSystemPrompt({
       isRawModelRun: false,
       transformProviderSystemPrompt,
@@ -99,7 +119,7 @@ describe("buildAttemptSystemPrompt", () => {
 
     expect(result.systemPrompt).toContain("Current model identity: openai/gpt-5.5.");
     expect(result.systemPrompt).toContain("## Bootstrap Pending");
-    expect(result.systemPrompt).toContain("BOOTSTRAP.md is included below in Project Context");
+    expect(result.systemPrompt).toContain("BOOTSTRAP.md below; follow before normal reply.");
     expect(result.systemPrompt).toContain("## Bootstrap Context Notice");
     expect(result.systemPrompt).toContain("Bootstrap context was truncated.");
     expect(result.systemPrompt).toContain("# Project Context");
@@ -145,6 +165,8 @@ describe("buildAttemptSystemPrompt", () => {
   });
 
   it("omits system prompts for raw model probes", () => {
+    // Raw model probes still build a base prompt for diagnostics, but the final
+    // provider prompt must be empty.
     const result = buildAttemptSystemPrompt({
       isRawModelRun: true,
       transformProviderSystemPrompt,
@@ -172,7 +194,7 @@ describe("buildAttemptSystemPrompt", () => {
       providerTransform: baseProviderTransform,
     });
 
-    expect(result.baseSystemPrompt).toContain("BOOTSTRAP.md is included below in Project Context");
+    expect(result.baseSystemPrompt).toContain("BOOTSTRAP.md below; follow before normal reply.");
     expect(result.systemPrompt).toBe("");
   });
 });

@@ -12,7 +12,10 @@ import { resolveChannelStreamingChunkMode } from "../channels/streaming.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveAccountEntry } from "../routing/account-lookup.js";
 import { normalizeAccountId } from "../routing/session-key.js";
-import { chunkTextByBreakResolver } from "../shared/text-chunking.js";
+import {
+  avoidTrailingHighSurrogateBreak,
+  chunkTextByBreakResolver,
+} from "../shared/text-chunking.js";
 import { INTERNAL_MESSAGE_CHANNEL } from "../utils/message-channel-constants.js";
 
 export type TextChunkProvider = ChannelId;
@@ -31,12 +34,8 @@ const DEFAULT_CHUNK_MODE: ChunkMode = "length";
 
 type ProviderChunkConfig = {
   textChunkLimit?: number;
-  chunkMode?: ChunkMode;
   streaming?: unknown;
-  accounts?: Record<
-    string,
-    { textChunkLimit?: number; chunkMode?: ChunkMode; streaming?: unknown }
-  >;
+  accounts?: Record<string, { textChunkLimit?: number; streaming?: unknown }>;
 };
 
 function resolveChunkLimitForProvider(
@@ -98,7 +97,7 @@ function resolveChunkModeForProvider(
       return directMode;
     }
   }
-  return resolveChannelStreamingChunkMode(cfgSection) ?? cfgSection.chunkMode;
+  return resolveChannelStreamingChunkMode(cfgSection);
 }
 
 export function resolveChunkMode(
@@ -160,7 +159,10 @@ export function chunkByNewline(
       continue;
     }
 
-    const firstLimit = Math.max(1, maxLineLength - prefix.length);
+    // Back the head cut off to a code-point boundary so an over-long line never splits a surrogate
+    // pair; the recursive chunkText below is already surrogate-safe, only this first cut was raw.
+    const rawLimit = Math.max(1, maxLineLength - prefix.length);
+    const firstLimit = avoidTrailingHighSurrogateBreak(lineValue, 0, rawLimit);
     const first = lineValue.slice(0, firstLimit);
     chunks.push(prefix + first);
     const remaining = lineValue.slice(firstLimit);
@@ -198,8 +200,10 @@ export function chunkByParagraph(
   }
   const splitLongParagraphs = opts?.splitLongParagraphs !== false;
 
-  // Normalize to \n so blank line detection is consistent.
-  const normalized = text.replace(/\r\n?/g, "\n");
+  // U+2029 PARAGRAPH SEPARATOR maps to a blank-line boundary; U+2028 LINE
+  // SEPARATOR and CR/CRLF map to a single newline.
+  // Normalize in two steps so consecutive U+2028\u2029 also produces a blank line.
+  const normalized = text.replace(/\u2029/g, "\n\n").replace(/\r\n?|\u2028/g, "\n");
 
   // Fast-path: if there are no blank-line paragraph separators, do not split.
   // (We *do not* early-return based on `limit` — newline mode is about paragraph
@@ -450,13 +454,23 @@ export function chunkMarkdownText(text: string, limit: number): string[] {
         fenceAtBreak && fenceAtBreak.start === initialFence.start ? fenceAtBreak : undefined;
     }
 
+    const safeBreakIdx = avoidTrailingHighSurrogateBreak(text, start, breakIdx);
+    if (safeBreakIdx !== breakIdx) {
+      breakIdx = safeBreakIdx;
+      if (fenceToSplit) {
+        const fenceAtBreak = findFenceSpanAt(spans, breakIdx);
+        fenceToSplit =
+          fenceAtBreak && fenceAtBreak.start === fenceToSplit.start ? fenceAtBreak : undefined;
+      }
+    }
+
     const rawContent = text.slice(start, breakIdx);
     if (!rawContent) {
       break;
     }
 
     let rawChunk = `${reopenPrefix}${rawContent}`;
-    const brokeOnSeparator = breakIdx < text.length && /\s/.test(text[breakIdx]);
+    const brokeOnSeparator = breakIdx < text.length && /\s/.test(text.charAt(breakIdx));
     let nextStart = Math.min(text.length, breakIdx + (brokeOnSeparator ? 1 : 0));
 
     if (fenceToSplit) {
@@ -515,7 +529,7 @@ function scanParenAwareBreakpoints(
     if (!isAllowed(i)) {
       continue;
     }
-    const char = text[i];
+    const char = text.charAt(i);
     if (char === "(") {
       depth += 1;
       continue;

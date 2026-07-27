@@ -1,3 +1,4 @@
+// Thread binding policy tests cover how channel thread bindings are created and reused.
 import { beforeEach, describe, expect, it } from "vitest";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
 import { MAX_DATE_TIMESTAMP_MS } from "../shared/number-coercion.js";
@@ -102,9 +103,7 @@ describe("thread binding spawn policy helpers", () => {
     const cfg = {
       channels: {
         discord: {
-          threadBindings: {
-            spawnSessions: false,
-          },
+          threadBindings: { spawnSessions: false },
         },
       },
     };

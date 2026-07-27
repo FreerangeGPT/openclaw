@@ -1,3 +1,4 @@
+// Covers channel readonly setup fallback audit behavior.
 import { describe, expect, it, vi } from "vitest";
 import type { ChannelPlugin } from "../channels/plugins/types.plugin.js";
 import type { OpenClawConfig } from "../config/config.js";
@@ -95,6 +96,7 @@ describe("security audit channel read-only setup fallback", () => {
       },
     } satisfies ChannelPlugin;
     const cfg = {
+      agents: { list: [{ id: "main", default: true }] },
       session: { dmScope: "main" },
       channels: { telegram: { enabled: true } },
     } satisfies OpenClawConfig;

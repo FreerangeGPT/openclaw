@@ -1,3 +1,4 @@
+/** Interactive and noninteractive secrets configure workflow. */
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { confirm, select, text } from "@clack/prompts";
@@ -47,7 +48,8 @@ import { resolveSecretRefValue } from "./resolve.js";
 import { assertExpectedResolvedSecretValue } from "./secret-value.js";
 import { isRecord } from "./shared.js";
 
-export type SecretsConfigureResult = {
+/** Result returned after interactive secrets configure builds and preflights an apply plan. */
+type SecretsConfigureResult = {
   plan: SecretsApplyPlan;
   preflight: SecretsApplyResult;
 };
@@ -484,21 +486,12 @@ async function promptFileProvider(
     initialValue: base?.maxBytes,
     max: 20 * 1024 * 1024,
   });
-  const allowInsecurePath = assertNoCancel(
-    await confirm({
-      message: "Allow insecure file path checks?",
-      initialValue: base?.allowInsecurePath ?? false,
-    }),
-    "Secrets configure cancelled.",
-  );
-
   return {
     source: "file",
     path: normalizeStringifiedOptionalString(filePath) ?? "",
     mode,
     ...(timeoutMs ? { timeoutMs } : {}),
     ...(maxBytes ? { maxBytes } : {}),
-    ...(allowInsecurePath ? { allowInsecurePath: true } : {}),
   };
 }
 
@@ -609,21 +602,6 @@ async function promptExecProvider(
     "Secrets configure cancelled.",
   );
 
-  const allowInsecurePath = assertNoCancel(
-    await confirm({
-      message: "Allow insecure command path checks?",
-      initialValue: base?.allowInsecurePath ?? false,
-    }),
-    "Secrets configure cancelled.",
-  );
-  const allowSymlinkCommand = assertNoCancel(
-    await confirm({
-      message: "Allow symlink command path?",
-      initialValue: base?.allowSymlinkCommand ?? false,
-    }),
-    "Secrets configure cancelled.",
-  );
-
   const args = await parseArgsInput(normalizeStringifiedOptionalString(argsRaw) ?? "");
   const trustedDirs = parseCsv(trustedDirsRaw ?? "");
 
@@ -637,8 +615,6 @@ async function promptExecProvider(
     ...(jsonOnly ? { jsonOnly } : { jsonOnly: false }),
     ...(passEnv.length > 0 ? { passEnv } : {}),
     ...(trustedDirs.length > 0 ? { trustedDirs } : {}),
-    ...(allowInsecurePath ? { allowInsecurePath: true } : {}),
-    ...(allowSymlinkCommand ? { allowSymlinkCommand: true } : {}),
     ...(isRecord(base?.env) ? { env: base.env } : {}),
   };
 }
@@ -814,6 +790,7 @@ async function configureProvidersInteractive(
   }
 }
 
+/** Runs interactive secrets configuration and returns changed config/auth-store state. */
 export async function runSecretsConfigureInteractive(
   params: {
     env?: NodeJS.ProcessEnv;
@@ -1074,3 +1051,4 @@ export async function runSecretsConfigureInteractive(
 
   return { plan, preflight };
 }
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

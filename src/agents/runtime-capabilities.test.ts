@@ -1,3 +1,4 @@
+// Verifies runtime channel capabilities derived from channel account config.
 import { describe, expect, it } from "vitest";
 import { collectRuntimeChannelCapabilities } from "./runtime-capabilities.js";
 
@@ -7,11 +8,9 @@ describe("collectRuntimeChannelCapabilities", () => {
       channel: "discord",
       accountId: "default",
       cfg: {
-        channels: {
-          discord: {
-            threadBindings: {
-              spawnSessions: true,
-            },
+        session: {
+          threadBindings: {
+            spawnSessions: true,
           },
         },
       },
@@ -25,11 +24,9 @@ describe("collectRuntimeChannelCapabilities", () => {
       channel: "discord",
       accountId: "default",
       cfg: {
-        channels: {
-          discord: {
-            threadBindings: {
-              spawnSessions: false,
-            },
+        session: {
+          threadBindings: {
+            spawnSessions: false,
           },
         },
       },

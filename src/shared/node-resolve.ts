@@ -1,8 +1,10 @@
+// Node resolution helpers resolve node references from names, ids, and URLs.
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { type NodeMatchCandidate, resolveNodeIdFromCandidates } from "./node-match.js";
 
 type ResolveNodeFromListOptions<TNode extends NodeMatchCandidate> = {
   allowDefault?: boolean;
+  allowCompactDisplayName?: boolean;
   pickDefaultNode?: (nodes: TNode[]) => TNode | null;
 };
 
@@ -22,7 +24,7 @@ export function resolveNodeIdFromNodeList<TNode extends NodeMatchCandidate>(
     }
     throw new Error("node required");
   }
-  return resolveNodeIdFromCandidates(nodes, q);
+  return resolveNodeIdFromCandidates(nodes, q, options.allowCompactDisplayName);
 }
 
 /** Resolves a full node entry, preserving synthetic defaults returned by the picker. */

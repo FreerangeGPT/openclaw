@@ -1,3 +1,5 @@
+// Imported CLI history merge helpers.
+// Deduplicates external history messages against local OpenClaw transcripts.
 import { asFiniteNumber } from "@openclaw/normalization-core/number-coercion";
 import {
   normalizeOptionalString,
@@ -57,6 +59,8 @@ function resolveComparableRole(message: unknown): string | undefined {
   return readStringValue((message as { role?: unknown }).role);
 }
 
+// External identity survives text edits, so it is the strongest match signal
+// for imported messages from Claude CLI or similar external histories.
 type ImportedExternalIdentity = {
   externalId: string;
   importedFrom?: string;
@@ -83,11 +87,11 @@ function resolveImportedExternalIdentity(message: unknown): ImportedExternalIden
     : undefined;
 }
 
-function hasSameExternalIdentity(existing: unknown, imported: unknown): boolean {
+function hasSameExternalIdentity(existing: unknown, imported: unknown): boolean | undefined {
   const importedIdentity = resolveImportedExternalIdentity(imported);
   const existingIdentity = resolveImportedExternalIdentity(existing);
   if (!importedIdentity || !existingIdentity) {
-    return false;
+    return undefined;
   }
   return (
     importedIdentity.externalId === existingIdentity.externalId &&
@@ -97,8 +101,10 @@ function hasSameExternalIdentity(existing: unknown, imported: unknown): boolean 
 }
 
 function isEquivalentImportedMessage(existing: unknown, imported: unknown): boolean {
-  if (hasSameExternalIdentity(existing, imported)) {
-    return true;
+  // Text is a fallback only when either message lacks authoritative source identity.
+  const sameExternalIdentity = hasSameExternalIdentity(existing, imported);
+  if (sameExternalIdentity !== undefined) {
+    return sameExternalIdentity;
   }
 
   const existingRole = resolveComparableRole(existing);
@@ -134,6 +140,7 @@ function compareHistoryMessages(
   return a.order - b.order;
 }
 
+/** Merges imported CLI transcript messages into local history without duplicating overlaps. */
 export function mergeImportedChatHistoryMessages(params: {
   localMessages: unknown[];
   importedMessages: unknown[];

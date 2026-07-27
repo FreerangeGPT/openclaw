@@ -1,3 +1,4 @@
+/** Tests plugin-provided secret provider integration presets and resolution. */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +14,7 @@ import {
   resolveSecretProviderIntegrationConfig,
 } from "./provider-integrations.js";
 import { resolveSecretRefString } from "./resolve.js";
+import { withSecureTestNodeExecPath } from "./test-node-command.test-support.js";
 
 const tempDirs: string[] = [];
 
@@ -135,7 +137,6 @@ describe("secret provider integration presets", () => {
           ACME_PROFILE: "work",
         },
         trustedDirs: [path.dirname(process.execPath), rootDir],
-        allowInsecurePath: true,
         jsonOnly: false,
       },
     });
@@ -195,7 +196,6 @@ describe("secret provider integration presets", () => {
         command: process.execPath,
         args: [fs.realpathSync(path.join(rootDir, "resolve.mjs")), "ok"],
         trustedDirs: [path.dirname(process.execPath), rootDir],
-        allowInsecurePath: true,
         passEnv: ["GOOD_ENV"],
       },
     });
@@ -551,8 +551,8 @@ describe("secret provider integration presets", () => {
     const rootDir = makeTempDir();
     const resolverPath = path.join(rootDir, "bin", "resolve.mjs");
     fs.writeFileSync(path.join(rootDir, "index.ts"), "export default {};\n", "utf8");
-    fs.mkdirSync(path.dirname(resolverPath));
-    fs.writeFileSync(
+    makeSecureDir(path.dirname(resolverPath));
+    writeSecureFile(
       resolverPath,
       [
         "let input = '';",
@@ -564,7 +564,6 @@ describe("secret provider integration presets", () => {
         "  process.stdout.write(JSON.stringify({ protocolVersion: 1, values }));",
         "});",
       ].join("\n"),
-      "utf8",
     );
     fs.writeFileSync(
       path.join(rootDir, "openclaw.plugin.json"),
@@ -588,36 +587,38 @@ describe("secret provider integration presets", () => {
       "utf8",
     );
 
-    const registry = loadPluginManifestRegistry({
-      candidates: [createCandidate(rootDir, "vault-secrets", "global")],
-    });
-    const [preset] = listSecretProviderIntegrationPresets({ manifestRegistry: registry });
-    if (!preset) {
-      throw new Error("Expected vault preset");
-    }
+    await withSecureTestNodeExecPath(async () => {
+      const registry = loadPluginManifestRegistry({
+        candidates: [createCandidate(rootDir, "vault-secrets", "global")],
+      });
+      const [preset] = listSecretProviderIntegrationPresets({ manifestRegistry: registry });
+      if (!preset) {
+        throw new Error("Expected vault preset");
+      }
 
-    expect(preset.providerConfig).toEqual({
-      source: "exec",
-      pluginIntegration: {
-        pluginId: "vault-secrets",
-        integrationId: "vault",
-      },
-    });
-    await expect(
-      resolveSecretRefString(
-        { source: "exec", provider: "vault", id: "providers/openrouter/apiKey" },
-        {
-          config: {
-            secrets: {
-              providers: {
-                vault: preset.providerConfig,
+      expect(preset.providerConfig).toEqual({
+        source: "exec",
+        pluginIntegration: {
+          pluginId: "vault-secrets",
+          integrationId: "vault",
+        },
+      });
+      await expect(
+        resolveSecretRefString(
+          { source: "exec", provider: "vault", id: "providers/openrouter/apiKey" },
+          {
+            config: {
+              secrets: {
+                providers: {
+                  vault: preset.providerConfig,
+                },
               },
             },
+            manifestRegistry: registry,
           },
-          manifestRegistry: registry,
-        },
-      ),
-    ).resolves.toBe("value:providers/openrouter/apiKey");
+        ),
+      ).resolves.toBe("value:providers/openrouter/apiKey");
+    });
   });
 
   it("fails closed when a plugin-managed provider is disabled", async () => {

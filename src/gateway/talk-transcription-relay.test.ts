@@ -1,9 +1,11 @@
+/**
+ * Tests talk transcription relay behavior between realtime events and clients.
+ */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RealtimeTranscriptionProviderPlugin } from "../plugins/types.js";
 import type { RealtimeTranscriptionSessionCreateRequest } from "../realtime-transcription/provider-types.js";
 import {
   cancelTalkTranscriptionRelayTurn,
-  clearTalkTranscriptionRelaySessionsForTest,
   createTalkTranscriptionRelaySession,
   sendTalkTranscriptionRelayAudio,
   stopTalkTranscriptionRelaySession,
@@ -100,7 +102,6 @@ function expectTalkEventFields(
 describe("talk transcription gateway relay", () => {
   afterEach(() => {
     vi.useRealTimers();
-    clearTalkTranscriptionRelaySessionsForTest();
   });
 
   it("bridges browser audio into a transcription-only Talk event stream", async () => {
@@ -110,9 +111,13 @@ describe("talk transcription gateway relay", () => {
       sttRequest?.onPartial?.("hel");
       sttRequest?.onTranscript?.("hello world");
     });
-    const { events, session } = await createStartedRelaySession(sttSession, { model: "stt-model" }, (req) => {
-      sttRequest = req;
-    });
+    const { events, session } = await createStartedRelaySession(
+      sttSession,
+      { model: "stt-model" },
+      (req) => {
+        sttRequest = req;
+      },
+    );
 
     expectRecordFields(session, "session", {
       provider: "stt-test",

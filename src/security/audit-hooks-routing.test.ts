@@ -1,3 +1,4 @@
+// Covers hook routing security audit findings.
 import { describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import { collectHooksHardeningFindings } from "./audit-extra.sync.js";
@@ -275,6 +276,7 @@ describe("security audit hooks ingress findings", () => {
   it("flags hooks token reuse of SecretRef-backed gateway password auth in full audit", async () => {
     const report = await runSecurityAudit({
       config: {
+        agents: { list: [{ id: "main", default: true }] },
         secrets: {
           providers: {
             default: { source: "env" },
@@ -304,6 +306,7 @@ describe("security audit hooks ingress findings", () => {
   it("keeps persisted SecretRef reuse findings when audit password override differs", async () => {
     const report = await runSecurityAudit({
       config: {
+        agents: { list: [{ id: "main", default: true }] },
         secrets: {
           providers: {
             default: { source: "env" },
@@ -339,6 +342,7 @@ describe("security audit hooks ingress findings", () => {
   it("flags hooks token reuse of SecretRef-backed trusted-proxy password fallback", async () => {
     const report = await runSecurityAudit({
       config: {
+        agents: { list: [{ id: "main", default: true }] },
         secrets: {
           providers: {
             default: { source: "env" },
@@ -369,6 +373,7 @@ describe("security audit hooks ingress findings", () => {
   it("does not resolve gateway auth SecretRefs when hooks are disabled", async () => {
     const report = await runSecurityAudit({
       config: {
+        agents: { list: [{ id: "main", default: true }] },
         secrets: {
           providers: {
             default: { source: "env" },
@@ -396,6 +401,7 @@ describe("security audit hooks ingress findings", () => {
   it("skips unavailable gateway auth SecretRefs when auditing hooks token reuse", async () => {
     const report = await runSecurityAudit({
       config: {
+        agents: { list: [{ id: "main", default: true }] },
         secrets: {
           providers: {
             default: { source: "env" },
@@ -423,6 +429,7 @@ describe("security audit hooks ingress findings", () => {
   it("does not execute gateway auth SecretRefs during hooks token reuse audit", async () => {
     const report = await runSecurityAudit({
       config: {
+        agents: { list: [{ id: "main", default: true }] },
         secrets: {
           providers: {
             vault: {

@@ -1,3 +1,5 @@
+// video_generate tool tests cover provider/model selection, plugin metadata,
+// background task handling, input media, and saved video output.
 import { MAX_VIDEO_BYTES } from "@openclaw/media-core/constants";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
@@ -13,12 +15,25 @@ import type { PluginManifestRecord } from "../../plugins/manifest-registry.js";
 import type { PluginMetadataSnapshot } from "../../plugins/plugin-metadata-snapshot.types.js";
 import * as videoGenerationRuntime from "../../video-generation/runtime.js";
 import type { AuthProfileStore } from "../auth-profiles/types.js";
-import { resetRecentMediaGenerationDuplicateGuardsForTests } from "../media-generation-task-status-shared.js";
+import { resetRecentMediaGenerationDuplicateGuardsForTests } from "../media-generation-task-status-shared.test-support.js";
+import { canonicalizeMediaGenerationTestConfig } from "./media-generation-config.test-support.js";
 import * as videoGenerateBackground from "./video-generate-background.js";
-import {
-  createVideoGenerateTool,
-  resolveVideoGenerationModelConfigForTool,
-} from "./video-generate-tool.js";
+import { createVideoGenerateTool as createVideoGenerateToolImpl } from "./video-generate-tool.js";
+import { resolveVideoGenerationModelConfigForTool } from "./video-generate-tool.test-support.js";
+
+function createVideoGenerateTool(
+  params: Parameters<typeof createVideoGenerateToolImpl>[0],
+): ReturnType<typeof createVideoGenerateToolImpl> {
+  const options = params ?? {};
+  return createVideoGenerateToolImpl({
+    ...options,
+    config: canonicalizeMediaGenerationTestConfig(
+      options.config ?? {},
+      "video",
+      "videoGenerationModel",
+    ),
+  });
+}
 
 const taskRuntimeInternalMocks = vi.hoisted(() => {
   const mocks = {
@@ -141,6 +156,8 @@ function createVideoProviderSnapshot(params: {
   referenceAudioInputs?: boolean;
   workspaceDir?: string;
 }): PluginMetadataSnapshot {
+  // Plugin-backed provider snapshots are synthesized here so tool behavior can
+  // be tested without loading plugin manifests from disk.
   const policyHash = resolveInstalledPluginIndexPolicyHash(params.config);
   const plugin: PluginManifestRecord = {
     id: params.id,
@@ -362,7 +379,7 @@ describe("createVideoGenerateTool", () => {
         config: asConfig({
           agents: {
             defaults: {
-              videoGenerationModel: { primary: "qwen/wan2.6-t2v" },
+              mediaModels: { video: { primary: "qwen/wan2.6-t2v" } },
             },
           },
         }),
@@ -382,7 +399,7 @@ describe("createVideoGenerateTool", () => {
         config: asConfig({
           agents: {
             defaults: {
-              videoGenerationModel: { primary: "qwen/wan2.6-t2v" },
+              mediaModels: { video: { primary: "qwen/wan2.6-t2v" } },
             },
           },
         }),
@@ -550,7 +567,7 @@ describe("createVideoGenerateTool", () => {
         cfg: asConfig({
           agents: {
             defaults: {
-              videoGenerationModel: { primary: "qwen/wan2.6-t2v" },
+              mediaModels: { video: { primary: "qwen/wan2.6-t2v" } },
             },
           },
         }),
@@ -879,7 +896,7 @@ describe("createVideoGenerateTool", () => {
     });
     const wakeSpy = vi
       .spyOn(videoGenerateBackground.videoGenerationTaskLifecycle, "wakeTaskCompletion")
-      .mockResolvedValue(true);
+      .mockResolvedValue({ status: "delivered" });
     const saveSpy = vi.spyOn(mediaStore, "saveMediaBuffer");
     vi.spyOn(videoGenerationRuntime, "generateVideo").mockResolvedValue({
       provider: "vydra",
@@ -1291,6 +1308,73 @@ describe("createVideoGenerateTool", () => {
     expect(providers[0]?.modes).toEqual(["generate", "imageToVideo"]);
   });
 
+  it("lists model-specific catalog capabilities and modes", async () => {
+    const imageToVideoCapabilities = {
+      imageToVideo: {
+        enabled: true,
+        maxInputImages: 1,
+        maxDurationSeconds: 15,
+        resolutions: ["480P", "720P", "1080P"] as const,
+        aspectRatios: ["16:9", "9:16"] as const,
+        supportsResolution: true,
+        supportsAspectRatio: true,
+      },
+    };
+    vi.spyOn(videoGenerationRuntime, "listRuntimeVideoGenerationProviders").mockReturnValue([
+      {
+        id: "video-plugin",
+        defaultModel: "text-video",
+        models: ["text-video", "image-video"],
+        capabilities: {
+          generate: {
+            maxDurationSeconds: 10,
+          },
+        },
+        catalogByModel: {
+          "image-video": {
+            capabilities: imageToVideoCapabilities,
+            modes: ["imageToVideo"],
+          },
+        },
+        generateVideo: vi.fn(async () => {
+          throw new Error("not used");
+        }),
+      },
+    ]);
+
+    const tool = createVideoGenerateTool({
+      config: asConfig({
+        agents: {
+          defaults: {
+            videoGenerationModel: { primary: "video-plugin/text-video" },
+          },
+        },
+      }),
+    });
+    if (!tool) {
+      throw new Error("expected video_generate tool");
+    }
+
+    const result = await tool.execute("call-1", { action: "list" });
+    const text = (result.content?.[0] as { text: string } | undefined)?.text ?? "";
+    expect(text).toContain(
+      "model image-video: modes=imageToVideo, maxInputImages=1, maxDurationSeconds=15, resolution, aspectRatio",
+    );
+    const providers = resultDetails(result).providers as Array<{
+      catalog?: Array<{
+        model?: string;
+        capabilities?: unknown;
+        modes?: string[];
+      }>;
+    }>;
+    const catalogEntry = providers[0]?.catalog?.find((entry) => entry.model === "image-video");
+    expect(catalogEntry).toMatchObject({
+      model: "image-video",
+      capabilities: imageToVideoCapabilities,
+      modes: ["imageToVideo"],
+    });
+  });
+
   it("rejects image-to-video when the provider disables that mode", async () => {
     vi.spyOn(videoGenerationRuntime, "listRuntimeVideoGenerationProviders").mockReturnValue([
       {
@@ -1621,3 +1705,4 @@ describe("createVideoGenerateTool", () => {
     expect(input.resolution).toBe("draft-large");
   });
 });
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

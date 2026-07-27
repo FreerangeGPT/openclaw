@@ -1,3 +1,4 @@
+// Nostr plugin module implements channel.setup behavior.
 import { describeAccountSnapshot } from "openclaw/plugin-sdk/account-helpers";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
@@ -9,7 +10,7 @@ import {
 import { buildChannelConfigSchema, type ChannelPlugin } from "./channel-api.js";
 import { NostrConfigSchema } from "./config-schema.js";
 import { DEFAULT_RELAYS } from "./default-relays.js";
-import { createNostrSetupAdapter } from "./setup-adapter.js";
+import { createNostrSetupAdapter, createNostrSetupContract } from "./setup-adapter.js";
 
 const t = createSetupTranslator();
 
@@ -90,13 +91,18 @@ function resolveSetupNostrAccount(params: {
 }
 
 function looksLikeNostrPrivateKey(privateKey: string): boolean {
-  return privateKey.startsWith("nsec1") || /^[0-9a-fA-F]{64}$/.test(privateKey);
+  return (
+    privateKey.startsWith("nsec1") ||
+    privateKey.startsWith("NSEC1") ||
+    /^[0-9a-fA-F]{64}$/.test(privateKey)
+  );
 }
 
 const nostrSetupAdapter = createNostrSetupAdapter({
   resolveAccountId: (cfg, accountId) => accountId?.trim() || resolveDefaultSetupNostrAccountId(cfg),
   validatePrivateKey: looksLikeNostrPrivateKey,
 });
+const nostrSetupContract = createNostrSetupContract(nostrSetupAdapter);
 
 const nostrSetupWizard = createDelegatedSetupWizardProxy({
   channel,
@@ -142,6 +148,7 @@ export const nostrSetupPlugin: ChannelPlugin<ResolvedNostrSetupAccount> = {
   reload: { configPrefixes: ["channels.nostr"] },
   configSchema: buildChannelConfigSchema(NostrConfigSchema),
   setup: nostrSetupAdapter,
+  setupContract: nostrSetupContract,
   setupWizard: nostrSetupWizard,
   config: {
     listAccountIds: listSetupNostrAccountIds,

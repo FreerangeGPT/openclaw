@@ -1,3 +1,5 @@
+// Gateway credential secret-input resolver.
+// Resolves SecretRefs before applying Gateway credential precedence rules.
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveSecretInputRef } from "../config/types.secrets.js";
 import { resolveSecretInputString } from "../secrets/resolve-secret-input-string.js";
@@ -27,8 +29,7 @@ type GatewayCredentialSecretInputOptions = {
   urlOverrideSource?: "cli" | "env";
   env?: NodeJS.ProcessEnv;
   modeOverride?: GatewayCredentialMode;
-  localTokenPrecedence?: GatewayCredentialPrecedence;
-  localPasswordPrecedence?: GatewayCredentialPrecedence;
+  localPrecedence?: GatewayCredentialPrecedence;
   remoteTokenPrecedence?: GatewayRemoteCredentialPrecedence;
   remotePasswordPrecedence?: GatewayRemoteCredentialPrecedence;
   remoteTokenFallback?: GatewayRemoteCredentialFallback;
@@ -99,8 +100,7 @@ function resolveGatewayCredentialsFromConfigOptions(params: {
     urlOverride: options.urlOverride,
     urlOverrideSource: options.urlOverrideSource,
     modeOverride: options.modeOverride,
-    localTokenPrecedence: options.localTokenPrecedence,
-    localPasswordPrecedence: options.localPasswordPrecedence,
+    localPrecedence: options.localPrecedence,
     remoteTokenPrecedence: options.remoteTokenPrecedence,
     remotePasswordPrecedence: options.remotePasswordPrecedence ?? "env-first", // pragma: allowlist secret
     remoteTokenFallback: options.remoteTokenFallback,

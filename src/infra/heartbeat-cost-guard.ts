@@ -4,31 +4,12 @@ export type ExpensiveMainSessionHeartbeatSkip = {
   promptChars: number;
   threshold: number;
   totalTokens: number;
-  cacheKeeperCacheViable?: boolean;
 };
 
 export type AutoIsolatedMainSessionHeartbeat = {
   threshold: number;
   totalTokens: number;
-  cacheKeeperCacheViable?: boolean;
 };
-
-type CacheRetention = "none" | "short" | "long" | undefined;
-
-const SHORT_CACHE_RETENTION_TTL_MS = 5 * 60_000;
-const LONG_CACHE_RETENTION_TTL_MS = 60 * 60_000;
-
-export function resolveCacheKeeperCacheViable(params: {
-  cacheRetention: CacheRetention;
-  intervalMs: number;
-}): boolean {
-  if (params.cacheRetention === undefined || params.cacheRetention === "none") {
-    return false;
-  }
-  const ttlMs =
-    params.cacheRetention === "long" ? LONG_CACHE_RETENTION_TTL_MS : SHORT_CACHE_RETENTION_TTL_MS;
-  return params.intervalMs < ttlMs;
-}
 
 export function shouldUseIsolatedHeartbeatSession(params: {
   configuredIsolated?: boolean;
@@ -46,7 +27,7 @@ function resolveFreshPromptTokens(params: {
   totalTokens?: number;
   totalTokensFresh?: boolean;
 }): number | null {
-  if (params.totalTokensFresh === false) {
+  if (params.totalTokensFresh !== true) {
     return null;
   }
   const totalTokens = params.totalTokens;
@@ -57,26 +38,24 @@ function resolveFreshPromptTokens(params: {
 
 export function shouldAutoIsolateMainSessionHeartbeat(params: {
   configuredIsolated?: boolean;
-  preserveMainSessionCache: boolean;
-  cacheKeeperCacheViable?: boolean;
   totalTokens?: number;
   totalTokensFresh?: boolean;
   hasExecCompletion: boolean;
   hasCronEvents: boolean;
+  hasDueCommitments: boolean;
+  hasScheduledTasks: boolean;
   isCronEventReason: boolean;
   isExecEventReason: boolean;
   isManualReason: boolean;
-  isWakeReason: boolean;
 }): AutoIsolatedMainSessionHeartbeat | null {
   if (params.configuredIsolated !== undefined) {
-    return null;
-  }
-  if (params.preserveMainSessionCache && params.cacheKeeperCacheViable === true) {
     return null;
   }
   if (
     params.hasExecCompletion ||
     params.hasCronEvents ||
+    params.hasDueCommitments ||
+    params.hasScheduledTasks ||
     params.isExecEventReason ||
     params.isCronEventReason ||
     params.isManualReason
@@ -90,35 +69,30 @@ export function shouldAutoIsolateMainSessionHeartbeat(params: {
   return {
     totalTokens,
     threshold: FULL_CONTEXT_HEARTBEAT_TOKEN_GUARD,
-    ...(params.cacheKeeperCacheViable === false ? { cacheKeeperCacheViable: false } : {}),
   };
 }
 
 export function shouldSkipExpensiveMainSessionHeartbeat(params: {
   prompt: string;
-  preserveMainSessionCache: boolean;
-  cacheKeeperCacheViable?: boolean;
   totalTokens?: number;
   totalTokensFresh?: boolean;
   hasExecCompletion: boolean;
   hasCronEvents: boolean;
-  hasHeartbeatInstructions: boolean;
-  hasTasks: boolean;
+  hasDueCommitments: boolean;
+  hasScheduledTasks: boolean;
   isCronEventReason: boolean;
   isExecEventReason: boolean;
   isManualReason: boolean;
-  isWakeReason: boolean;
   useIsolatedSession: boolean;
 }): ExpensiveMainSessionHeartbeatSkip | null {
   if (params.useIsolatedSession) {
     return null;
   }
-  if (params.preserveMainSessionCache && params.cacheKeeperCacheViable === true) {
-    return null;
-  }
   if (
     params.hasExecCompletion ||
     params.hasCronEvents ||
+    params.hasDueCommitments ||
+    params.hasScheduledTasks ||
     params.isExecEventReason ||
     params.isCronEventReason ||
     params.isManualReason
@@ -133,6 +107,5 @@ export function shouldSkipExpensiveMainSessionHeartbeat(params: {
     totalTokens,
     threshold: FULL_CONTEXT_HEARTBEAT_TOKEN_GUARD,
     promptChars: params.prompt.length,
-    ...(params.cacheKeeperCacheViable === false ? { cacheKeeperCacheViable: false } : {}),
   };
 }

@@ -1,3 +1,4 @@
+// Zalouser plugin module implements shared behavior.
 import { describeAccountSnapshot } from "openclaw/plugin-sdk/account-helpers";
 import {
   adaptScopedAccountAccessor,
@@ -51,6 +52,7 @@ const zalouserConfigAdapter = createScopedChannelConfigAdapter<ResolvedZalouserA
 export function createZalouserPluginBase(params: {
   setupWizard: NonNullable<ChannelPlugin<ResolvedZalouserAccount>["setupWizard"]>;
   setup: NonNullable<ChannelPlugin<ResolvedZalouserAccount>["setup"]>;
+  setupContract?: NonNullable<ChannelPlugin<ResolvedZalouserAccount>["setupContract"]>;
 }): Pick<
   ChannelPlugin<ResolvedZalouserAccount>,
   | "id"
@@ -62,6 +64,7 @@ export function createZalouserPluginBase(params: {
   | "configSchema"
   | "config"
   | "setup"
+  | "setupContract"
 > {
   return {
     id: "zalouser",
@@ -88,5 +91,6 @@ export function createZalouserPluginBase(params: {
         }),
     },
     setup: params.setup,
+    ...(params.setupContract ? { setupContract: params.setupContract } : {}),
   };
 }

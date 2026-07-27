@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+// Verifies extension packages compile through their package-local TypeScript boundary.
 import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
@@ -13,6 +14,7 @@ import {
 import { createRequire } from "node:module";
 import os from "node:os";
 import path, { dirname, join, resolve } from "node:path";
+import pMap from "p-map";
 import { parsePositiveInt } from "./lib/numeric-options.mjs";
 import {
   forwardSignalToVitestProcessGroup,
@@ -23,10 +25,13 @@ import {
 const require = createRequire(import.meta.url);
 const repoRoot = resolve(import.meta.dirname, "..");
 const tscBin = require.resolve("typescript/bin/tsc");
-const tsgoBin = join(
-  dirname(require.resolve("@typescript/native-preview/package.json")),
-  "bin/tsgo.js",
-);
+const nativePreviewPackageJsonPath = require.resolve("@typescript/native-preview/package.json");
+const nativePreviewPackageJson = JSON.parse(readFileSync(nativePreviewPackageJsonPath, "utf8"));
+const nativePreviewBin = nativePreviewPackageJson.bin?.tsgo;
+if (typeof nativePreviewBin !== "string") {
+  throw new Error("@typescript/native-preview does not declare the tsgo binary");
+}
+const tsgoBin = resolve(dirname(nativePreviewPackageJsonPath), nativePreviewBin);
 const prepareBoundaryArtifactsBin = resolve(
   repoRoot,
   "scripts/prepare-extension-package-boundary-artifacts.mjs",
@@ -34,6 +39,9 @@ const prepareBoundaryArtifactsBin = resolve(
 const extensionPackageBoundaryBaseConfig = "../tsconfig.package-boundary.base.json";
 const FAILURE_OUTPUT_TAIL_LINES = 40;
 const STEP_OUTPUT_MAX_CHARS = 256 * 1024;
+const STEP_PROCESS_GROUP_EXIT_POLL_MS = 25;
+const STEP_POST_FORCE_KILL_WAIT_MS = 1_000;
+const MAX_TIMER_TIMEOUT_MS = 2_147_000_000;
 const SLOW_COMPILE_SUMMARY_LIMIT = 10;
 const COMPILE_INPUT_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".json"]);
 const ROOTDIR_BOUNDARY_CANARY_IMPORT_PATH =
@@ -49,6 +57,9 @@ function parseMode(argv) {
   return mode;
 }
 
+/**
+ * Resolves the compile worker count from CLI/env/default settings.
+ */
 export function resolveCompileConcurrency(
   env = process.env,
   availableParallelism = os.availableParallelism(),
@@ -98,6 +109,9 @@ function createStepOutputCapture() {
   return { text: "", truncatedChars: 0 };
 }
 
+/**
+ * Appends child-process output while preserving only the diagnostic tail.
+ */
 export function appendBoundedStepOutput(buffer, chunk, maxChars = STEP_OUTPUT_MAX_CHARS) {
   const nextText = buffer.text + String(chunk);
   if (nextText.length <= maxChars) {
@@ -114,6 +128,9 @@ function formatCapturedStepOutput(buffer) {
   return `[output truncated ${buffer.truncatedChars} chars; showing tail]\n${buffer.text}`;
 }
 
+/**
+ * Formats the successful boundary compile summary.
+ */
 export function formatBoundaryCheckSuccessSummary(params = {}) {
   const lines = ["extension package boundary check passed"];
   if (params.mode) {
@@ -143,6 +160,9 @@ export function formatBoundaryCheckSuccessSummary(params = {}) {
   return `${lines.join("\n")}\n`;
 }
 
+/**
+ * Formats skipped compile progress for fresh extension canaries.
+ */
 export function formatSkippedCompileProgress(params = {}) {
   const skippedCount = params.skippedCount ?? 0;
   const totalCount = params.totalCount ?? 0;
@@ -157,6 +177,9 @@ export function formatSkippedCompileProgress(params = {}) {
   return `skipped ${skippedCount} fresh plugin compiles\n`;
 }
 
+/**
+ * Formats slow extension compile diagnostics.
+ */
 export function formatSlowCompileSummary(params = {}) {
   const compileTimings = Array.isArray(params.compileTimings) ? params.compileTimings : [];
   if (compileTimings.length === 0) {
@@ -174,6 +197,9 @@ export function formatSlowCompileSummary(params = {}) {
   return `${lines.join("\n")}\n`;
 }
 
+/**
+ * Formats a failed boundary-check child process step.
+ */
 export function formatStepFailure(label, params = {}) {
   const stdoutSection = summarizeOutputSection("stdout", params.stdout ?? "");
   const stderrSection = summarizeOutputSection("stderr", params.stderr ?? "");
@@ -285,6 +311,9 @@ function collectOldestMtime(paths) {
   return Number.isFinite(oldestMtimeMs) ? oldestMtimeMs : null;
 }
 
+/**
+ * Checks whether an extension boundary compile canary is still fresh.
+ */
 export function isBoundaryCompileFresh(extensionId, params = {}) {
   const rootDir = params.rootDir ?? repoRoot;
   const extensionRoot = resolve(rootDir, "extensions", extensionId);
@@ -313,13 +342,22 @@ function writeStampFile(filePath) {
   writeFileSync(filePath, `${new Date().toISOString()}\n`, "utf8");
 }
 
+function resolveStepTimerTimeoutMs(valueMs) {
+  const value = Number(valueMs);
+  if (!Number.isFinite(value)) {
+    return MAX_TIMER_TIMEOUT_MS;
+  }
+  return Math.min(Math.max(Math.floor(value), 1), MAX_TIMER_TIMEOUT_MS);
+}
+
 function runNodeStep(label, args, timeoutMs) {
+  const resolvedTimeoutMs = resolveStepTimerTimeoutMs(timeoutMs);
   const startedAt = Date.now();
   const result = spawnSync(process.execPath, args, {
     cwd: repoRoot,
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
-    timeout: timeoutMs,
+    timeout: resolvedTimeoutMs,
   });
 
   if (result.status === 0 && !result.error) {
@@ -328,7 +366,7 @@ function runNodeStep(label, args, timeoutMs) {
 
   const timeoutSuffix =
     result.error?.name === "Error" && result.error.message.includes("ETIMEDOUT")
-      ? `${label} timed out after ${timeoutMs}ms`
+      ? `${label} timed out after ${resolvedTimeoutMs}ms`
       : "";
   const errorSuffix = result.error ? result.error.message : "";
   const note = [timeoutSuffix, errorSuffix].filter(Boolean).join("\n");
@@ -363,7 +401,11 @@ function abortSiblingSteps(abortController) {
   }
 }
 
+/**
+ * Runs one node-based boundary check step with timeout and output capture.
+ */
 export function runNodeStepAsync(label, args, timeoutMs, params = {}) {
+  const resolvedTimeoutMs = resolveStepTimerTimeoutMs(timeoutMs);
   const abortController = params.abortController;
   const killProcess = params.killProcess ?? process.kill.bind(process);
   const onFailure = params.onFailure;
@@ -395,6 +437,48 @@ export function runNodeStepAsync(label, args, timeoutMs, params = {}) {
         child.kill(signal);
       }
     };
+    const processGroupAlive = () => {
+      if (platform === "win32" || typeof child.pid !== "number") {
+        return false;
+      }
+      try {
+        killProcess(-child.pid, 0);
+        return true;
+      } catch (error) {
+        return error?.code === "EPERM";
+      }
+    };
+    const waitForProcessGroupExit = async (ms) => {
+      const deadlineAt = Date.now() + ms;
+      while (Date.now() < deadlineAt) {
+        if (!processGroupAlive()) {
+          return true;
+        }
+        await new Promise((resolvePoll) => {
+          setTimeout(resolvePoll, STEP_PROCESS_GROUP_EXIT_POLL_MS);
+        });
+      }
+      return !processGroupAlive();
+    };
+    const waitAfterForceKill = async () => {
+      if (processGroupAlive()) {
+        await waitForProcessGroupExit(STEP_POST_FORCE_KILL_WAIT_MS);
+      }
+    };
+    const rejectCanceledStep = async () => {
+      signalChild("SIGKILL");
+      await waitAfterForceKill();
+      rejectPromise(
+        toLintErrorObject(
+          attachStepFailureMetadata(new Error(`${label} canceled after sibling failure`), label, {
+            kind: "canceled",
+            elapsedMs: Date.now() - startedAt,
+            note: "canceled after sibling failure",
+          }),
+          "Step canceled after sibling failure",
+        ),
+      );
+    };
     const abortSignal = abortController?.signal;
     const abortListener = () => {
       signalChild("SIGTERM");
@@ -402,6 +486,7 @@ export function runNodeStepAsync(label, args, timeoutMs, params = {}) {
     abortSignal?.addEventListener("abort", abortListener, { once: true });
     const teardownProcessCleanup = installVitestProcessGroupCleanup({
       child,
+      forceSignal: "SIGKILL",
       onSignal: (signal) => {
         forwardedSignal ??= signal;
       },
@@ -418,31 +503,34 @@ export function runNodeStepAsync(label, args, timeoutMs, params = {}) {
       settled = true;
       cleanup();
       signalChild("SIGKILL");
-      const stdoutText = formatCapturedStepOutput(stdout);
-      const stderrText = formatCapturedStepOutput(stderr);
-      const error = attachStepFailureMetadata(
-        new Error(
-          formatStepFailure(label, {
+      void (async () => {
+        await waitAfterForceKill();
+        const stdoutText = formatCapturedStepOutput(stdout);
+        const stderrText = formatCapturedStepOutput(stderr);
+        const error = attachStepFailureMetadata(
+          new Error(
+            formatStepFailure(label, {
+              stdout: stdoutText,
+              stderr: stderrText,
+              kind: "timeout",
+              elapsedMs: Date.now() - startedAt,
+              note: `${label} timed out after ${resolvedTimeoutMs}ms`,
+            }),
+          ),
+          label,
+          {
             stdout: stdoutText,
             stderr: stderrText,
             kind: "timeout",
             elapsedMs: Date.now() - startedAt,
-            note: `${label} timed out after ${timeoutMs}ms`,
-          }),
-        ),
-        label,
-        {
-          stdout: stdoutText,
-          stderr: stderrText,
-          kind: "timeout",
-          elapsedMs: Date.now() - startedAt,
-          note: `${label} timed out after ${timeoutMs}ms`,
-        },
-      );
-      onFailure?.(error);
-      abortSiblingSteps(abortController);
-      rejectPromise(toLintErrorObject(error, "Step timed out"));
-    }, timeoutMs);
+            note: `${label} timed out after ${resolvedTimeoutMs}ms`,
+          },
+        );
+        onFailure?.(error);
+        abortSiblingSteps(abortController);
+        rejectPromise(toLintErrorObject(error, "Step timed out"));
+      })();
+    }, resolvedTimeoutMs);
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -459,16 +547,7 @@ export function runNodeStepAsync(label, args, timeoutMs, params = {}) {
       cleanup();
       settled = true;
       if (error.name === "AbortError" && abortController?.signal.aborted) {
-        rejectPromise(
-          toLintErrorObject(
-            attachStepFailureMetadata(new Error(`${label} canceled after sibling failure`), label, {
-              kind: "canceled",
-              elapsedMs: Date.now() - startedAt,
-              note: "canceled after sibling failure",
-            }),
-            "Step canceled after sibling failure",
-          ),
-        );
+        void rejectCanceledStep();
         return;
       }
       const stdoutText = formatCapturedStepOutput(stdout);
@@ -503,7 +582,14 @@ export function runNodeStepAsync(label, args, timeoutMs, params = {}) {
       cleanup();
       settled = true;
       if (forwardedSignal) {
-        process.kill(process.pid, forwardedSignal);
+        signalChild("SIGKILL");
+        void waitAfterForceKill().finally(() => {
+          process.kill(process.pid, forwardedSignal);
+        });
+        return;
+      }
+      if (abortController?.signal.aborted) {
+        void rejectCanceledStep();
         return;
       }
       if (code === 0) {
@@ -540,37 +626,43 @@ export function runNodeStepAsync(label, args, timeoutMs, params = {}) {
   });
 }
 
+/**
+ * Runs boundary check steps with bounded concurrency.
+ */
 export async function runNodeStepsWithConcurrency(steps, concurrency) {
   const abortController = new AbortController();
   let firstFailure = null;
-  let nextIndex = 0;
-  const workers = Array.from({ length: Math.min(concurrency, steps.length) }, async () => {
-    while (true) {
+  await pMap(
+    steps,
+    async (step) => {
       if (abortController.signal.aborted) {
         return;
       }
-      const index = nextIndex;
-      nextIndex += 1;
-      if (index >= steps.length) {
-        return;
+      try {
+        step.onStart?.();
+        const result = await runNodeStepAsync(step.label, step.args, step.timeoutMs, {
+          abortController,
+          onFailure(error) {
+            firstFailure ??= error;
+          },
+        });
+        step.onSuccess?.(result);
+      } catch (error) {
+        // Keep the mapper fulfilled so pMap waits for active process-group cleanup.
+        firstFailure ??= error;
+        abortSiblingSteps(abortController);
       }
-      const step = steps[index];
-      step.onStart?.();
-      const result = await runNodeStepAsync(step.label, step.args, step.timeoutMs, {
-        abortController,
-        onFailure(error) {
-          firstFailure ??= error;
-        },
-      });
-      step.onSuccess?.(result);
-    }
-  });
-  await Promise.allSettled(workers);
+    },
+    { concurrency, stopOnError: false },
+  );
   if (firstFailure) {
     throw toLintErrorObject(firstFailure, "Non-Error thrown");
   }
 }
 
+/**
+ * Resolves canary artifact paths for an extension boundary compile.
+ */
 export function resolveCanaryArtifactPaths(extensionId, rootDir = repoRoot) {
   const extensionRoot = resolve(rootDir, "extensions", extensionId);
   return {
@@ -580,18 +672,27 @@ export function resolveCanaryArtifactPaths(extensionId, rootDir = repoRoot) {
   };
 }
 
-export function cleanupCanaryArtifacts(extensionId, rootDir = repoRoot) {
+/**
+ * Removes canary artifacts for one extension.
+ */
+function cleanupCanaryArtifacts(extensionId, rootDir = repoRoot) {
   const { canaryPath, tsconfigPath } = resolveCanaryArtifactPaths(extensionId, rootDir);
   rmSync(canaryPath, { force: true });
   rmSync(tsconfigPath, { force: true });
 }
 
+/**
+ * Removes canary artifacts for multiple extensions.
+ */
 export function cleanupCanaryArtifactsForExtensions(extensionIds, rootDir = repoRoot) {
   for (const extensionId of extensionIds) {
     cleanupCanaryArtifacts(extensionId, rootDir);
   }
 }
 
+/**
+ * Installs signal/exit cleanup for extension canary artifacts.
+ */
 export function installCanaryArtifactCleanup(extensionIds, params = {}) {
   const rootDir = params.rootDir ?? repoRoot;
   const processObject = params.processObject ?? process;
@@ -612,6 +713,9 @@ function resolveBoundaryTsStampPath(extensionId, rootDir = repoRoot) {
   return resolve(rootDir, "extensions", extensionId, "dist", ".boundary-tsc.stamp");
 }
 
+/**
+ * Resolves the local lock path for extension boundary checks.
+ */
 export function resolveBoundaryCheckLockPath(rootDir = repoRoot) {
   return resolve(rootDir, "dist", ".extension-package-boundary.lock");
 }
@@ -649,6 +753,9 @@ function removeStaleBoundaryCheckLock(lockPath) {
   return true;
 }
 
+/**
+ * Acquires the single-process lock for extension boundary checks.
+ */
 export function acquireBoundaryCheckLock(params = {}) {
   const rootDir = params.rootDir ?? repoRoot;
   const processObject = params.processObject ?? process;
@@ -848,6 +955,9 @@ async function runCanaryCheck(extensionIds) {
   };
 }
 
+/**
+ * Runs the extension package TypeScript boundary check.
+ */
 export async function main(argv = process.argv.slice(2)) {
   const startedAt = Date.now();
   const mode = parseMode(argv);

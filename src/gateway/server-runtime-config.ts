@@ -1,3 +1,5 @@
+// Gateway startup runtime-config resolver.
+// Normalizes bind/auth/HTTP/Tailscale/hook settings before server construction.
 import type {
   GatewayAuthConfig,
   GatewayBindMode,
@@ -69,6 +71,11 @@ export async function resolveGatewayRuntimeConfig(params: {
   if (bindMode === "loopback" && !isLoopbackHost(bindHost)) {
     throw new Error(
       `gateway bind=loopback resolved to non-loopback host ${bindHost}; refusing fallback to a network bind`,
+    );
+  }
+  if (bindMode === "tailnet" && bindHost === "0.0.0.0") {
+    throw new Error(
+      "gateway bind=tailnet could not resolve a Tailscale or loopback address; refusing wildcard fallback",
     );
   }
   if (bindMode === "custom") {

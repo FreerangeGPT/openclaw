@@ -1,3 +1,8 @@
+/**
+ * Remote shell-backed sandbox filesystem bridge.
+ *
+ * Resolves sandbox paths against uploaded remote mounts and performs guarded operations through backend shell commands.
+ */
 import path from "node:path";
 import { parseStrictNonNegativeInteger } from "../../infra/parse-finite-number.js";
 import { isPathInside } from "../../infra/path-guards.js";
@@ -10,14 +15,16 @@ import { SANDBOX_PINNED_MUTATION_PYTHON } from "./fs-bridge-mutation-helper.js";
 import { createWritableRenameTargetResolver } from "./fs-bridge-rename-targets.js";
 import { parseSandboxStatMtimeMs, parseSandboxStatSize } from "./fs-bridge-stat-parse.js";
 import type { SandboxFsBridge, SandboxFsStat, SandboxResolvedPath } from "./fs-bridge.types.js";
+import { isPathInsideContainerRoot, relativePathEscapesContainerRoot } from "./path-utils.js";
 import {
-  isPathInsideContainerRoot,
-  normalizeContainerPath as normalizeSandboxContainerPath,
-  relativePathEscapesContainerRoot,
-} from "./path-utils.js";
-import { isExistingWorkspaceSkillMountSource } from "./workspace-mounts.js";
-
-type RemoteMountSource = "workspace" | "agent" | "protectedSkill";
+  buildRemoteProtectedSkillMounts,
+  compareRemoteMountsByContainerPath,
+  compareRemoteMountsByLocalPath,
+  normalizeContainerPath,
+  type RemoteMountInfo,
+  type RemoteMountSource,
+  toPosixRelative,
+} from "./remote-fs-bridge-paths.js";
 
 type ResolvedRemotePath = SandboxResolvedPath & {
   writable: boolean;
@@ -33,19 +40,16 @@ function hasMultipleHardlinks(raw: string): boolean {
   return /^\d+$/.test(raw);
 }
 
-type MountInfo = {
-  localRoot: string;
-  containerRoot: string;
-  writable: boolean;
-  source: RemoteMountSource;
-};
+type MountInfo = RemoteMountInfo;
 
+/** Minimal remote shell contract used by the SSH filesystem bridge. */
 export type RemoteShellSandboxHandle = {
   remoteWorkspaceDir: string;
   remoteAgentWorkspaceDir: string;
   runRemoteShellScript(params: SandboxBackendCommandParams): Promise<SandboxBackendCommandResult>;
 };
 
+/** Create the filesystem bridge for remote shell-backed sandbox runtimes. */
 export function createRemoteShellSandboxFsBridge(params: {
   sandbox: SandboxFsBridgeContext;
   runtime: RemoteShellSandboxHandle;
@@ -96,6 +100,50 @@ class RemoteShellSandboxFsBridge implements SandboxFsBridge {
       signal: params.signal,
     });
     return result.stdout;
+  }
+
+  async copyFile(params: {
+    sourcePath: string;
+    destinationPath: string;
+    cwd?: string;
+    mkdir?: boolean;
+    signal?: AbortSignal;
+  }): Promise<void> {
+    const source = this.resolveTarget({ filePath: params.sourcePath, cwd: params.cwd });
+    const destination = this.resolveTarget({
+      filePath: params.destinationPath,
+      cwd: params.cwd,
+    });
+    await this.ensureRemoteWritable(destination, "copy files", params.signal);
+    await this.assertNoHardlinkedFile({
+      containerPath: destination.containerPath,
+      action: "copy files",
+      signal: params.signal,
+    });
+    const sourcePinned = await this.resolvePinnedParent({
+      containerPath: source.containerPath,
+      action: "copy files",
+      signal: params.signal,
+    });
+    const destinationPinned = await this.resolvePinnedParent({
+      containerPath: destination.containerPath,
+      action: "copy files",
+      requireWritable: true,
+      signal: params.signal,
+    });
+    await this.runMutation({
+      args: [
+        "copy",
+        sourcePinned.mountRootPath,
+        sourcePinned.relativeParentPath,
+        sourcePinned.basename,
+        destinationPinned.mountRootPath,
+        destinationPinned.relativeParentPath,
+        destinationPinned.basename,
+        params.mkdir !== false ? "1" : "0",
+      ],
+      signal: params.signal,
+    });
   }
 
   async writeFile(params: {
@@ -245,7 +293,7 @@ class RemoteShellSandboxFsBridge implements SandboxFsBridge {
       signal: params.signal,
     });
     const result = await this.runRemoteScript({
-      script: 'set -eu\nstat -c "%F|%s|%y" -- "$1"',
+      script: 'set -eu\nLC_ALL=C stat -c "%F|%s|%y" -- "$1"',
       args: [canonical],
       signal: params.signal,
     });
@@ -283,9 +331,12 @@ class RemoteShellSandboxFsBridge implements SandboxFsBridge {
       });
     }
     if (this.sandbox.workspaceAccess === "rw") {
+      // Skill directories inside writable remote workspaces stay protected when
+      // the original host mount exists, matching local bridge read-only rules.
       mounts.push(
         ...buildRemoteProtectedSkillMounts({
           localRoot: agentRoot,
+          skillsWorkspaceDir: this.sandbox.skillsWorkspaceDir,
           workspaceContainerRoot,
           agentContainerRoot,
           includeAgentMount:
@@ -445,11 +496,13 @@ class RemoteShellSandboxFsBridge implements SandboxFsBridge {
     const roots = [
       path.posix.join(workspaceContainerRoot, "skills"),
       path.posix.join(workspaceContainerRoot, ".agents", "skills"),
+      path.posix.join(workspaceContainerRoot, ".openclaw", "sandbox-skills", "skills"),
     ];
     if (path.resolve(this.sandbox.agentWorkspaceDir) !== path.resolve(this.sandbox.workspaceDir)) {
       roots.push(
         path.posix.join(agentContainerRoot, "skills"),
         path.posix.join(agentContainerRoot, ".agents", "skills"),
+        path.posix.join(agentContainerRoot, ".openclaw", "sandbox-skills", "skills"),
       );
     }
     return roots;
@@ -470,6 +523,8 @@ class RemoteShellSandboxFsBridge implements SandboxFsBridge {
     allowFinalSymlinkForUnlink?: boolean;
     signal?: AbortSignal;
   }): Promise<string> {
+    // Canonicalize the nearest existing ancestor and append the missing suffix.
+    // This lets create/write operations validate paths that do not exist yet.
     const script = [
       "set -eu",
       'target="$1"',
@@ -507,10 +562,12 @@ class RemoteShellSandboxFsBridge implements SandboxFsBridge {
     action: string;
     signal?: AbortSignal;
   }): Promise<void> {
+    // Remote mutation helpers pin by parent path. Rejecting hardlinked regular
+    // files avoids editing another mount-visible name through the same inode.
     const result = await this.runRemoteScript({
       script: [
         'if [ ! -e "$1" ] && [ ! -L "$1" ]; then exit 0; fi',
-        'stats=$(stat -c "%F|%h" -- "$1")',
+        'stats=$(LC_ALL=C stat -c "%F|%h" -- "$1")',
         'printf "%s\\n" "$stats"',
       ].join("\n"),
       args: [params.containerPath],
@@ -612,75 +669,4 @@ class RemoteShellSandboxFsBridge implements SandboxFsBridge {
       allowFailure: params.allowFailure,
     });
   }
-}
-
-function buildRemoteProtectedSkillMounts(params: {
-  localRoot: string;
-  workspaceContainerRoot: string;
-  agentContainerRoot: string;
-  includeAgentMount: boolean;
-}): MountInfo[] {
-  const mounts: MountInfo[] = [
-    {
-      localRoot: path.join(params.localRoot, "skills"),
-      containerRoot: path.posix.join(params.workspaceContainerRoot, "skills"),
-      writable: false,
-      source: "protectedSkill",
-    },
-    {
-      localRoot: path.join(params.localRoot, ".agents", "skills"),
-      containerRoot: path.posix.join(params.workspaceContainerRoot, ".agents", "skills"),
-      writable: false,
-      source: "protectedSkill",
-    },
-  ];
-  if (params.includeAgentMount) {
-    mounts.push(
-      {
-        localRoot: path.join(params.localRoot, "skills"),
-        containerRoot: path.posix.join(params.agentContainerRoot, "skills"),
-        writable: false,
-        source: "protectedSkill",
-      },
-      {
-        localRoot: path.join(params.localRoot, ".agents", "skills"),
-        containerRoot: path.posix.join(params.agentContainerRoot, ".agents", "skills"),
-        writable: false,
-        source: "protectedSkill",
-      },
-    );
-  }
-  return mounts.filter((mount) =>
-    isExistingWorkspaceSkillMountSource({
-      agentWorkspaceDir: params.localRoot,
-      hostPath: mount.localRoot,
-    }),
-  );
-}
-
-function compareRemoteMountsByContainerPath(a: MountInfo, b: MountInfo): number {
-  return b.containerRoot.length - a.containerRoot.length || mountPriority(b) - mountPriority(a);
-}
-
-function compareRemoteMountsByLocalPath(a: MountInfo, b: MountInfo): number {
-  return b.localRoot.length - a.localRoot.length || mountPriority(b) - mountPriority(a);
-}
-
-function mountPriority(mount: MountInfo): number {
-  if (mount.source === "protectedSkill") {
-    return 2;
-  }
-  if (mount.source === "agent") {
-    return 1;
-  }
-  return 0;
-}
-
-function normalizeContainerPath(value: string): string {
-  const normalized = normalizeSandboxContainerPath(value.trim() || "/");
-  return normalized.startsWith("/") ? normalized : `/${normalized}`;
-}
-
-function toPosixRelative(root: string, candidate: string): string {
-  return path.relative(root, candidate).split(path.sep).filter(Boolean).join(path.posix.sep);
 }

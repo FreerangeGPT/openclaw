@@ -1,20 +1,11 @@
+// Slack plugin module implements shared behavior.
 import { describeAccountSnapshot } from "openclaw/plugin-sdk/account-helpers";
-import { formatAllowFromLowercase } from "openclaw/plugin-sdk/allow-from";
-import {
-  adaptScopedAccountAccessor,
-  createScopedChannelConfigAdapter,
-} from "openclaw/plugin-sdk/channel-config-helpers";
+import { adaptScopedAccountAccessor } from "openclaw/plugin-sdk/channel-config-helpers";
 import { isSlackPluginAccountConfigured } from "./account-configured.js";
 import { inspectSlackAccount } from "./account-inspect.js";
-import {
-  listSlackAccountIds,
-  resolveSlackConfigAccessorAccount,
-  resolveDefaultSlackAccountId,
-  resolveSlackAccount,
-  type SlackConfigAccessorAccount,
-  type ResolvedSlackAccount,
-} from "./accounts.js";
+import type { ResolvedSlackAccount } from "./accounts.js";
 import { getChatChannelMeta, type ChannelPlugin } from "./channel-api.js";
+import { slackBaseConfigAdapter } from "./config-adapter.js";
 import { SlackChannelConfigSchema } from "./config-schema.js";
 import { slackDoctor } from "./doctor.js";
 import { isSlackInteractiveRepliesEnabled } from "./interactive-replies.js";
@@ -22,29 +13,19 @@ import { collectRuntimeConfigAssignments, secretTargetRegistryEntries } from "./
 import { slackSecurityAdapter } from "./security.js";
 import { SLACK_CHANNEL } from "./setup-shared.js";
 
-export { setSlackChannelAllowlist, SLACK_CHANNEL } from "./setup-shared.js";
+export { SLACK_CHANNEL } from "./setup-shared.js";
 
 export { isSlackPluginAccountConfigured };
 
-export const slackConfigAdapter = createScopedChannelConfigAdapter<
-  ResolvedSlackAccount,
-  SlackConfigAccessorAccount
->({
-  sectionKey: SLACK_CHANNEL,
-  listAccountIds: listSlackAccountIds,
-  resolveAccount: adaptScopedAccountAccessor(resolveSlackAccount),
-  resolveAccessorAccount: resolveSlackConfigAccessorAccount,
+export const slackConfigAdapter = {
+  ...slackBaseConfigAdapter,
   inspectAccount: adaptScopedAccountAccessor(inspectSlackAccount),
-  defaultAccountId: resolveDefaultSlackAccountId,
-  clearBaseFields: ["botToken", "appToken", "name"],
-  resolveAllowFrom: (account) => account.allowFrom,
-  formatAllowFrom: (allowFrom) => formatAllowFromLowercase({ allowFrom }),
-  resolveDefaultTo: (account) => account.defaultTo,
-});
+};
 
 export function createSlackPluginBase(params: {
   setupWizard: NonNullable<ChannelPlugin<ResolvedSlackAccount>["setupWizard"]>;
   setup: NonNullable<ChannelPlugin<ResolvedSlackAccount>["setup"]>;
+  setupContract?: NonNullable<ChannelPlugin<ResolvedSlackAccount>["setupContract"]>;
 }): Pick<
   ChannelPlugin<ResolvedSlackAccount>,
   | "id"
@@ -59,6 +40,7 @@ export function createSlackPluginBase(params: {
   | "configSchema"
   | "config"
   | "setup"
+  | "setupContract"
   | "security"
   | "secrets"
 > {
@@ -69,6 +51,7 @@ export function createSlackPluginBase(params: {
       preferSessionLookupForAnnounceTarget: true,
     },
     setupWizard: params.setupWizard,
+    ...(params.setupContract ? { setupContract: params.setupContract } : {}),
     capabilities: {
       chatTypes: ["direct", "channel", "thread"],
       reactions: true,
@@ -105,6 +88,8 @@ export function createSlackPluginBase(params: {
               "- Slack interactive replies are disabled. If needed, ask to set `channels.slack.capabilities.interactiveReplies=true` (or the same under `channels.slack.accounts.<account>.capabilities`).",
             ]
         ).concat([
+          "- For line, bar, area, or pie data, use a `presentation` chart block; Slack renders it as a native chart and retains a text data summary for accessibility.",
+          "- For row-and-column data, use an explicit `presentation` table block; Slack renders it as a native table and retains a linear text summary for accessibility. Markdown pipe tables are not auto-promoted.",
           "- Slack plain text sends: write standard Markdown; OpenClaw converts it to Slack mrkdwn, including `**bold**`, headings, lists, and `[label](url)` links.",
           "- When mentioning Slack users, use the stable `<@USER_ID>` token from Slack context instead of plain `@name` text so Slack notifies and links the user.",
           "- Slack Block Kit or presentation text fields are sent as Slack mrkdwn directly; use `*bold*`, `_italic_`, `~strike~`, `<url|label>` links, and avoid Markdown headings or pipe tables there.",

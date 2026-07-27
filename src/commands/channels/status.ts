@@ -1,4 +1,6 @@
+// Implements `openclaw channels status` with gateway status and config-only fallback.
 import { redactSensitiveUrlLikeString } from "@openclaw/net-policy/redact-sensitive-url";
+import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
 import { formatDocsLink } from "../../../packages/terminal-core/src/links.js";
 import { theme } from "../../../packages/terminal-core/src/theme.js";
 import { normalizeChannelId } from "../../channels/plugins/index.js";
@@ -9,10 +11,12 @@ import { parseTimeoutMsWithFallback } from "../../cli/parse-timeout.js";
 import { withProgress } from "../../cli/progress.js";
 import { readConfigFileSnapshot } from "../../config/config.js";
 import { callGateway } from "../../gateway/call.js";
+import { isGatewaySecretRefUnavailableError } from "../../gateway/credentials.js";
 import { collectChannelStatusIssues } from "../../infra/channels-status-issues.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { formatTimeAgo } from "../../infra/format-time/format-relative.ts";
-import { listConfiguredChannelIdsForReadOnlyScope } from "../../plugins/channel-plugin-ids.js";
+import { formatPhoneNumberForCli } from "../../infra/phone-number-presentation.js";
+import { listConfiguredAnnounceChannelIdsForConfig } from "../../plugins/channel-plugin-ids.js";
 import { defaultRuntime, type RuntimeEnv, writeRuntimeJson } from "../../runtime.js";
 import {
   appendBaseUrlBit,
@@ -75,6 +79,7 @@ function formatEventLoopBits(value: unknown): string | null {
     .join(" ");
 }
 
+/** Render gateway channel status payloads into terminal-friendly lines. */
 export function formatGatewayChannelsStatusLines(payload: Record<string, unknown>): string[] {
   const lines: string[] = [];
   lines.push(theme.success("Gateway reachable."));
@@ -139,7 +144,10 @@ export function formatGatewayChannelsStatusLines(payload: Record<string, unknown
         bits.push(`dm:${account.dmPolicy}`);
       }
       if (Array.isArray(account.allowFrom) && account.allowFrom.length > 0) {
-        bits.push(`allow:${account.allowFrom.slice(0, 2).join(",")}`);
+        const allowFrom = account.allowFrom
+          .slice(0, 2)
+          .map((entry) => formatPhoneNumberForCli(String(entry)));
+        bits.push(`allow:${allowFrom.join(",")}`);
       }
       appendTokenSourceBits(bits, account);
       const application = account.application as
@@ -211,12 +219,17 @@ export function formatGatewayChannelsStatusLines(payload: Record<string, unknown
   return lines;
 }
 
+/** Query gateway channel status, falling back to config-only output when unavailable. */
 export async function channelsStatusCommand(
   opts: ChannelsStatusOptions,
   runtime: RuntimeEnv = defaultRuntime,
 ) {
-  const timeoutMs = parseTimeoutMsWithFallback(opts.timeout, opts.probe ? 30_000 : 10_000);
-  const requestedChannel = opts.channel ? normalizeChannelId(opts.channel) : null;
+  const timeoutMs = parseTimeoutMsWithFallback(opts.timeout, opts.probe ? 30_000 : 10_000, {
+    invalidType: "error",
+  });
+  const requestedChannel = opts.channel
+    ? (normalizeChannelId(opts.channel) ?? normalizeOptionalLowercaseString(opts.channel))
+    : null;
   const statusLabel = opts.probe ? "Checking channel status (probe)…" : "Checking channel status…";
   const shouldLogStatus = opts.json !== true && !process.stderr.isTTY;
   if (shouldLogStatus) {
@@ -251,7 +264,13 @@ export async function channelsStatusCommand(
     runtime.log(formatGatewayChannelsStatusLines(payload).join("\n"));
   } catch (err) {
     const safeError = formatChannelsStatusError(err);
-    runtime.error(`Gateway not reachable: ${safeError}`);
+    const gatewayAuthUnavailable = isGatewaySecretRefUnavailableError(err);
+    const fallbackReason = gatewayAuthUnavailable
+      ? "Gateway auth unavailable; showing config-only status."
+      : "Gateway not reachable; showing config-only status.";
+    runtime.error(
+      `${gatewayAuthUnavailable ? "Gateway auth unavailable" : "Gateway not reachable"}: ${safeError}`,
+    );
     const cfg = await requireValidConfigSnapshot(runtime);
     if (!cfg) {
       return;
@@ -269,16 +288,16 @@ export async function channelsStatusCommand(
       writeRuntimeJson(runtime, {
         gatewayReachable: false,
         error: safeError,
+        gatewayAuthUnavailable,
         configOnly: true,
         config: {
           path: snapshot.path,
           mode,
         },
-        configuredChannels: listConfiguredChannelIdsForReadOnlyScope({
+        configuredChannels: listConfiguredAnnounceChannelIdsForConfig({
           config: resolvedConfig,
           activationSourceConfig: cfg,
           env: process.env,
-          includePersistedAuthState: false,
         }).filter((channelId) => !requestedChannel || channelId === requestedChannel),
       });
       return;
@@ -291,7 +310,7 @@ export async function channelsStatusCommand(
             path: snapshot.path,
             mode,
           },
-          { sourceConfig: cfg, channel: opts.channel },
+          { sourceConfig: cfg, channel: opts.channel, fallbackReason },
         )
       ).join("\n"),
     );

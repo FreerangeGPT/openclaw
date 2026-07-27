@@ -1,44 +1,38 @@
+// Applies media-understanding outputs to inbound message context, including
+// attachment normalization, provider execution, file text extraction, and echoing.
 import path from "node:path";
+import { expectDefined } from "@openclaw/normalization-core";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
+import pMap from "p-map";
+import type { ActiveMediaModel } from "../../packages/media-understanding-common/src/active-model.js";
 import {
-  DEFAULT_INBOUND_FILE_CONTEXT_ENTRY_MAX_CHARS,
-  DEFAULT_INBOUND_FILE_CONTEXT_TOTAL_MAX_CHARS,
-  DEFAULT_INBOUND_MEDIA_OUTPUT_ENTRY_MAX_CHARS,
-  DEFAULT_INBOUND_MEDIA_OUTPUT_TOTAL_MAX_CHARS,
-  resolvePromptContextLimit,
-  truncatePromptContextEntries,
-  truncatePromptContextText,
-} from "../auto-reply/reply/inbound-context-budget.js";
+  formatAudioTranscripts,
+  formatMediaUnderstandingBody,
+} from "../../packages/media-understanding-common/src/format.js";
 import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
 import type { MsgContext } from "../auto-reply/templating.js";
 import type { OpenClawConfig } from "../config/types.js";
 import { logVerbose, shouldLogVerbose } from "../globals.js";
 import { renderFileContextBlock } from "../media/file-context.js";
-import {
-  extractFileContentFromSource,
-  normalizeMimeType,
-  resolveInputFileLimits,
-} from "../media/input-files.js";
+import { extractFileContentFromSource, normalizeMimeType } from "../media/input-files.js";
 import { wrapExternalContent } from "../security/external-content.js";
-import type { ActiveMediaModel } from "./active-model.types.js";
+import { runMediaCapability } from "./apply-capability.js";
 import { resolveAttachmentKind } from "./attachments.js";
-import { runWithConcurrency } from "./concurrency.js";
 import { DEFAULT_ECHO_TRANSCRIPT_FORMAT, sendTranscriptEcho } from "./echo-transcript.js";
+import type { ExtractedFileImage } from "./extracted-file-images.js";
 import {
-  extractMediaUserText,
-  formatAudioTranscripts,
-  formatMediaUnderstandingBody,
-} from "./format.js";
+  type FileExtractionLimits,
+  resolveFileExtractionLimits,
+} from "./file-extraction-limits.js";
 import { resolveConcurrency } from "./resolve.js";
 import {
   buildProviderRegistry,
   createMediaAttachmentCache,
   normalizeMediaAttachments,
   resolveMediaAttachmentLocalRoots,
-  runCapability,
 } from "./runner.js";
 import type {
   MediaUnderstandingCapability,
@@ -50,6 +44,7 @@ import type {
 export type ApplyMediaUnderstandingResult = {
   outputs: MediaUnderstandingOutput[];
   decisions: MediaUnderstandingDecision[];
+  extractedFileImages: ExtractedFileImage[];
   appliedImage: boolean;
   appliedAudio: boolean;
   appliedVideo: boolean;
@@ -57,6 +52,7 @@ export type ApplyMediaUnderstandingResult = {
 };
 
 const CAPABILITY_ORDER: MediaUnderstandingCapability[] = ["image", "audio", "video"];
+const AUDIO_ONLY_CAPABILITY_ORDER: MediaUnderstandingCapability[] = ["audio"];
 const EMPTY_VOICE_NOTE_PLACEHOLDER =
   "[Voice note could not be transcribed because the audio attachment was too small]";
 const EXTRA_TEXT_MIMES = [
@@ -97,22 +93,13 @@ const MIME_TYPE_WITH_OPTIONAL_PARAMS = new RegExp(
   "i",
 );
 
-export function sanitizeMimeType(value?: string): string | undefined {
+function sanitizeMimeType(value?: string): string | undefined {
   const trimmed = normalizeOptionalString(value);
   if (!trimmed) {
     return undefined;
   }
   const match = trimmed.match(MIME_TYPE_WITH_OPTIONAL_PARAMS);
   return match?.[1]?.toLowerCase();
-}
-
-function resolveFileLimits(cfg: OpenClawConfig) {
-  const files = cfg.gateway?.http?.endpoints?.responses?.files;
-  const allowedMimesConfigured = Boolean(files?.allowedMimes?.length);
-  return {
-    ...resolveInputFileLimits(files),
-    allowedMimesConfigured,
-  };
 }
 
 function appendFileBlocks(body: string | undefined, blocks: string[]): string {
@@ -134,44 +121,9 @@ function wrapUntrustedAttachmentContent(content: string): string {
   });
 }
 
-function budgetMediaOutputs(outputs: MediaUnderstandingOutput[]): MediaUnderstandingOutput[] {
-  if (outputs.length === 0) {
-    return outputs;
-  }
-  const budgeted = truncatePromptContextEntries(
-    outputs.map((output) => output.text),
-    {
-      entryMaxChars: resolvePromptContextLimit(
-        "OPENCLAW_INBOUND_MEDIA_OUTPUT_ENTRY_MAX_CHARS",
-        DEFAULT_INBOUND_MEDIA_OUTPUT_ENTRY_MAX_CHARS,
-      ),
-      totalMaxChars: resolvePromptContextLimit(
-        "OPENCLAW_INBOUND_MEDIA_OUTPUT_TOTAL_MAX_CHARS",
-        DEFAULT_INBOUND_MEDIA_OUTPUT_TOTAL_MAX_CHARS,
-      ),
-      label: "media understanding output",
-    },
-  );
-  const retained = outputs.slice(outputs.length - budgeted.entries.length);
-  const capped = retained.map((output, index) => ({
-    ...output,
-    text: budgeted.entries[index]?.text ?? "",
-  }));
-  if (budgeted.omittedEntries > 0 && capped.length > 0) {
-    capped[0] = {
-      ...capped[0],
-      text: [
-        `[OpenClaw omitted ${budgeted.omittedEntries.toLocaleString()} older media outputs to keep the prompt cache bounded.]`,
-        capped[0].text,
-      ]
-        .filter(Boolean)
-        .join("\n\n"),
-    };
-  }
-  return capped.filter((output) => output.text.trim());
-}
-
 function resolveUtf16Charset(buffer?: Buffer): "utf-16le" | "utf-16be" | undefined {
+  // Some chat attachments arrive as UTF-16 without a reliable MIME charset; the
+  // BOM and zero-byte distribution are enough to select a safe decoder.
   if (!buffer || buffer.length < 2) {
     return undefined;
   }
@@ -316,7 +268,9 @@ function hasSuspiciousBinarySignal(buffer?: Buffer): boolean {
   if (sample.length < 4 || sample[0] !== 0x50 || sample[1] !== 0x4b) {
     return false;
   }
-  const signature = (sample[2] << 8) | sample[3];
+  const signature =
+    (expectDefined(sample[2], "sample entry at 2") << 8) |
+    expectDefined(sample[3], "sample entry at 3");
   // Cover the ZIP local-header, central-directory, and empty-archive markers
   // so archive payloads cannot slip past text coercion when MIME detection is weak.
   return signature === 0x0304 || signature === 0x0102 || signature === 0x0506;
@@ -331,8 +285,8 @@ function decodeTextSample(buffer?: Buffer): string {
   if (utf16Charset === "utf-16be") {
     const swapped = Buffer.alloc(sample.length);
     for (let i = 0; i + 1 < sample.length; i += 2) {
-      swapped[i] = sample[i + 1];
-      swapped[i + 1] = sample[i];
+      swapped[i] = expectDefined(sample[i + 1], "UTF-16BE low byte");
+      swapped[i + 1] = expectDefined(sample[i], "UTF-16BE high byte");
     }
     return new TextDecoder("utf-16le").decode(swapped);
   }
@@ -428,31 +382,24 @@ function isBinaryMediaMime(mime?: string): boolean {
   return false;
 }
 
-async function extractFileBlocks(params: {
+type ExtractedFileContext = {
+  blocks: string[];
+  images: ExtractedFileImage[];
+};
+
+async function extractFileContext(params: {
   attachments: ReturnType<typeof normalizeMediaAttachments>;
   cache: ReturnType<typeof createMediaAttachmentCache>;
   cfg: OpenClawConfig;
-  limits: ReturnType<typeof resolveFileLimits>;
+  limits: FileExtractionLimits;
   skipAttachmentIndexes?: Set<number>;
-}): Promise<string[]> {
+}): Promise<ExtractedFileContext> {
   const { attachments, cache, cfg, limits, skipAttachmentIndexes } = params;
   if (!attachments || attachments.length === 0) {
-    return [];
+    return { blocks: [], images: [] };
   }
-  const fileEntryMaxChars = resolvePromptContextLimit(
-    "OPENCLAW_INBOUND_FILE_CONTEXT_ENTRY_MAX_CHARS",
-    DEFAULT_INBOUND_FILE_CONTEXT_ENTRY_MAX_CHARS,
-  );
-  const fileTotalMaxChars = resolvePromptContextLimit(
-    "OPENCLAW_INBOUND_FILE_CONTEXT_TOTAL_MAX_CHARS",
-    DEFAULT_INBOUND_FILE_CONTEXT_TOTAL_MAX_CHARS,
-  );
-  const candidates: Array<{
-    filename?: string;
-    fallbackName: string;
-    mimeType: string;
-    content: string;
-  }> = [];
+  const blocks: string[] = [];
+  const images: ExtractedFileImage[] = [];
   for (const attachment of attachments) {
     if (!attachment) {
       continue;
@@ -559,64 +506,28 @@ async function extractFileBlocks(params: {
     }
     const text = extracted?.text?.trim() ?? "";
     let blockText = text ? wrapUntrustedAttachmentContent(text) : "";
+    if (extracted?.images && extracted.images.length > 0) {
+      images.push(
+        ...extracted.images.map((image) => ({ ...image, attachmentIndex: attachment.index })),
+      );
+    }
     if (!blockText) {
       if (extracted?.images && extracted.images.length > 0) {
-        blockText = "[PDF content rendered to images; images not forwarded to model]";
+        blockText = "[PDF content rendered to images]";
       } else {
         blockText = "[No extractable text]";
       }
     }
-    candidates.push({
-      filename: bufferResult.fileName,
-      fallbackName: `file-${attachment.index + 1}`,
-      mimeType,
-      content: blockText,
-    });
-  }
-  const retainedReversed: Array<{
-    candidate: (typeof candidates)[number];
-    content: string;
-  }> = [];
-  let remainingFileChars = fileTotalMaxChars;
-  let omittedFileBlocks = 0;
-  for (let index = candidates.length - 1; index >= 0; index -= 1) {
-    const candidate = candidates[index];
-    if (!candidate || remainingFileChars <= 0) {
-      omittedFileBlocks += 1;
-      continue;
-    }
-    if (candidate.content.length > remainingFileChars && retainedReversed.length > 0) {
-      omittedFileBlocks += 1;
-      continue;
-    }
-    const budgetedContent = truncatePromptContextText(candidate.content, {
-      maxChars: Math.min(fileEntryMaxChars, remainingFileChars),
-      label: `file attachment ${index + 1}`,
-    });
-    retainedReversed.push({
-      candidate,
-      content: budgetedContent.text,
-    });
-    remainingFileChars = Math.max(0, remainingFileChars - budgetedContent.text.length);
-  }
-  const blocks = retainedReversed.toReversed().map(({ candidate, content }) =>
-    renderFileContextBlock({
-      filename: candidate.filename,
-      fallbackName: candidate.fallbackName,
-      mimeType: candidate.mimeType,
-      content,
-    }),
-  );
-  if (omittedFileBlocks > 0) {
-    blocks.unshift(
+    blocks.push(
       renderFileContextBlock({
-        filename: "openclaw-file-context-budget.txt",
-        mimeType: "text/plain",
-        content: `[OpenClaw omitted ${omittedFileBlocks.toLocaleString()} older file attachment context blocks to keep the prompt cache bounded.]`,
+        filename: bufferResult.fileName,
+        fallbackName: `file-${attachment.index + 1}`,
+        mimeType,
+        content: blockText,
       }),
     );
   }
-  return blocks;
+  return { blocks, images };
 }
 
 export async function applyMediaUnderstanding(params: {
@@ -627,13 +538,14 @@ export async function applyMediaUnderstanding(params: {
   workspaceDir?: string;
   providers?: Record<string, MediaUnderstandingProvider>;
   activeModel?: ActiveMediaModel;
+  /** Preserve native-harness ownership of image, video, and file inputs while applying STT. */
+  processingMode?: "audio-only";
 }): Promise<ApplyMediaUnderstandingResult> {
   const { ctx, cfg } = params;
-  const mediaWorkspaceDir = ctx.MediaWorkspaceDir ?? params.workspaceDir;
   const commandCandidates = [ctx.CommandBody, ctx.RawBody, ctx.Body];
   const originalUserText =
     commandCandidates
-      .map((value) => extractMediaUserText(value))
+      .map((value) => normalizeOptionalString(value))
       .find((value) => value && value.trim()) ?? undefined;
 
   const attachments = normalizeMediaAttachments(ctx);
@@ -645,28 +557,28 @@ export async function applyMediaUnderstanding(params: {
       workspaceDir: params.workspaceDir,
     }),
     ssrfPolicy: cfg.tools?.web?.fetch?.ssrfPolicy,
-    workspaceDir: mediaWorkspaceDir,
+    workspaceDir: params.workspaceDir,
   });
 
   try {
-    const tasks = CAPABILITY_ORDER.map((capability) => async () => {
-      const config = cfg.tools?.media?.[capability];
-      return await runCapability({
-        capability,
-        cfg,
-        ctx,
-        attachments: cache,
-        media: attachments,
-        agentId: params.agentId,
-        agentDir: params.agentDir,
-        workspaceDir: params.workspaceDir,
-        providerRegistry,
-        config,
-        activeModel: params.activeModel,
-      });
-    });
-
-    const results = await runWithConcurrency(tasks, resolveConcurrency(cfg));
+    const results = await pMap(
+      params.processingMode === "audio-only" ? AUDIO_ONLY_CAPABILITY_ORDER : CAPABILITY_ORDER,
+      async (capability) =>
+        await runMediaCapability({
+          capability,
+          cfg,
+          ctx,
+          attachments: cache,
+          media: attachments,
+          agentId: params.agentId,
+          agentDir: params.agentDir,
+          workspaceDir: params.workspaceDir,
+          providerRegistry,
+          config: cfg.tools?.media?.[capability],
+          activeModel: params.activeModel,
+        }),
+      { concurrency: resolveConcurrency(cfg), stopOnError: false },
+    );
     const outputs: MediaUnderstandingOutput[] = [];
     const decisions: MediaUnderstandingDecision[] = [];
     for (const entry of results) {
@@ -731,10 +643,9 @@ export async function applyMediaUnderstanding(params: {
       ctx.MediaUnderstandingDecisions = [...(ctx.MediaUnderstandingDecisions ?? []), ...decisions];
     }
 
-    const promptOutputs = budgetMediaOutputs(outputs);
-    if (promptOutputs.length > 0) {
-      ctx.Body = formatMediaUnderstandingBody({ body: ctx.Body, outputs: promptOutputs });
-      const audioOutputs = promptOutputs.filter((output) => output.kind === "audio.transcription");
+    if (outputs.length > 0) {
+      ctx.Body = formatMediaUnderstandingBody({ body: ctx.Body, outputs });
+      const audioOutputs = outputs.filter((output) => output.kind === "audio.transcription");
       if (audioOutputs.length > 0) {
         const transcript = formatAudioTranscripts(audioOutputs);
         ctx.Transcript = transcript;
@@ -759,7 +670,7 @@ export async function applyMediaUnderstanding(params: {
         ctx.CommandBody = originalUserText;
         ctx.RawBody = originalUserText;
       }
-      ctx.MediaUnderstanding = [...(ctx.MediaUnderstanding ?? []), ...promptOutputs];
+      ctx.MediaUnderstanding = [...(ctx.MediaUnderstanding ?? []), ...outputs];
     }
     // Only skip file extraction for attachments that have a real (non-synthetic)
     // audio transcription. Synthetic placeholders should not prevent file extraction
@@ -776,30 +687,35 @@ export async function applyMediaUnderstanding(params: {
         )
         .map((output) => output.attachmentIndex),
     );
-    const fileBlocks = await extractFileBlocks({
-      attachments,
-      cache,
-      cfg,
-      limits: resolveFileLimits(cfg),
-      skipAttachmentIndexes: audioAttachmentIndexes.size > 0 ? audioAttachmentIndexes : undefined,
-    });
-    if (fileBlocks.length > 0) {
-      ctx.Body = appendFileBlocks(ctx.Body, fileBlocks);
+    const fileContext =
+      params.processingMode === "audio-only"
+        ? { blocks: [], images: [] }
+        : await extractFileContext({
+            attachments,
+            cache,
+            cfg,
+            limits: resolveFileExtractionLimits(cfg),
+            skipAttachmentIndexes:
+              audioAttachmentIndexes.size > 0 ? audioAttachmentIndexes : undefined,
+          });
+    if (fileContext.blocks.length > 0) {
+      ctx.Body = appendFileBlocks(ctx.Body, fileContext.blocks);
     }
-    if (outputs.length > 0 || fileBlocks.length > 0) {
+    if (outputs.length > 0 || fileContext.blocks.length > 0) {
       finalizeInboundContext(ctx, {
         forceBodyForAgent: true,
-        forceBodyForCommands: outputs.length > 0 || fileBlocks.length > 0,
+        forceBodyForCommands: outputs.length > 0 || fileContext.blocks.length > 0,
       });
     }
 
     return {
       outputs,
       decisions,
+      extractedFileImages: fileContext.images,
       appliedImage: outputs.some((output) => output.kind === "image.description"),
       appliedAudio: outputs.some((output) => output.kind === "audio.transcription"),
       appliedVideo: outputs.some((output) => output.kind === "video.description"),
-      appliedFile: fileBlocks.length > 0,
+      appliedFile: fileContext.blocks.length > 0,
     };
   } finally {
     await cache.cleanup();

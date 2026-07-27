@@ -1,10 +1,17 @@
-import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
+/**
+ * Collects configured native harness runtime ids from model provider config.
+ */
+import { listModelRefsFromConfigValue } from "@openclaw/model-catalog-core/configured-model-refs";
+import { parseModelCatalogRef } from "@openclaw/model-catalog-core/model-catalog-refs";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { isRecord } from "../utils.js";
 import { OPENCLAW_AGENT_RUNTIME_ID, isDefaultAgentRuntimeId } from "./agent-runtime-id.js";
 import { normalizeOptionalAgentRuntimeId } from "./agent-runtime-id.js";
+import { listAgentEntries } from "./agent-scope-config.js";
 import { resolveAgentHarnessPolicy } from "./harness/policy.js";
 
+// Harness runtime discovery feeds plugin preloading/setup. Only plugin runtimes
+// are selectable here; built-in OpenClaw/default runtime ids are excluded.
 function normalizeConfiguredRuntimeId(value: unknown): string | undefined {
   return normalizeOptionalAgentRuntimeId(value);
 }
@@ -17,48 +24,15 @@ function isSelectablePluginRuntime(runtime: string | undefined): runtime is stri
   );
 }
 
-function listAgentModelRefs(value: unknown): string[] {
-  if (typeof value === "string") {
-    return [value];
-  }
-  if (!isRecord(value)) {
-    return [];
-  }
-  const refs: string[] = [];
-  if (typeof value.primary === "string") {
-    refs.push(value.primary);
-  }
-  if (Array.isArray(value.fallbacks)) {
-    for (const fallback of value.fallbacks) {
-      if (typeof fallback === "string") {
-        refs.push(fallback);
-      }
-    }
-  }
-  return refs;
-}
-
-function pushAgentModelRefs(refs: string[], value: unknown): void {
-  for (const ref of listAgentModelRefs(value)) {
-    refs.push(ref);
-  }
-}
-
+// Parses provider/model refs used in config maps before asking harness policy
+// which runtime owns that provider/model pair.
 function parseConfiguredModelRef(
   value: unknown,
 ): { provider: string; modelId: string } | undefined {
   if (typeof value !== "string") {
     return undefined;
   }
-  const trimmed = value.trim();
-  const slash = trimmed.indexOf("/");
-  if (slash <= 0 || slash >= trimmed.length - 1) {
-    return undefined;
-  }
-  return {
-    provider: normalizeProviderId(trimmed.slice(0, slash)),
-    modelId: trimmed.slice(slash + 1).trim(),
-  };
+  return parseModelCatalogRef(value) ?? undefined;
 }
 
 function resolveConfiguredModelHarnessRuntime(params: {
@@ -114,7 +88,7 @@ function pushConfiguredModelRuntimeIds(config: OpenClawConfig, runtimes: Set<str
     }
   };
   pushModelMapRuntimeIds(config.agents?.defaults?.models);
-  const agents = Array.isArray(config.agents?.list) ? config.agents.list : [];
+  const agents = listAgentEntries(config);
   for (const agent of agents) {
     pushModelMapRuntimeIds(isRecord(agent) ? agent.models : undefined);
   }
@@ -146,30 +120,25 @@ function pushConfiguredAgentModelRuntimeIds(
   };
 
   const defaultsModel = config.agents?.defaults?.model;
-  const defaultsModelRefs: string[] = [];
-  pushAgentModelRefs(defaultsModelRefs, defaultsModel);
-  pushModelRefs(defaultsModelRefs);
+  pushModelRefs(listModelRefsFromConfigValue(defaultsModel));
   pushModelMapRefs(config.agents?.defaults?.models);
 
-  if (!Array.isArray(config.agents?.list)) {
-    return;
-  }
-  for (const agent of config.agents.list) {
+  for (const agent of listAgentEntries(config)) {
     if (!isRecord(agent)) {
       continue;
     }
     const agentId = typeof agent.id === "string" ? agent.id : undefined;
-    const selectedModelRefs: string[] = [];
-    pushAgentModelRefs(selectedModelRefs, agent.model ?? defaultsModel);
-    pushModelRefs(selectedModelRefs, agentId);
+    pushModelRefs(listModelRefsFromConfigValue(agent.model ?? defaultsModel), agentId);
     pushModelMapRefs(agent.models, agentId);
   }
 }
 
+/** Options for collecting configured agent harness runtimes. */
 export type ConfiguredAgentHarnessRuntimeOptions = {
   includeImplicitRuntimePreferences?: boolean;
 };
 
+/** Lists configured plugin harness runtime ids referenced by agent/model config. */
 export function collectConfiguredAgentHarnessRuntimes(
   config: OpenClawConfig,
   options: ConfiguredAgentHarnessRuntimeOptions = {},

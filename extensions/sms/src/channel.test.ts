@@ -1,9 +1,8 @@
+// Sms tests cover channel plugin behavior.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ResolvedSmsAccount } from "./types.js";
 
 type ChannelModule = typeof import("./channel.js");
 
-let resolveSmsTextChunkLimit: ChannelModule["resolveSmsTextChunkLimit"];
 let smsPlugin: ChannelModule["smsPlugin"];
 
 const sendSmsViaTwilio = vi.hoisted(() =>
@@ -21,7 +20,7 @@ beforeEach(async () => {
   vi.doMock("./twilio.js", () => ({
     sendSmsViaTwilio,
   }));
-  ({ resolveSmsTextChunkLimit, smsPlugin } = await import("./channel.js"));
+  ({ smsPlugin } = await import("./channel.js"));
 });
 
 afterEach(() => {
@@ -49,16 +48,13 @@ describe("smsPlugin status", () => {
       },
     });
 
-    expect(snapshot).toMatchObject({
+    expect(snapshot).toEqual({
       accountId: "support",
       name: "+15557654321",
       enabled: true,
       configured: true,
       statusState: "configured",
-      running: false,
-      webhookPath: "/webhooks/sms",
     });
-    expect(snapshot).not.toHaveProperty("connected");
   });
 });
 
@@ -74,7 +70,7 @@ describe("smsPlugin outbound", () => {
     expect(smsPlugin.messaging?.targetPrefixes).toEqual(["twilio-sms"]);
     expect(smsPlugin.outbound?.chunker?.("alpha beta", 6)).toEqual(["alpha", "beta"]);
     expect(
-      resolveSmsTextChunkLimit({
+      smsPlugin.outbound?.resolveEffectiveTextChunkLimit?.({
         cfg: {
           channels: {
             sms: {
@@ -88,7 +84,7 @@ describe("smsPlugin outbound", () => {
       }),
     ).toBe(42);
     expect(
-      resolveSmsTextChunkLimit({
+      smsPlugin.outbound?.resolveEffectiveTextChunkLimit?.({
         cfg: {
           channels: {
             sms: {
@@ -155,34 +151,5 @@ describe("smsPlugin outbound", () => {
         to: "",
       }),
     ).toEqual({ ok: true, to: "+15551234567" });
-  });
-
-  it("preserves inspected account status fields", async () => {
-    const cfg = {
-      channels: {
-        sms: {
-          accountSid: "AC123",
-          authToken: "secret",
-          fromNumber: "+15557654321",
-          webhookPath: "/twilio/sms",
-        },
-      },
-    };
-    const account = smsPlugin.config.inspectAccount?.(cfg);
-    expect(account).toBeDefined();
-
-    const snapshot = await smsPlugin.status?.buildAccountSnapshot?.({
-      account: account as ResolvedSmsAccount,
-      cfg,
-    });
-
-    expect(snapshot).toMatchObject({
-      configured: true,
-      enabled: true,
-      statusState: "configured",
-      tokenStatus: "available",
-      webhookPath: "/twilio/sms",
-    });
-    expect(snapshot).not.toHaveProperty("connected");
   });
 });

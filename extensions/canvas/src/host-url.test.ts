@@ -1,3 +1,4 @@
+// Canvas tests cover host url plugin behavior.
 import { describe, expect, it } from "vitest";
 import { resolveCanvasHostUrl } from "./host-url.js";
 
@@ -30,7 +31,7 @@ describe("resolveCanvasHostUrl", () => {
         hostOverride: "127.0.0.1",
         requestHost: "example.com:8443",
       },
-      expected: "http://example.com:3000",
+      expected: "http://example.com:8443",
     },
     {
       name: "maps proxied default gateway ports to request-host ports",

@@ -1,3 +1,6 @@
+/**
+ * Runtime SDK helpers for agent harness task persistence and completion delivery.
+ */
 import { normalizeOptionalString } from "../../packages/normalization-core/src/string-coerce.js";
 import { buildAnnounceIdempotencyKey } from "../agents/announce-idempotency.js";
 import {
@@ -12,9 +15,11 @@ import {
   deliverSubagentAnnouncement,
   isInternalAnnounceRequesterSession,
   loadRequesterSessionEntry,
-  resolveSubagentCompletionOrigin,
 } from "../agents/subagent-announce-delivery.js";
-import { resolveAnnounceOrigin } from "../agents/subagent-announce-origin.js";
+import {
+  resolveAnnounceOrigin,
+  resolveSubagentCompletionOrigin,
+} from "../agents/subagent-announce-origin.js";
 import {
   assertAgentHarnessTaskRuntimeScope,
   type AgentHarnessTaskRuntimeScope,
@@ -37,13 +42,25 @@ type RecordTaskRunProgressParams = Parameters<typeof recordTaskRunProgressByRunI
 type FinalizeTaskRunParams = Parameters<typeof finalizeTaskRunByRunId>[0];
 type SetDeliveryStatusParams = Parameters<typeof setDetachedTaskDeliveryStatusByRunId>[0];
 
+/** Scope and naming options used to bind task operations to one requester session. */
 export type AgentHarnessTaskRuntimeScopeParams = {
-  runtime: AgentHarnessTaskRuntimeId;
   scope: AgentHarnessTaskRuntimeScope;
-  taskKind?: string;
   runIdPrefix?: string;
-};
+} & (
+  | {
+      // Core identifies harness-owned subagent rows by the taskKind stamped here
+      // (isHarnessOwnedSubagentTask); a subagent row created without one would be
+      // read as an OpenClaw-owned child session and reclaimed on the short grace.
+      runtime: Extract<AgentHarnessTaskRuntimeId, "subagent">;
+      taskKind: string;
+    }
+  | {
+      runtime: Exclude<AgentHarnessTaskRuntimeId, "subagent">;
+      taskKind?: string;
+    }
+);
 
+/** Create-task params with runtime and requester scope supplied by the scoped task runtime. */
 export type AgentHarnessScopedCreateRunningTaskRunParams = Omit<
   CreateRunningTaskRunParams,
   "runtime" | "taskKind" | "requesterSessionKey" | "ownerKey" | "scopeKind"
@@ -51,21 +68,25 @@ export type AgentHarnessScopedCreateRunningTaskRunParams = Omit<
   runId: string;
 };
 
+/** Progress params scoped to the requester session owned by the harness runtime. */
 export type AgentHarnessScopedRecordTaskRunProgressParams = Omit<
   RecordTaskRunProgressParams,
   "runtime" | "sessionKey"
 >;
 
+/** Finalization params scoped to the requester session owned by the harness runtime. */
 export type AgentHarnessScopedFinalizeTaskRunParams = Omit<
   FinalizeTaskRunParams,
   "runtime" | "sessionKey"
 >;
 
+/** Delivery-status params scoped to the requester session owned by the harness runtime. */
 export type AgentHarnessScopedSetDeliveryStatusParams = Omit<
   SetDeliveryStatusParams,
   "runtime" | "sessionKey"
 >;
 
+/** Scoped task runtime that prevents callers from mutating tasks outside their harness scope. */
 export type AgentHarnessTaskRuntime = {
   createRunningTaskRun(params: AgentHarnessScopedCreateRunningTaskRunParams): TaskRecord;
   tryCreateRunningTaskRun(params: AgentHarnessScopedCreateRunningTaskRunParams): TaskRecord | null;
@@ -77,14 +98,17 @@ export type AgentHarnessTaskRuntime = {
   listTaskRecords(): TaskRecord[];
 };
 
+/** Completion states a harness task can report to its requester. */
 export type AgentHarnessCompletionStatus = "succeeded" | "failed" | "cancelled";
 
+/** Delivery result returned after routing a harness task completion announcement. */
 export type AgentHarnessCompletionDelivery = Awaited<
   ReturnType<typeof deliverSubagentAnnouncement>
 >;
 
 const AGENT_HARNESS_COMPLETION_SOURCE_TOOL = "agent_harness_task";
 
+/** Creates a task runtime whose run ids and task records are constrained to one scope. */
 export function createAgentHarnessTaskRuntime(
   params: AgentHarnessTaskRuntimeScopeParams,
 ): AgentHarnessTaskRuntime {
@@ -153,6 +177,7 @@ export function createAgentHarnessTaskRuntime(
   };
 }
 
+/** Delivers a completed harness task result back to the requester or parent session. */
 export async function deliverAgentHarnessTaskCompletion(params: {
   scope: AgentHarnessTaskRuntimeScope;
   childSessionKey: string;
@@ -240,6 +265,7 @@ function mapHarnessCompletionStatus(
   return "error";
 }
 
+/** Returns true when completion delivery reached a persistent direct or steered path. */
 export function isDurableAgentHarnessCompletionDelivery(
   delivery: AgentHarnessCompletionDelivery,
 ): boolean {

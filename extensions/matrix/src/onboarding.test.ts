@@ -1,3 +1,4 @@
+// Matrix tests cover onboarding plugin behavior.
 import { describe, expect, it, vi } from "vitest";
 import { matrixOnboardingAdapter } from "./onboarding.js";
 import {
@@ -253,6 +254,53 @@ describe("matrix onboarding", () => {
     expect(matrixConfig?.homeserver).toBe("http://localhost.localdomain:8008");
     expect(matrixConfig?.network?.dangerouslyAllowPrivateNetwork).toBe(true);
     expect(matrixConfig?.accessToken).toBe("ops-token");
+  });
+
+  it.each<{
+    authMode: string;
+    secretPrompt: string;
+    text: Record<string, string>;
+  }>([
+    {
+      authMode: "token",
+      secretPrompt: "Matrix access token",
+      text: {
+        "Matrix homeserver URL": "https://matrix.example.org",
+        "Matrix access token": "test-token",
+        "Matrix device name (optional)": "",
+      } satisfies Record<string, string>,
+    },
+    {
+      authMode: "password",
+      secretPrompt: "Matrix password",
+      text: {
+        "Matrix homeserver URL": "https://matrix.example.org",
+        "Matrix user ID": "@test:example.org",
+        "Matrix password": "test-password",
+        "Matrix device name (optional)": "",
+      } satisfies Record<string, string>,
+    },
+  ])("marks the $secretPrompt prompt as sensitive", async ({ authMode, secretPrompt, text }) => {
+    installMatrixTestRuntime();
+
+    const prompter = createMatrixWizardPrompter({
+      select: { "Matrix auth method": authMode },
+      text,
+      confirm: { "Enable end-to-end encryption (E2EE)?": false },
+      onConfirm: async () => false,
+    });
+
+    const result = await runMatrixInteractiveConfigure({
+      cfg: {} as CoreConfig,
+      prompter,
+    });
+
+    expect(result).not.toBe("skip");
+    const secretCall = vi
+      .mocked(prompter.text)
+      .mock.calls.find(([options]) => options.message === secretPrompt);
+    expect(secretCall?.[0]).toMatchObject({ message: secretPrompt, sensitive: true });
+    expect(secretCall?.[0]).not.toHaveProperty("initialValue");
   });
 
   it("preserves SecretRef access tokens when keeping existing credentials", async () => {

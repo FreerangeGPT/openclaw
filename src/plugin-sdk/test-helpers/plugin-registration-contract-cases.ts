@@ -1,3 +1,6 @@
+/**
+ * Installs bundled plugin registration contract cases used across provider tests.
+ */
 import { describePluginRegistrationContract } from "./plugin-registration-contract.js";
 
 type PluginRegistrationContractParams = Parameters<typeof describePluginRegistrationContract>[0];
@@ -63,7 +66,7 @@ export const pluginRegistrationContractCases = {
   firecrawl: {
     pluginId: "firecrawl",
     webFetchProviderIds: ["firecrawl"],
-    webSearchProviderIds: ["firecrawl"],
+    webSearchProviderIds: ["firecrawl", "firecrawl-free"],
     toolNames: ["firecrawl_search", "firecrawl_scrape"],
   },
   google: {
@@ -124,8 +127,8 @@ export const pluginRegistrationContractCases = {
       choiceId: "kimi-code-api-key",
       choiceLabel: "Kimi Code API key (subscription)",
       groupId: "moonshot",
-      groupLabel: "Moonshot AI (Kimi K2.6)",
-      groupHint: "Kimi K2.6",
+      groupLabel: "Moonshot AI (Kimi)",
+      groupHint: "Kimi Code membership · https://www.kimi.com/membership/pricing",
     },
   },
   nvidia: {
@@ -182,6 +185,10 @@ export const pluginRegistrationContractCases = {
     requireGenerateImage: true,
     requireGenerateVideo: true,
   },
+  parallel: {
+    pluginId: "parallel",
+    webSearchProviderIds: ["parallel", "parallel-free"],
+  },
   perplexity: {
     pluginId: "perplexity",
     webSearchProviderIds: ["perplexity"],
@@ -198,9 +205,8 @@ export const pluginRegistrationContractCases = {
       "qwencloud",
       "modelstudio",
       "dashscope",
-      "qwen-oauth",
-      "qwen-portal",
-      "qwen-cli",
+      "qwen-token-plan",
+      "bailian-token-plan",
     ],
     mediaUnderstandingProviderIds: ["qwen"],
     videoGenerationProviderIds: ["qwen"],

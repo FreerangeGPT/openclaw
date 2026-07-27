@@ -1,5 +1,5 @@
+/** Commands for viewing and editing per-agent provider auth profile order. */
 import { normalizeStringEntries } from "@openclaw/normalization-core/string-normalization";
-import { resolveAgentDir, resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import {
   type AuthProfileStore,
   externalCliDiscoveryForProviderAuth,
@@ -7,29 +7,32 @@ import {
   resolveAuthStatePathForDisplay,
   setAuthProfileOrder,
 } from "../../agents/auth-profiles.js";
-import { normalizeProviderId } from "../../agents/model-selection.js";
+import { findNormalizedProviderValue, normalizeProviderId } from "../../agents/model-selection.js";
+import { resolveProviderIdForAuth } from "../../agents/provider-auth-aliases.js";
 import { formatCliCommand } from "../../cli/command-format.js";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { type RuntimeEnv, writeRuntimeJson } from "../../runtime.js";
 import { shortenHomePath } from "../../utils.js";
 import { loadModelsConfig } from "./load-config.js";
-import { resolveKnownAgentId } from "./shared.js";
-
-function resolveTargetAgent(
-  cfg: Awaited<ReturnType<typeof loadModelsConfig>>,
-  raw?: string,
-): {
-  agentId: string;
-  agentDir: string;
-} {
-  const agentId = resolveKnownAgentId({ cfg, rawAgentId: raw }) ?? resolveDefaultAgentId(cfg);
-  const agentDir = resolveAgentDir(cfg, agentId);
-  return { agentId, agentDir };
-}
+import { resolveModelsTargetAgent } from "./shared.js";
 
 function describeOrder(store: AuthProfileStore, provider: string): string[] {
   const providerKey = normalizeProviderId(provider);
   const order = store.order?.[providerKey];
   return Array.isArray(order) ? order : [];
+}
+
+function describeOrderFallback(cfg: OpenClawConfig, provider: string): string {
+  const authProvider = resolveProviderIdForAuth(provider, { config: cfg });
+  const configuredOrder =
+    findNormalizedProviderValue(cfg.auth?.order, authProvider) ??
+    findNormalizedProviderValue(cfg.auth?.order, provider);
+  if (configuredOrder === undefined) {
+    return "selecting automatically";
+  }
+  return configuredOrder.length > 0
+    ? `using order from config: ${configuredOrder.join(", ")}`
+    : "config selects no profiles";
 }
 
 async function resolveAuthOrderContext(
@@ -44,10 +47,11 @@ async function resolveAuthOrderContext(
   }
   const provider = normalizeProviderId(rawProvider);
   const cfg = await loadModelsConfig({ commandName: "models auth-order", runtime });
-  const { agentId, agentDir } = resolveTargetAgent(cfg, opts.agent);
+  const { agentId, agentDir } = resolveModelsTargetAgent(cfg, opts.agent);
   return { cfg, agentId, agentDir, provider };
 }
 
+/** Shows the configured auth profile priority order for a provider. */
 export async function modelsAuthOrderGetCommand(
   opts: { provider: string; agent?: string; json?: boolean },
   runtime: RuntimeEnv,
@@ -71,15 +75,20 @@ export async function modelsAuthOrderGetCommand(
 
   runtime.log(`Agent: ${agentId}`);
   runtime.log(`Provider: ${provider}`);
-  runtime.log(`Auth state file: ${shortenHomePath(resolveAuthStatePathForDisplay(agentDir))}`);
-  runtime.log(order.length > 0 ? `Order override: ${order.join(", ")}` : "Order override: (none)");
+  runtime.log(`Auth state store: ${shortenHomePath(resolveAuthStatePathForDisplay(agentDir))}`);
+  runtime.log(
+    order.length > 0
+      ? `Auth profile order override: ${order.join(", ")}`
+      : `Auth profile order override: none (${describeOrderFallback(cfg, provider)})`,
+  );
 }
 
+/** Clears the configured auth profile priority order for a provider. */
 export async function modelsAuthOrderClearCommand(
   opts: { provider: string; agent?: string },
   runtime: RuntimeEnv,
 ) {
-  const { agentId, agentDir, provider } = await resolveAuthOrderContext(opts, runtime);
+  const { cfg, agentId, agentDir, provider } = await resolveAuthOrderContext(opts, runtime);
   const updated = await setAuthProfileOrder({
     agentDir,
     provider,
@@ -87,15 +96,16 @@ export async function modelsAuthOrderClearCommand(
   });
   if (!updated) {
     throw new Error(
-      `Failed to update auth-state.json; the auth state lock may be busy. Wait a moment and rerun ${formatCliCommand("openclaw models auth order clear --provider " + provider)}.`,
+      `Failed to update auth state; the auth state lock may be busy. Wait a moment and rerun ${formatCliCommand("openclaw models auth order clear --provider " + provider)}.`,
     );
   }
 
   runtime.log(`Agent: ${agentId}`);
   runtime.log(`Provider: ${provider}`);
-  runtime.log("Cleared per-agent order override.");
+  runtime.log(`Auth profile order override cleared; ${describeOrderFallback(cfg, provider)}.`);
 }
 
+/** Sets the provider auth profile priority order after validating each profile id. */
 export async function modelsAuthOrderSetCommand(
   opts: { provider: string; agent?: string; order: string[] },
   runtime: RuntimeEnv,
@@ -132,11 +142,11 @@ export async function modelsAuthOrderSetCommand(
   });
   if (!updated) {
     throw new Error(
-      `Failed to update auth-state.json; the auth state lock may be busy. Wait a moment and rerun ${formatCliCommand("openclaw models auth order set --provider " + provider + " <profileIds...>")}.`,
+      `Failed to update auth state; the auth state lock may be busy. Wait a moment and rerun ${formatCliCommand("openclaw models auth order set --provider " + provider + " <profileIds...>")}.`,
     );
   }
 
   runtime.log(`Agent: ${agentId}`);
   runtime.log(`Provider: ${provider}`);
-  runtime.log(`Order override: ${describeOrder(updated, provider).join(", ")}`);
+  runtime.log(`Auth profile order override: ${describeOrder(updated, provider).join(", ")}`);
 }

@@ -23,7 +23,9 @@ import {
   type TalkEventInput,
   type TalkSessionController,
 } from "openclaw/plugin-sdk/realtime-voice";
+import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import { type RawData, WebSocket, WebSocketServer } from "ws";
+import { canonicalizeVoiceCallMediaBase64 } from "./media-base64.js";
 
 /**
  * Configuration for the media stream handler.
@@ -45,7 +47,7 @@ export interface MediaStreamConfig {
   maxConnections?: number;
   /** Optional trusted resolver for the source IP used by pending-connection guards. */
   resolveClientIp?: (request: IncomingMessage) => string | undefined;
-  /** Validate whether to accept a media stream for the given call ID */
+  /** Validate whether to accept a media stream for the given call ID. Missing validator rejects. */
   shouldAcceptStream?: (params: { callId: string; streamSid: string; token?: string }) => boolean;
   /** Callback when transcript is received */
   onTranscript?: (callId: string, transcript: string) => void;
@@ -101,7 +103,7 @@ const MAX_INBOUND_MESSAGE_BYTES = 64 * 1024;
 const MAX_WS_BUFFERED_BYTES = 1024 * 1024;
 const CLOSE_REASON_LOG_MAX_CHARS = 120;
 
-export function sanitizeLogText(value: string, maxChars: number): string {
+function sanitizeLogText(value: string, maxChars: number): string {
   const sanitized = value
     .replace(/\p{Cc}/gu, " ")
     .replace(/\s+/g, " ")
@@ -109,7 +111,7 @@ export function sanitizeLogText(value: string, maxChars: number): string {
   if (sanitized.length <= maxChars) {
     return sanitized;
   }
-  return `${sanitized.slice(0, maxChars)}...`;
+  return `${truncateUtf16Safe(sanitized, maxChars)}...`;
 }
 
 function normalizeWsMessageData(data: RawData): Buffer {
@@ -122,7 +124,7 @@ function normalizeWsMessageData(data: RawData): Buffer {
   return Buffer.from(data);
 }
 
-export function parseTwilioMediaMessage(data: RawData): TwilioMediaMessage {
+function parseTwilioMediaMessage(data: RawData): TwilioMediaMessage {
   const raw = normalizeWsMessageData(data);
   try {
     return JSON.parse(raw.toString("utf8")) as TwilioMediaMessage;
@@ -250,8 +252,11 @@ export class MediaStreamHandler {
 
           case "media":
             if (session && message.media?.payload) {
-              // Forward audio to STT
-              const audioBuffer = Buffer.from(message.media.payload, "base64");
+              const canonicalPayload = canonicalizeVoiceCallMediaBase64(message.media.payload);
+              if (!canonicalPayload) {
+                break;
+              }
+              const audioBuffer = Buffer.from(canonicalPayload, "base64");
               const turnId = this.ensureActiveTurn(session);
               this.emitTalkEvent(session, {
                 type: "input.audio.delta",
@@ -321,10 +326,13 @@ export class MediaStreamHandler {
       ws.close(1008, "Missing callSid");
       return null;
     }
-    if (
-      this.config.shouldAcceptStream &&
-      !this.config.shouldAcceptStream({ callId: callSid, streamSid, token: effectiveToken })
-    ) {
+    if (!this.config.shouldAcceptStream) {
+      console.warn("[MediaStream] Rejecting stream without an acceptance validator");
+      ws.close(1008, "Unauthorized stream");
+      return null;
+    }
+
+    if (!this.config.shouldAcceptStream({ callId: callSid, streamSid, token: effectiveToken })) {
       console.warn(`[MediaStream] Rejecting stream for unknown call: ${callSid}`);
       ws.close(1008, "Unknown call");
       return null;
@@ -577,11 +585,7 @@ export class MediaStreamHandler {
       };
     }
     if (bufferedBeforeBytes > MAX_WS_BUFFERED_BYTES) {
-      try {
-        session.ws.close(1013, "Backpressure: send buffer exceeded");
-      } catch {
-        // Best-effort close; caller still receives sent:false.
-      }
+      session.ws.close(1013, "Backpressure: send buffer exceeded");
       return {
         sent: false,
         readyState,
@@ -594,11 +598,7 @@ export class MediaStreamHandler {
       session.ws.send(JSON.stringify(message));
       const bufferedAfterBytes = session.ws.bufferedAmount;
       if (bufferedAfterBytes > MAX_WS_BUFFERED_BYTES) {
-        try {
-          session.ws.close(1013, "Backpressure: send buffer exceeded");
-        } catch {
-          // Best-effort close; caller still receives sent:false.
-        }
+        session.ws.close(1013, "Backpressure: send buffer exceeded");
         return {
           sent: false,
           readyState,
@@ -704,25 +704,6 @@ export class MediaStreamHandler {
       }
     }
     this.clearAudio(streamSid);
-  }
-
-  /**
-   * Get active session by call ID.
-   */
-  getSessionByCallId(callId: string): StreamSession | undefined {
-    return [...this.sessions.values()].find((session) => session.callId === callId);
-  }
-
-  /**
-   * Close all sessions.
-   */
-  closeAll(): void {
-    for (const session of this.sessions.values()) {
-      this.clearTtsState(session.streamSid);
-      session.sttSession.close();
-      session.ws.close();
-    }
-    this.sessions.clear();
   }
 
   private getTtsQueue(streamSid: string): TtsQueueEntry[] {
@@ -880,3 +861,4 @@ interface TwilioMediaMessage {
     name: string;
   };
 }
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

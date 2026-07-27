@@ -1,3 +1,4 @@
+/** Startup scan that resolves pending ACP session identities when backends can report status. */
 import {
   identityHasStableSessionId,
   isSessionIdentityPending,
@@ -14,6 +15,7 @@ import type {
   WithManagerSessionActor,
 } from "./manager.types.js";
 
+/** Resolves pending ACP session identities opportunistically during manager startup. */
 export async function runManagerStartupIdentityReconcile(params: {
   cfg: OpenClawConfig;
   deps: Pick<AcpSessionManagerDeps, "listAcpSessions">;
@@ -38,6 +40,9 @@ export async function runManagerStartupIdentityReconcile(params: {
 
   for (const session of acpSessions) {
     if (!session.acp || !session.sessionKey) {
+      continue;
+    }
+    if (session.acp.mode === "oneshot") {
       continue;
     }
     const currentIdentity = resolveSessionIdentityFromMeta(session.acp);

@@ -1,9 +1,13 @@
+/**
+ * Tests native approval routing helpers and target matching logic.
+ */
 import { describe, expect, it } from "vitest";
 import {
   createChannelApproverDmTargetResolver,
   createChannelNativeOriginTargetResolver,
   createNativeApprovalChannelRouteGates,
   createNativeApprovalForwardingFallbackSuppressor,
+  createNativeApprovalMessagingTargetResolvers,
   type NativeApprovalTarget,
   nativeApprovalTargetsMatch,
   shouldSuppressLocalNativeExecApprovalPrompt,
@@ -75,6 +79,79 @@ const matrixPluginRequest = {
   createdAtMs: 0,
   expiresAtMs: 1000,
 } as const;
+
+describe("createNativeApprovalMessagingTargetResolvers", () => {
+  const resolvers = createNativeApprovalMessagingTargetResolvers({
+    channel: "signal",
+    normalizeTo: (to) => to.trim().toLowerCase() || null,
+  });
+
+  it("normalizes forwarding, turn-source, session, and resolved targets", () => {
+    expect(
+      resolvers.normalizeForwardTarget({
+        channel: " SIGNAL ",
+        to: " OWNER ",
+        accountId: " work ",
+        threadId: 42,
+        source: "target",
+      }),
+    ).toEqual({
+      to: "owner",
+      accountId: "work",
+      threadId: 42,
+    });
+    expect(
+      resolvers.resolveTurnSourceTarget({
+        ...matrixExecRequest,
+        request: {
+          ...matrixExecRequest.request,
+          turnSourceChannel: " SIGNAL ",
+          turnSourceTo: " OWNER ",
+          turnSourceAccountId: " work ",
+        },
+      }),
+    ).toEqual({
+      to: "owner",
+      accountId: "work",
+    });
+    expect(
+      resolvers.resolveSessionTarget({
+        channel: "signal",
+        to: " OWNER ",
+        accountId: " work ",
+      }),
+    ).toEqual({
+      to: "owner",
+      accountId: "work",
+    });
+    expect(resolvers.normalizeTarget({ to: " OWNER ", threadId: 42 })).toEqual({
+      to: "owner",
+      threadId: 42,
+    });
+  });
+
+  it("rejects other channels and invalid destinations", () => {
+    expect(
+      resolvers.normalizeForwardTarget({
+        channel: "slack",
+        to: "owner",
+        source: "target",
+      }),
+    ).toBeNull();
+    expect(
+      resolvers.resolveTurnSourceTarget({
+        ...matrixExecRequest,
+        request: {
+          ...matrixExecRequest.request,
+          turnSourceChannel: "signal",
+          turnSourceTo: " ",
+        },
+      }),
+    ).toBeNull();
+    expect(resolvers.resolveSessionTarget({ channel: "signal", to: " " })).toBeNull();
+    expect(resolvers.normalizeTarget({ to: " " })).toBeNull();
+  });
+});
 
 describe("createNativeApprovalChannelRouteGates", () => {
   it("separates session-native and explicit target routing by approval family", () => {

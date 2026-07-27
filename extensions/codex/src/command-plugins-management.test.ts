@@ -1,11 +1,13 @@
+// Codex tests cover command plugins management plugin behavior.
 import type { PluginCommandContext, PluginCommandResult } from "openclaw/plugin-sdk/plugin-entry";
 import { describe, expect, it } from "vitest";
 import {
   handleCodexPluginsSubcommand,
   type CodexPluginsConfigBlock,
-  type CodexPluginConfigEntry,
   type CodexPluginsManagementIO,
 } from "./command-plugins-management.js";
+
+type CodexPluginConfigEntry = NonNullable<CodexPluginsConfigBlock["plugins"]>[string];
 
 function inMemoryIO(
   initial: Record<string, CodexPluginConfigEntry> = {},

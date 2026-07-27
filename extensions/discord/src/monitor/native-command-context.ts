@@ -1,3 +1,4 @@
+// Discord plugin module implements native command context behavior.
 import type { CommandArgs } from "openclaw/plugin-sdk/command-auth-native";
 import { finalizeInboundContext } from "openclaw/plugin-sdk/reply-dispatch-runtime";
 import { resolveDiscordConversationIdentity } from "../conversation-identity.js";
@@ -42,14 +43,15 @@ export function buildDiscordNativeCommandContext(params: BuildDiscordNativeComma
   const conversationLabel = params.isDirectMessage
     ? (params.user.globalName ?? params.user.username)
     : params.channelId;
-  const { groupSystemPrompt, ownerAllowFrom, untrustedContext } = buildDiscordInboundAccessContext({
-    channelConfig: params.channelConfig,
-    guildInfo: params.guildInfo,
-    sender: params.sender,
-    allowNameMatching: params.allowNameMatching,
-    isGuild: params.isGuild,
-    channelTopic: params.channelTopic,
-  });
+  const { groupSystemPrompt, ownerAllowFrom, channelStructuredContext } =
+    buildDiscordInboundAccessContext({
+      channelConfig: params.channelConfig,
+      guildInfo: params.guildInfo,
+      sender: params.sender,
+      allowNameMatching: params.allowNameMatching,
+      isGuild: params.isGuild,
+      channelTopic: params.channelTopic,
+    });
 
   return finalizeInboundContext({
     Body: params.prompt,
@@ -74,7 +76,7 @@ export function buildDiscordNativeCommandContext(params: BuildDiscordNativeComma
       : undefined,
     MemberRoleIds: params.memberRoleIds,
     GroupSystemPrompt: groupSystemPrompt,
-    UntrustedStructuredContext: untrustedContext,
+    ChannelStructuredContext: channelStructuredContext,
     OwnerAllowFrom: ownerAllowFrom,
     SenderName: params.user.globalName ?? params.user.username,
     SenderId: params.user.id,

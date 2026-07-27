@@ -1,3 +1,6 @@
+/**
+ * Worker-thread entrypoint for serializable compaction planning requests.
+ */
 import { parentPort, workerData } from "node:worker_threads";
 import {
   buildHistoryPrunePlan,
@@ -6,11 +9,10 @@ import {
   buildSummaryChunks,
   computeAdaptiveChunkRatio,
   type HistoryPrunePlan,
-  type OversizedFallbackPlan,
-  type StageSplitPlan,
 } from "./compaction-planning.js";
 import type { AgentMessage } from "./runtime/index.js";
 
+/** Serializable request accepted by the compaction planning worker. */
 export type CompactionPlanningWorkerInput =
   | {
       kind: "summaryChunks";
@@ -44,17 +46,26 @@ export type CompactionPlanningWorkerInput =
       contextWindow: number;
     };
 
+/** Serializable successful value returned by the compaction planning worker. */
 export type CompactionPlanningWorkerValue =
   | {
       kind: "summaryChunks";
-      chunks: AgentMessage[][];
+      chunkIndexes: number[][];
     }
-  | ({
+  | {
       kind: "oversizedFallback";
-    } & OversizedFallbackPlan)
-  | ({
+      smallMessageIndexes: number[];
+      oversizedNotes: string[];
+    }
+  | {
       kind: "stageSplit";
-    } & StageSplitPlan)
+      mode: "single";
+    }
+  | {
+      kind: "stageSplit";
+      mode: "split";
+      chunkIndexes: number[][];
+    }
   | ({
       kind: "historyPrune";
     } & HistoryPrunePlan)
@@ -63,6 +74,7 @@ export type CompactionPlanningWorkerValue =
       ratio: number;
     };
 
+/** Serializable success/failure envelope posted by the worker. */
 export type CompactionPlanningWorkerResult =
   | {
       status: "ok";
@@ -108,6 +120,25 @@ function isWorkerInput(value: unknown): value is CompactionPlanningWorkerInput {
   }
 }
 
+function indexSelectedMessages(
+  indexByMessage: ReadonlyMap<AgentMessage, number>,
+  selected: AgentMessage[],
+): number[] {
+  return selected.map((message) => {
+    const index = indexByMessage.get(message);
+    if (index === undefined) {
+      throw new Error("Compaction planning result contains an unknown message");
+    }
+    return index;
+  });
+}
+
+function indexMessageChunks(source: AgentMessage[], chunks: AgentMessage[][]): number[][] {
+  const indexByMessage = new Map(source.map((message, index) => [message, index]));
+  return chunks.map((chunk) => indexSelectedMessages(indexByMessage, chunk));
+}
+
+/** Run one compaction planning request and return a serializable result. */
 export function runCompactionPlanningWorkerInput(input: unknown): CompactionPlanningWorkerResult {
   if (!isWorkerInput(input)) {
     return {
@@ -118,30 +149,42 @@ export function runCompactionPlanningWorkerInput(input: unknown): CompactionPlan
 
   try {
     switch (input.kind) {
-      case "summaryChunks":
+      case "summaryChunks": {
+        const chunks = buildSummaryChunks(input);
         return {
           status: "ok",
           value: {
             kind: "summaryChunks",
-            chunks: buildSummaryChunks(input),
+            chunkIndexes: indexMessageChunks(input.messages, chunks),
           },
         };
-      case "oversizedFallback":
+      }
+      case "oversizedFallback": {
+        const plan = buildOversizedFallbackPlan(input);
+        const indexByMessage = new Map(input.messages.map((message, index) => [message, index]));
         return {
           status: "ok",
           value: {
             kind: "oversizedFallback",
-            ...buildOversizedFallbackPlan(input),
+            smallMessageIndexes: indexSelectedMessages(indexByMessage, plan.smallMessages),
+            oversizedNotes: plan.oversizedNotes,
           },
         };
-      case "stageSplit":
+      }
+      case "stageSplit": {
+        const plan = buildStageSplitPlan(input);
         return {
           status: "ok",
-          value: {
-            kind: "stageSplit",
-            ...buildStageSplitPlan(input),
-          },
+          value:
+            plan.mode === "split"
+              ? {
+                  kind: "stageSplit",
+                  mode: "split",
+                  chunkIndexes: indexMessageChunks(input.messages, plan.chunks),
+                }
+              : { kind: "stageSplit", mode: "single" },
         };
+      }
       case "historyPrune":
         return {
           status: "ok",
@@ -173,6 +216,7 @@ export function runCompactionPlanningWorkerInput(input: unknown): CompactionPlan
 }
 
 if (parentPort) {
+  // Worker-thread mode: process the single workerData payload and post one result.
   const sendToParent: (message: CompactionPlanningWorkerResult) => void =
     parentPort.postMessage.bind(parentPort);
   sendToParent(runCompactionPlanningWorkerInput(workerData));

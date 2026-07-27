@@ -1,3 +1,5 @@
+// Models HTTP tests cover OpenAI-compatible /v1/models behavior, read-scope
+// authorization, ordering, and disabled-surface responses.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startOpenAiCompatGatewayServer } from "./openai-compatible-http.test-helpers.js";
 import { getFreePort, installGatewayTestHooks } from "./test-helpers.js";
@@ -52,6 +54,11 @@ async function expectMissingReadScope(res: Response) {
     error: {
       type: "forbidden",
       message: "missing scope: operator.read",
+      details: {
+        code: "MISSING_SCOPE",
+        missingScope: "operator.read",
+        requiredScopes: ["operator.read"],
+      },
     },
   });
 }

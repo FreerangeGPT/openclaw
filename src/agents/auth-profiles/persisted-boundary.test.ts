@@ -1,6 +1,21 @@
-import { describe, expect, it } from "vitest";
+/**
+ * Tests persisted auth profile boundary normalization.
+ * Covers malformed credential coercion, state merging, legacy OAuth refs, and
+ * main/agent store drift repair.
+ */
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { AUTH_STORE_VERSION } from "./constants.js";
-import { coercePersistedAuthProfileStore, mergeAuthProfileStores } from "./persisted.js";
+import { resolveAuthProfileOrder } from "./order.js";
+import {
+  applyLegacyAuthStore,
+  coerceLegacyAuthStore,
+  coercePersistedAuthProfileStore,
+  mergeAuthProfileStores,
+} from "./persisted.js";
+import type { AuthProfileStore } from "./types.js";
 
 describe("persisted auth profile boundary", () => {
   it("normalizes malformed persisted credentials and state before runtime use", () => {
@@ -214,6 +229,47 @@ describe("persisted auth profile boundary", () => {
     expect(merged.lastGood?.anthropic).toBe(profileId);
   });
 
+  it("tracks persisted profile provenance with override precedence", () => {
+    const merged = mergeAuthProfileStores(
+      {
+        version: AUTH_STORE_VERSION,
+        runtimePersistedProfileIds: ["openai:base", "openai:overridden"],
+        profiles: {
+          "openai:base": {
+            type: "api_key",
+            provider: "openai",
+            key: "base-key",
+          },
+          "openai:overridden": {
+            type: "api_key",
+            provider: "openai",
+            key: "old-key",
+          },
+        },
+      },
+      {
+        version: AUTH_STORE_VERSION,
+        runtimePersistedProfileIds: ["openai:added"],
+        runtimeLocalProfileIds: ["openai:added"],
+        profiles: {
+          "openai:overridden": {
+            type: "api_key",
+            provider: "openai",
+            key: "scoped-key",
+          },
+          "openai:added": {
+            type: "api_key",
+            provider: "openai",
+            key: "added-key",
+          },
+        },
+      },
+    );
+
+    expect(merged.runtimePersistedProfileIds).toEqual(["openai:added", "openai:base"]);
+    expect(merged.runtimeLocalProfileIds).toEqual(["openai:added"]);
+  });
+
   it("preserves config-only order fallbacks during agent-store merges", () => {
     const merged = mergeAuthProfileStores(
       {
@@ -242,6 +298,91 @@ describe("persisted auth profile boundary", () => {
     );
 
     expect(merged.order?.openai).toEqual(["openai:new-login", "openai:aws-sdk"]);
+  });
+
+  it("prefers agent-local provider profiles before inherited main profiles", () => {
+    const expires = Date.now() + 60_000;
+    const merged = mergeAuthProfileStores(
+      {
+        version: AUTH_STORE_VERSION,
+        profiles: {
+          "minimax-portal:cli": {
+            type: "oauth",
+            provider: "minimax-portal",
+            access: "main-minimax-access",
+            refresh: "main-minimax-refresh",
+            expires,
+          },
+        },
+        order: {
+          "minimax-portal": ["minimax-portal:cli"],
+        },
+      },
+      {
+        version: AUTH_STORE_VERSION,
+        profiles: {
+          "minimax-portal:default": {
+            type: "oauth",
+            provider: "minimax-portal",
+            access: "agent-minimax-access",
+            refresh: "agent-minimax-refresh",
+            expires,
+          },
+        },
+      },
+      { preserveBaseRuntimeExternalProfiles: true },
+    );
+
+    expect(Object.keys(merged.profiles)).toEqual(["minimax-portal:default", "minimax-portal:cli"]);
+    expect(merged.order?.["minimax-portal"]).toEqual([
+      "minimax-portal:default",
+      "minimax-portal:cli",
+    ]);
+    expect(resolveAuthProfileOrder({ store: merged, provider: "minimax-portal" })).toEqual([
+      "minimax-portal:default",
+      "minimax-portal:cli",
+    ]);
+  });
+
+  it("collapses normalized provider order keys without expanding explicit override order", () => {
+    const merged = mergeAuthProfileStores(
+      {
+        version: AUTH_STORE_VERSION,
+        profiles: {
+          "openai:main": {
+            type: "api_key",
+            provider: "OpenAI",
+            key: "main-key",
+          },
+        },
+        order: {
+          OpenAI: ["openai:main"],
+        },
+      },
+      {
+        version: AUTH_STORE_VERSION,
+        profiles: {
+          "openai:agent": {
+            type: "api_key",
+            provider: "openai",
+            key: "agent-key",
+          },
+          "openai:other-agent": {
+            type: "api_key",
+            provider: "openai",
+            key: "other-agent-key",
+          },
+        },
+        order: {
+          openai: ["openai:agent"],
+        },
+      },
+      { preserveBaseRuntimeExternalProfiles: true },
+    );
+
+    expect(merged.order).toEqual({
+      openai: ["openai:agent"],
+    });
   });
 
   it("preserves inherited base runtime external profiles during agent-store merges", () => {
@@ -286,5 +427,87 @@ describe("persisted auth profile boundary", () => {
     });
     expect(merged.order?.anthropic).toEqual([profileId]);
     expect(merged.lastGood?.anthropic).toBe(profileId);
+  });
+});
+
+describe("applyLegacyAuthStore", () => {
+  const agentDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of agentDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  function writeLegacyAuthJson(value: unknown): string {
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "oc-legacy-auth-"));
+    agentDirs.push(agentDir);
+    fs.writeFileSync(path.join(agentDir, "auth.json"), JSON.stringify(value), "utf8");
+    return agentDir;
+  }
+
+  it("preserves OAuth refresh material when migrating legacy auth.json", () => {
+    const agentDir = writeLegacyAuthJson({
+      chutes: {
+        type: "oauth",
+        provider: "chutes",
+        access: "ACCESS_TOKEN",
+        refresh: "REFRESH_TOKEN",
+        expires: 1_900_000_000_000,
+        clientId: "chutes-client-id-123",
+        idToken: "ID_TOKEN_xyz",
+        chatgptPlanType: "pro",
+      },
+    });
+    const legacy = coerceLegacyAuthStore(
+      JSON.parse(fs.readFileSync(path.join(agentDir, "auth.json"), "utf8")),
+    );
+    expect(legacy).not.toBeNull();
+
+    const store: AuthProfileStore = { version: AUTH_STORE_VERSION, profiles: {} };
+    applyLegacyAuthStore(store, legacy ?? {});
+
+    expect(store.profiles["chutes:default"]).toMatchObject({
+      type: "oauth",
+      provider: "chutes",
+      access: "ACCESS_TOKEN",
+      refresh: "REFRESH_TOKEN",
+      clientId: "chutes-client-id-123",
+      idToken: "ID_TOKEN_xyz",
+      chatgptPlanType: "pro",
+    });
+  });
+
+  it("preserves secret-ref credentials when migrating legacy auth.json", () => {
+    const agentDir = writeLegacyAuthJson({
+      openai: {
+        type: "api_key",
+        provider: "openai",
+        keyRef: { source: "env", id: "OPENAI_API_KEY" },
+      },
+      anthropic: {
+        type: "token",
+        provider: "anthropic",
+        tokenRef: { source: "env", id: "ANTHROPIC_TOKEN" },
+      },
+    });
+    const legacy = coerceLegacyAuthStore(
+      JSON.parse(fs.readFileSync(path.join(agentDir, "auth.json"), "utf8")),
+    );
+    expect(legacy).not.toBeNull();
+
+    const store: AuthProfileStore = { version: AUTH_STORE_VERSION, profiles: {} };
+    applyLegacyAuthStore(store, legacy ?? {});
+
+    expect(store.profiles["openai:default"]).toMatchObject({
+      type: "api_key",
+      provider: "openai",
+      keyRef: { source: "env", id: "OPENAI_API_KEY" },
+    });
+    expect(store.profiles["anthropic:default"]).toMatchObject({
+      type: "token",
+      provider: "anthropic",
+      tokenRef: { source: "env", id: "ANTHROPIC_TOKEN" },
+    });
   });
 });

@@ -1,3 +1,4 @@
+// Normalizes talk-mode config for voice and channel interactions.
 import {
   normalizeFastMode,
   normalizeOptionalString,
@@ -29,20 +30,25 @@ function normalizeSilenceTimeoutMs(value: unknown): number | undefined {
   return value;
 }
 
-function buildLegacyTalkProviderCompat(
-  value: Record<string, unknown>,
-): TalkProviderConfig | undefined {
-  const provider: TalkProviderConfig = {};
-  for (const key of ["voiceId", "voiceAliases", "modelId", "outputFormat"] as const) {
-    if (value[key] !== undefined) {
-      provider[key] = value[key];
-    }
+function normalizeVadThreshold(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
+    return undefined;
   }
-  const apiKey = normalizeTalkSecretInput(value.apiKey);
-  if (apiKey !== undefined) {
-    provider.apiKey = apiKey;
+  return value;
+}
+
+function normalizePositiveInteger(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    return undefined;
   }
-  return Object.keys(provider).length > 0 ? provider : undefined;
+  return value;
+}
+
+function normalizeNonNegativeInteger(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    return undefined;
+  }
+  return value;
 }
 
 function normalizeTalkProviderConfig(value: unknown): TalkProviderConfig | undefined {
@@ -109,17 +115,13 @@ function normalizeTalkRealtimeConfig(value: unknown): TalkRealtimeConfig | undef
   if (model) {
     normalized.model = model;
   }
-  const voice = normalizeOptionalString(source.voice);
-  const speakerVoice = normalizeOptionalString(source.speakerVoice) ?? voice;
+  const speakerVoice = normalizeOptionalString(source.speakerVoice);
   const speakerVoiceId = normalizeOptionalString(source.speakerVoiceId);
   if (speakerVoice) {
     normalized.speakerVoice = speakerVoice;
   }
   if (speakerVoiceId) {
     normalized.speakerVoiceId = speakerVoiceId;
-  }
-  if (voice) {
-    normalized.voice = voice;
   }
   const instructions = normalizeOptionalString(source.instructions);
   if (instructions) {
@@ -135,6 +137,22 @@ function normalizeTalkRealtimeConfig(value: unknown): TalkRealtimeConfig | undef
     source.transport === "managed-room"
   ) {
     normalized.transport = source.transport;
+  }
+  const vadThreshold = normalizeVadThreshold(source.vadThreshold);
+  if (vadThreshold !== undefined) {
+    normalized.vadThreshold = vadThreshold;
+  }
+  const silenceDurationMs = normalizePositiveInteger(source.silenceDurationMs);
+  if (silenceDurationMs !== undefined) {
+    normalized.silenceDurationMs = silenceDurationMs;
+  }
+  const prefixPaddingMs = normalizeNonNegativeInteger(source.prefixPaddingMs);
+  if (prefixPaddingMs !== undefined) {
+    normalized.prefixPaddingMs = prefixPaddingMs;
+  }
+  const reasoningEffort = normalizeOptionalString(source.reasoningEffort);
+  if (reasoningEffort) {
+    normalized.reasoningEffort = reasoningEffort;
   }
   if (
     source.brain === "agent-consult" ||
@@ -156,7 +174,7 @@ function activeProviderFromTalk(talk: TalkConfig): string | undefined {
   const provider = normalizeOptionalString(talk.provider);
   const providers = talk.providers;
   if (provider) {
-    if (providers && !(provider in providers)) {
+    if (providers && !Object.hasOwn(providers, provider)) {
       return undefined;
     }
     return provider;
@@ -165,6 +183,10 @@ function activeProviderFromTalk(talk: TalkConfig): string | undefined {
   return providerIds.length === 1 ? providerIds[0] : undefined;
 }
 
+/**
+ * Normalize persisted Talk config into the canonical provider/providers shape.
+ * Legacy flat provider fields are ignored here so core config stays provider-agnostic.
+ */
 export function normalizeTalkSection(value: TalkConfig | undefined): TalkConfig | undefined {
   if (!isRecord(value)) {
     return undefined;
@@ -172,6 +194,10 @@ export function normalizeTalkSection(value: TalkConfig | undefined): TalkConfig 
 
   const source = value as Record<string, unknown>;
   const normalized: TalkConfig = {};
+  const agentId = normalizeOptionalString(source.agentId);
+  if (agentId) {
+    normalized.agentId = agentId;
+  }
   const speechLocale = normalizeOptionalString(source.speechLocale);
   if (speechLocale) {
     normalized.speechLocale = speechLocale;
@@ -190,7 +216,7 @@ export function normalizeTalkSection(value: TalkConfig | undefined): TalkConfig 
     typeof rawConsultFastMode === "boolean" || typeof rawConsultFastMode === "string"
       ? normalizeFastMode(rawConsultFastMode)
       : undefined;
-  if (consultFastMode !== undefined) {
+  if (typeof consultFastMode === "boolean") {
     normalized.consultFastMode = consultFastMode;
   }
   const silenceTimeoutMs = normalizeSilenceTimeoutMs(source.silenceTimeoutMs);
@@ -213,6 +239,7 @@ export function normalizeTalkSection(value: TalkConfig | undefined): TalkConfig 
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
+/** Return a config copy with `talk` normalized when a valid Talk section is present. */
 export function normalizeTalkConfig(config: OpenClawConfig): OpenClawConfig {
   if (!config.talk) {
     return config;
@@ -227,6 +254,10 @@ export function normalizeTalkConfig(config: OpenClawConfig): OpenClawConfig {
   };
 }
 
+/**
+ * Resolve the single active Talk speech provider and its provider-owned config.
+ * Ambiguous multi-provider config stays unresolved until `talk.provider` names one.
+ */
 export function resolveActiveTalkProviderConfig(
   talk: TalkConfig | undefined,
 ): ResolvedTalkConfig | undefined {
@@ -244,17 +275,21 @@ export function resolveActiveTalkProviderConfig(
   };
 }
 
-export function buildTalkConfigResponse(value: unknown): TalkConfigResponse | undefined {
-  if (!isRecord(value)) {
-    return undefined;
-  }
-  const normalized = normalizeTalkSection(value as TalkConfig);
-  const legacyCompat = buildLegacyTalkProviderCompat(value);
-  if (!normalized && !legacyCompat) {
+/**
+ * Build the gateway `talk.config` payload from canonical Talk config.
+ * The response includes canonical provider data plus the resolved provider when selection is unambiguous.
+ */
+export function buildTalkConfigResponse(
+  normalized: TalkConfig | undefined,
+): TalkConfigResponse | undefined {
+  if (!normalized) {
     return undefined;
   }
 
   const payload: TalkConfigResponse = {};
+  if (typeof normalized?.agentId === "string") {
+    payload.agentId = normalized.agentId;
+  }
   if (typeof normalized?.interruptOnSpeech === "boolean") {
     payload.interruptOnSpeech = normalized.interruptOnSpeech;
   }
@@ -277,9 +312,7 @@ export function buildTalkConfigResponse(value: unknown): TalkConfigResponse | un
     payload.realtime = normalized.realtime;
   }
 
-  const resolved =
-    resolveActiveTalkProviderConfig(normalized) ??
-    (legacyCompat ? { provider: "elevenlabs", config: legacyCompat } : undefined);
+  const resolved = resolveActiveTalkProviderConfig(normalized);
   const activeProvider = resolved?.provider;
   if (activeProvider) {
     payload.provider = activeProvider;

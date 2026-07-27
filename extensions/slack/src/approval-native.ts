@@ -1,7 +1,5 @@
-import {
-  createApproverRestrictedNativeApprovalCapability,
-  splitChannelApprovalCapability,
-} from "openclaw/plugin-sdk/approval-delivery-runtime";
+// Slack plugin module implements approval native behavior.
+import { createApproverRestrictedNativeApprovalCapability } from "openclaw/plugin-sdk/approval-delivery-runtime";
 import { createLazyChannelApprovalNativeRuntimeAdapter } from "openclaw/plugin-sdk/approval-handler-adapter-runtime";
 import type { ChannelApprovalNativeRuntimeAdapter } from "openclaw/plugin-sdk/approval-handler-runtime";
 import {
@@ -19,7 +17,6 @@ import {
   normalizeSlackForwardTarget,
   normalizeSlackOriginTarget,
   resolveSessionSlackOriginTarget,
-  resolveSlackApprovalKind,
   resolveSlackFallbackOriginTarget,
   resolveTurnSourceSlackOriginTarget,
   shouldHandleSlackNativeApprovalRequest,
@@ -74,10 +71,11 @@ function shouldConsiderSlackNativeForwardingSuppression(
 
 const resolveSlackOriginTarget = createChannelNativeOriginTargetResolver({
   channel: "slack",
-  shouldHandleRequest: ({ cfg, accountId, request }) =>
+  shouldHandleRequest: ({ cfg, accountId, approvalKind, request }) =>
     shouldHandleSlackNativeApprovalRequest({
       cfg,
       accountId,
+      approvalKind,
       request,
     }),
   resolveTurnSourceTarget: resolveTurnSourceSlackOriginTarget,
@@ -158,11 +156,11 @@ const baseSlackApprovalCapability = createApproverRestrictedNativeApprovalCapabi
         cfg,
         accountId,
       }),
-    shouldHandle: ({ cfg, accountId, request }) =>
+    shouldHandle: ({ cfg, accountId, approvalKind, request }) =>
       shouldHandleSlackNativeApprovalRequest({
         cfg,
         accountId,
-        approvalKind: resolveSlackApprovalKind(request),
+        approvalKind,
         request,
       }),
     load: async () =>
@@ -226,12 +224,4 @@ export const slackApprovalCapability: ChannelApprovalCapability = {
         },
       }
     : undefined,
-};
-
-export const slackNativeApprovalAdapter = splitChannelApprovalCapability(slackApprovalCapability);
-
-export const testing = {
-  resolveSessionSlackOriginTarget,
-  resolveTurnSourceSlackOriginTarget,
-  slackTargetsMatch,
 };

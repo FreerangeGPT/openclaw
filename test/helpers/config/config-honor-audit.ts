@@ -1,8 +1,12 @@
+// Config honor audit helper checks config fields against expected consumers.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { computeBaseConfigSchemaResponse } from "../../../src/config/schema-base.js";
 
+// Config honor audit helpers that compare schema keys with proof inventories.
+
+/** Inventory row describing where one config key is declared, merged, consumed, and tested. */
 export type ConfigHonorInventoryRow = {
   key: string;
   schemaPaths: string[];
@@ -22,7 +26,8 @@ type ConfigHonorProofKey =
   | "reloadPaths"
   | "testPaths";
 
-export type ConfigHonorAuditResult = {
+/** Result of auditing one config honor inventory. */
+type ConfigHonorAuditResult = {
   schemaKeys: string[];
   missingKeys: string[];
   extraKeys: string[];
@@ -39,6 +44,7 @@ const BASE_CONFIG_SCHEMA = computeBaseConfigSchemaResponse({
   generatedAt: "2026-05-05T00:00:00.000Z",
 });
 
+/** Return true when a dotted schema path exists in the generated base config schema. */
 function hasSchemaPath(schemaPath: string): boolean {
   const segments = schemaPath.split(".");
   let current: unknown = BASE_CONFIG_SCHEMA.schema;
@@ -47,11 +53,13 @@ function hasSchemaPath(schemaPath: string): boolean {
       return false;
     }
     if (segment === "*") {
-      const items = (current as { items?: unknown }).items;
-      if (!items || typeof items !== "object") {
+      const wildcardTarget =
+        (current as { additionalProperties?: unknown; items?: unknown }).items ??
+        (current as { additionalProperties?: unknown }).additionalProperties;
+      if (!wildcardTarget || typeof wildcardTarget !== "object") {
         return false;
       }
-      current = items;
+      current = wildcardTarget;
       continue;
     }
     const properties = (current as { properties?: Record<string, unknown> }).properties;
@@ -63,6 +71,7 @@ function hasSchemaPath(schemaPath: string): boolean {
   return true;
 }
 
+/** List leaf schema keys for the requested config prefixes. */
 export function listSchemaLeafKeysForPrefixes(prefixes: string[]): string[] {
   const keys = new Set<string>();
   for (const prefix of prefixes) {
@@ -74,7 +83,10 @@ export function listSchemaLeafKeysForPrefixes(prefixes: string[]): string[] {
         break;
       }
       if (segment === "*") {
-        current = (current as { items?: unknown }).items ?? null;
+        current =
+          (current as { additionalProperties?: unknown; items?: unknown }).items ??
+          (current as { additionalProperties?: unknown }).additionalProperties ??
+          null;
         continue;
       }
       current = (current as { properties?: Record<string, unknown> }).properties?.[segment] ?? null;
@@ -90,6 +102,7 @@ export function listSchemaLeafKeysForPrefixes(prefixes: string[]): string[] {
   return [...keys].toSorted();
 }
 
+/** Audit an inventory against schema keys, proof paths, and file existence. */
 export function auditConfigHonorInventory(params: {
   prefixes: string[];
   rows: ConfigHonorInventoryRow[];

@@ -1,3 +1,6 @@
+import { resolveDefaultAgentId } from "../../agents/agent-scope-config.js";
+// Account-scoped conversation binding managers adapt channel-local thread maps
+// into the shared session binding service.
 import { resolveThreadBindingConversationIdFromBindingId } from "../../channels/thread-binding-id.js";
 import {
   resolveThreadBindingIdleTimeoutMsForChannel,
@@ -130,6 +133,8 @@ export function createAccountScopedConversationBindingManager<TKind extends stri
   const state = getState<TKind>(params.stateKey);
   const existing = state.managersByAccountId.get(accountId);
   if (existing) {
+    // Manager state is account-scoped and process-global so repeated channel
+    // setup calls reuse the same binding adapter instead of double-registering.
     return existing;
   }
 
@@ -171,7 +176,11 @@ export function createAccountScopedConversationBindingManager<TKind extends stri
         agentId:
           typeof metadata?.agentId === "string" && metadata.agentId.trim()
             ? metadata.agentId.trim()
-            : (existingLocal?.agentId ?? resolveAgentIdFromSessionKey(normalizedTargetSessionKey)),
+            : (existingLocal?.agentId ??
+              resolveAgentIdFromSessionKey(
+                normalizedTargetSessionKey,
+                resolveDefaultAgentId(params.cfg),
+              )),
         label:
           typeof metadata?.label === "string" && metadata.label.trim()
             ? metadata.label.trim()

@@ -1,3 +1,4 @@
+// Matrix tests cover channel.message adapter plugin behavior.
 import {
   verifyChannelMessageAdapterCapabilityProofs,
   verifyChannelMessageLiveCapabilityAdapterProofs,
@@ -258,7 +259,7 @@ describe("matrix channel message adapter", () => {
     });
   });
 
-  it("declares bullets as the markdown table default", () => {
-    expect(matrixPlugin.messaging?.defaultMarkdownTableMode).toBe("bullets");
+  it("declares native blocks as the markdown table default", () => {
+    expect(matrixPlugin.messaging?.defaultMarkdownTableMode).toBe("block");
   });
 });

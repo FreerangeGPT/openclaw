@@ -1,11 +1,16 @@
+// Shared destructive-cleanup planning and guarded removal helpers.
 import fs from "node:fs/promises";
 import path from "node:path";
 import { listAgentIds, resolveAgentWorkspaceDir } from "../agents/agent-scope-config.js";
 import { resolveDefaultAgentWorkspaceDir } from "../agents/workspace-default.js";
 import {
-  resolveWorkspaceAttestationPaths,
-  shouldRemoveWorkspaceAttestation,
-} from "../agents/workspace.js";
+  prepareLegacyWorkspaceStateReset,
+  removeLegacyWorkspaceStateForReset,
+} from "../agents/workspace-legacy-state.js";
+import {
+  deleteWorkspaceState,
+  prepareWorkspaceStateDeletion,
+} from "../agents/workspace-state-store.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { isPathInside } from "../infra/path-guards.js";
 import type { RuntimeEnv } from "../runtime.js";
@@ -46,6 +51,7 @@ function collectWorkspaceDirs(cfg: OpenClawConfig | undefined): string[] {
   return [...dirs];
 }
 
+/** Determine which config, credential, and workspace paths cleanup should consider. */
 export function buildCleanupPlan(params: {
   cfg: OpenClawConfig | undefined;
   stateDir: string;
@@ -63,6 +69,7 @@ export function buildCleanupPlan(params: {
   };
 }
 
+/** Return true when `child` resolves inside `parent`. */
 export function isPathWithin(child: string, parent: string): boolean {
   return isPathInside(parent, child);
 }
@@ -80,9 +87,13 @@ function isUnsafeRemovalTarget(target: string): boolean {
   if (home && resolved === path.resolve(home)) {
     return true;
   }
+  if (isPathWithin(path.resolve(process.cwd()), resolved)) {
+    return true;
+  }
   return false;
 }
 
+/** Remove one path after rejecting empty/root/home targets and honoring dry-run mode. */
 export async function removePath(
   target: string,
   runtime: RuntimeEnv,
@@ -109,22 +120,6 @@ export async function removePath(
   } catch (err) {
     runtime.error(`Failed to remove ${displayLabel}: ${String(err)}`);
     return { ok: false };
-  }
-}
-
-export async function removeWorkspaceAttestationPaths(
-  workspaceDirs: readonly string[],
-  runtime: RuntimeEnv,
-  opts?: RemovalOptions,
-): Promise<void> {
-  for (const workspaceDir of workspaceDirs) {
-    for (const [index, attestationPath] of resolveWorkspaceAttestationPaths(
-      workspaceDir,
-    ).entries()) {
-      if (await shouldRemoveWorkspaceAttestation(attestationPath, { trustUnknown: index === 0 })) {
-        await removePath(attestationPath, runtime, opts);
-      }
-    }
   }
 }
 
@@ -200,28 +195,28 @@ async function removePathPreserving(
   }
 }
 
+/** Remove state plus config/OAuth paths, preserving selected paths nested inside state. */
 export async function removeStateAndLinkedPaths(
   cleanup: CleanupResolvedPaths,
   runtime: RuntimeEnv,
   opts?: StateRemovalOptions,
-): Promise<void> {
+): Promise<boolean> {
   const stateDir = path.resolve(cleanup.stateDir);
   const preservePaths = (
     opts?.dryRun
       ? (opts.preservePaths ?? []).map((target) => path.resolve(target))
       : await existingPaths(opts?.preservePaths ?? [])
   ).filter((target) => isPathWithin(target, stateDir));
-  if (preservePaths.length > 0) {
-    await removePathPreserving(stateDir, preservePaths, runtime, {
-      dryRun: opts?.dryRun,
-      label: cleanup.stateDir,
-    });
-  } else {
-    await removePath(cleanup.stateDir, runtime, {
-      dryRun: opts?.dryRun,
-      label: cleanup.stateDir,
-    });
-  }
+  const stateRemoval =
+    preservePaths.length > 0
+      ? await removePathPreserving(stateDir, preservePaths, runtime, {
+          dryRun: opts?.dryRun,
+          label: cleanup.stateDir,
+        })
+      : await removePath(cleanup.stateDir, runtime, {
+          dryRun: opts?.dryRun,
+          label: cleanup.stateDir,
+        });
   if (!cleanup.configInsideState) {
     await removePath(cleanup.configPath, runtime, {
       dryRun: opts?.dryRun,
@@ -234,21 +229,56 @@ export async function removeStateAndLinkedPaths(
       label: cleanup.oauthDir,
     });
   }
+  return stateRemoval.ok;
 }
 
+/** Remove all workspace directories selected by the cleanup plan. */
 export async function removeWorkspaceDirs(
   workspaceDirs: readonly string[],
   runtime: RuntimeEnv,
-  opts?: { dryRun?: boolean },
+  opts?: { dryRun?: boolean; removeStateRows?: boolean },
 ): Promise<void> {
   for (const workspace of workspaceDirs) {
-    await removePath(workspace, runtime, {
+    const legacyPlan = prepareLegacyWorkspaceStateReset(workspace);
+    const statePlan = opts?.removeStateRows ? prepareWorkspaceStateDeletion(workspace) : undefined;
+    const result = await removePath(workspace, runtime, {
       dryRun: opts?.dryRun,
       label: workspace,
     });
+    if (opts?.dryRun) {
+      if (!result.ok) {
+        continue;
+      }
+      const legacyCleanup = await removeLegacyWorkspaceStateForReset(legacyPlan, { dryRun: true });
+      for (const removedPath of legacyCleanup.removedPaths) {
+        runtime.log(`[dry-run] remove ${shortenHomeInString(removedPath)}`);
+      }
+      for (const warning of legacyCleanup.warnings) {
+        runtime.error(warning);
+      }
+      continue;
+    }
+    if (!result.ok || result.skipped) {
+      continue;
+    }
+    try {
+      const legacyCleanup = await removeLegacyWorkspaceStateForReset(legacyPlan);
+      for (const warning of legacyCleanup.warnings) {
+        runtime.error(warning);
+      }
+      if (!opts?.removeStateRows) {
+        continue;
+      }
+      deleteWorkspaceState(statePlan!);
+    } catch (error) {
+      runtime.error(
+        `Failed to remove workspace state for ${shortenHomeInString(workspace)}: ${String(error)}`,
+      );
+    }
   }
 }
 
+/** List per-agent session directories beneath a state directory. */
 export async function listAgentSessionDirs(stateDir: string): Promise<string[]> {
   const root = path.join(stateDir, "agents");
   try {

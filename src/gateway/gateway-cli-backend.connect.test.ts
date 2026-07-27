@@ -1,3 +1,5 @@
+// Gateway CLI backend connect tests exercise the minimal WebSocket handshake,
+// device identity payload, auth token forwarding, and backend request framing.
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -20,7 +22,7 @@ const tempDirs = createSuiteTempRootTracker({ prefix: "openclaw-gateway-connect-
 
 async function createTempDeviceIdentity() {
   const tempRoot = await tempDirs.make("device");
-  return loadOrCreateDeviceIdentity(path.join(tempRoot, "device.json"));
+  return loadOrCreateDeviceIdentity({ path: path.join(tempRoot, "device.sqlite") });
 }
 
 async function startMinimalGatewayServer(params: { token: string }) {

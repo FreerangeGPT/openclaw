@@ -1,3 +1,4 @@
+// Telegram plugin module implements sticker cache store behavior.
 import path from "node:path";
 import { loadJsonFile } from "openclaw/plugin-sdk/json-store";
 import type { PluginStateSyncKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
@@ -26,20 +27,15 @@ interface StickerCache {
 
 type TelegramStickerCacheStore = PluginStateSyncKeyedStore<CachedSticker>;
 
-let stickerCacheStoreForTest: TelegramStickerCacheStore | undefined;
-
 function getCacheFile(): string {
   return path.join(resolveStateDir(), "telegram", "sticker-cache.json");
 }
 
 function openStickerCacheStore(): TelegramStickerCacheStore {
-  return (
-    stickerCacheStoreForTest ??
-    getTelegramRuntime().state.openSyncKeyedStore<CachedSticker>({
-      namespace: TELEGRAM_STICKER_CACHE_NAMESPACE,
-      maxEntries: TELEGRAM_STICKER_CACHE_MAX_ENTRIES,
-    })
-  );
+  return getTelegramRuntime().state.openSyncKeyedStore<CachedSticker>({
+    namespace: TELEGRAM_STICKER_CACHE_NAMESPACE,
+    maxEntries: TELEGRAM_STICKER_CACHE_MAX_ENTRIES,
+  });
 }
 
 function loadCache(): StickerCache {
@@ -172,16 +168,6 @@ export function getCacheStats(): { count: number; oldestAt?: string; newestAt?: 
     oldestAt: sorted[0]?.cachedAt,
     newestAt: sorted[sorted.length - 1]?.cachedAt,
   };
-}
-
-export function setTelegramStickerCacheStoreForTest(
-  store: TelegramStickerCacheStore | undefined,
-): void {
-  stickerCacheStoreForTest = store;
-}
-
-export function clearTelegramStickerCacheForTest(): void {
-  openStickerCacheStore().clear();
 }
 
 export function listTelegramLegacyStickerCacheEntries(
