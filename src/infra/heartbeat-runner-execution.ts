@@ -1,6 +1,6 @@
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { hasOutboundReplyContent } from "openclaw/plugin-sdk/reply-payload";
-import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
+import { resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { appendCronStyleCurrentTimeLine } from "../agents/current-time.js";
 import { resolveEmbeddedSessionLane } from "../agents/embedded-agent-runner/lanes.js";
 import { listActiveEmbeddedRunSessionKeys } from "../agents/embedded-agent-runner/run-state.js";
@@ -59,6 +59,7 @@ import {
 } from "./heartbeat-cost-guard.js";
 import { isCronSystemEvent, isExecCompletionEvent } from "./heartbeat-events-filter.js";
 import { emitHeartbeatEvent } from "./heartbeat-events.js";
+import { invokeHeartbeatWithMemoryPrepend } from "./heartbeat-memory-prepend.js";
 import { HEARTBEAT_RUN_SCOPE, type HeartbeatRunScope } from "./heartbeat-run-scope.js";
 import {
   canHeartbeatDeliverCommitments,
@@ -94,10 +95,7 @@ import {
   type HeartbeatWakeIntent,
   type HeartbeatWakeSource,
 } from "./heartbeat-wake.js";
-import {
-  prepareMemoryPrependQueueDrain,
-  prependAssociativeRecallBlockToText,
-} from "./memory-prepend-queue.js";
+import { hasPendingMemoryPrepend } from "./memory-prepend-queue.js";
 import type { OutboundSendDeps } from "./outbound/deliver.js";
 import {
   resolveHeartbeatDeliveryTargetWithSessionRoute,
@@ -346,9 +344,7 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
   const { listActiveEmbeddedRuns, isReplyRunActive } = wake;
   const { entry, sessionKey } = preflight.session;
   const previousUpdatedAt = entry?.updatedAt;
-  const preparedMemoryPrepend = await prepareMemoryPrependQueueDrain({
-    workspaceDir: resolveAgentWorkspaceDir(cfg, agentId),
-  });
+  const hasMemoryPrepend = hasPendingMemoryPrepend({ agentId });
 
   // Isolated heartbeat runs use the cron-style fresh-session lifecycle. The
   // main entry remains the delivery owner, but its transcript is never sent.
@@ -372,7 +368,7 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
   });
   const useIsolatedSession = shouldUseIsolatedHeartbeatSession({
     configuredIsolated: heartbeat?.isolatedSession,
-    hasMemoryPrepend: Boolean(preparedMemoryPrepend.block),
+    hasMemoryPrepend,
     autoIsolatedMainSession: Boolean(autoIsolatedMainSession),
   });
   if (autoIsolatedMainSession) {
@@ -380,12 +376,6 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
       sessionKey,
       agentId,
       ...autoIsolatedMainSession,
-    });
-  }
-  if (preparedMemoryPrepend.block && heartbeat?.isolatedSession !== true) {
-    log.info("heartbeat: using isolated session for memory prepend queue drain", {
-      sessionKey,
-      agentId,
     });
   }
   const firstDueCommitment =
@@ -645,7 +635,7 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
       hasCronEvents,
     }),
     autoIsolatedMainSession: Boolean(autoIsolatedMainSession),
-    preparedMemoryPrepend,
+    memoryPrependEnabled: useIsolatedSession,
   } as const;
 }
 
@@ -663,10 +653,6 @@ export async function invokeHeartbeatAgentRun(
   const { delivery, hasDueCommitments, hasExecCompletion, hasCronEvents, prompt } = prepared;
   const { replyPrefix, runSessionKey, sender, suppressOriginatingContext } = prepared;
   const { usesHeartbeatResponseTool } = prepared;
-  const promptWithMemoryPrepend = prependAssociativeRecallBlockToText({
-    body: prompt,
-    recallBlock: prepared.preparedMemoryPrepend.block,
-  });
   const replyOperationRunState: ReplyOperationRunState = {};
   const heartbeatModelOverride = normalizeOptionalString(heartbeat?.model);
   const getReplyFromConfig =
@@ -688,32 +674,32 @@ export async function invokeHeartbeatAgentRun(
         : undefined,
     onModelSelected: replyPrefix.onModelSelected,
   };
-  const replyResult = await getReplyFromConfig(
-    {
-      Body: appendCronStyleCurrentTimeLine(promptWithMemoryPrepend, cfg, startedAt),
-      From: sender,
-      To: sender,
-      OriginatingChannel:
-        !suppressOriginatingContext && delivery.channel !== "none" ? delivery.channel : undefined,
-      OriginatingTo: !suppressOriginatingContext ? delivery.to : undefined,
-      AccountId: delivery.accountId,
-      MessageThreadId: delivery.threadId,
-      Provider: hasExecCompletion ? "exec-event" : hasCronEvents ? "cron-event" : "heartbeat",
-      SessionKey: runSessionKey,
-      AgentId: agentId,
-    },
-    replyOpts,
-    cfg,
-  );
-  if (prepared.preparedMemoryPrepend.block) {
-    const commitResult = await prepared.preparedMemoryPrepend.commit();
-    if (!commitResult.applied && commitResult.reason !== "noop") {
-      log.warn("heartbeat: memory prepend queue commit skipped", {
-        reason: commitResult.reason,
-        path: prepared.preparedMemoryPrepend.queuePath,
-      });
-    }
-  }
+  const replyResult = await invokeHeartbeatWithMemoryPrepend({
+    agentId,
+    enabled: prepared.memoryPrependEnabled,
+    prompt,
+    admissionSkipped: () => replyOperationRunState.admission?.status === "skipped",
+    invoke: (promptWithMemoryPrepend) =>
+      getReplyFromConfig(
+        {
+          Body: appendCronStyleCurrentTimeLine(promptWithMemoryPrepend, cfg, startedAt),
+          From: sender,
+          To: sender,
+          OriginatingChannel:
+            !suppressOriginatingContext && delivery.channel !== "none"
+              ? delivery.channel
+              : undefined,
+          OriginatingTo: !suppressOriginatingContext ? delivery.to : undefined,
+          AccountId: delivery.accountId,
+          MessageThreadId: delivery.threadId,
+          Provider: hasExecCompletion ? "exec-event" : hasCronEvents ? "cron-event" : "heartbeat",
+          SessionKey: runSessionKey,
+          AgentId: agentId,
+        },
+        replyOpts,
+        cfg,
+      ),
+  });
   const heartbeatToolResponse = resolveHeartbeatToolResponseFromReplyResult(replyResult);
   const heartbeatScratchProposal = resolveHeartbeatScratchProposalFromReplyResult(replyResult);
   const heartbeatTerminalToolFailure = resolveHeartbeatTerminalToolFailure(replyResult);

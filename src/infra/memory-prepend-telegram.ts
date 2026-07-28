@@ -10,11 +10,32 @@ const TELEGRAM_UPDATE_MESSAGE_KEYS = [
 ] as const;
 
 type TelegramMessageField = "text" | "caption";
+type TelegramEntityField = "entities" | "caption_entities";
 
 type TelegramInjectionTarget = {
   messageKey: (typeof TELEGRAM_UPDATE_MESSAGE_KEYS)[number];
   field: TelegramMessageField;
 };
+
+function resolveTelegramEntityField(field: TelegramMessageField): TelegramEntityField {
+  return field === "text" ? "entities" : "caption_entities";
+}
+
+function shiftTelegramEntities(value: unknown, offsetDelta: number): unknown {
+  if (!Array.isArray(value)) {
+    return value;
+  }
+  return value.map((entity) => {
+    if (!entity || typeof entity !== "object") {
+      return entity;
+    }
+    const record = entity as Record<string, unknown>;
+    const offset = record.offset;
+    return Number.isInteger(offset) && (offset as number) >= 0
+      ? { ...record, offset: (offset as number) + offsetDelta }
+      : entity;
+  });
+}
 
 function resolveTelegramInjectionTarget(update: unknown): TelegramInjectionTarget | undefined {
   if (!update || typeof update !== "object") {
@@ -66,6 +87,9 @@ export function prependAssociativeRecallToTelegramUpdate(params: {
   if (nextValue === originalValue) {
     return { update: params.update, didInject: false };
   }
+  const entityField = resolveTelegramEntityField(target.field);
+  const offsetDelta = nextValue.length - originalValue.length;
+  const shiftedEntities = shiftTelegramEntities(message[entityField], offsetDelta);
 
   return {
     update: {
@@ -73,6 +97,7 @@ export function prependAssociativeRecallToTelegramUpdate(params: {
       [target.messageKey]: {
         ...message,
         [target.field]: nextValue,
+        ...(shiftedEntities === undefined ? {} : { [entityField]: shiftedEntities }),
       },
     },
     didInject: true,

@@ -167,6 +167,17 @@ export interface MemoryIndexState {
   revision: number;
 }
 
+export interface MemoryPrependQueue {
+  claim_expires_at: number | null;
+  claim_id: string | null;
+  created_at: number;
+  dedupe_key: string;
+  id: string;
+  status: Generated<string>;
+  text: string;
+  updated_at: number;
+}
+
 export interface SchemaMeta {
   agent_id: string | null;
   app_version: string | null;
@@ -372,6 +383,7 @@ export interface DB {
   memory_index_meta: MemoryIndexMeta;
   memory_index_sources: MemoryIndexSources;
   memory_index_state: MemoryIndexState;
+  memory_prepend_queue: MemoryPrependQueue;
   schema_meta: SchemaMeta;
   session_conversations: SessionConversations;
   session_members: SessionMembers;

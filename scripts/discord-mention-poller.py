@@ -959,7 +959,9 @@ def poll_one_channel(
         )
         if not ok:
             injection_failed = True
-            continue
+            # Preserve a contiguous success watermark. Advancing to a newer
+            # message would make this failed id permanently ineligible on retry.
+            break
         injected_any = True
         last_injected = msg_id
         state.last_injected_id = str(msg_id)

@@ -12,6 +12,7 @@ import { writeCronJobScratch } from "../cron/scratch-store.js";
 import { CronService } from "../cron/service.js";
 import { resolveCronJobsStorePath } from "../cron/store.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
+import { closeOpenClawAgentDatabasesForTest } from "../state/openclaw-agent-db.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
 import { createTestRegistry } from "../test-utils/channel-plugins.js";
 import { normalizeSessionDeliveryState } from "../utils/delivery-context.shared.js";
@@ -150,6 +151,7 @@ export async function withTempHeartbeatSandbox<T>(
     return await fn({ tmpDir, storePath, replySpy });
   } finally {
     replySpy.mockReset();
+    closeOpenClawAgentDatabasesForTest();
     closeOpenClawStateDatabaseForTest();
     for (const [envName, previousValue] of previousEnv.entries()) {
       if (previousValue === undefined) {

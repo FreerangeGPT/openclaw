@@ -1,71 +1,65 @@
 import { createHash } from "node:crypto";
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import { z } from "zod";
+import type { DatabaseSync } from "node:sqlite";
+import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
+import { normalizeAgentId } from "../routing/session-key.js";
+import type { DB as OpenClawAgentKyselyDatabase } from "../state/openclaw-agent-db.generated.js";
+import {
+  openOpenClawAgentDatabase,
+  runOpenClawAgentWriteTransaction,
+  type OpenClawAgentDatabase,
+  type OpenClawAgentDatabaseOptions,
+} from "../state/openclaw-agent-db.js";
+import { ensureOpenClawAgentMemoryPrependSchemaInTransaction } from "../state/openclaw-agent-memory-prepend-schema.js";
+import {
+  executeSqliteQuerySync,
+  executeSqliteQueryTakeFirstSync,
+  getNodeSqliteKysely,
+} from "./kysely-sync.js";
+import { generateSecureUuid } from "./secure-random.js";
+import { runSqliteImmediateTransactionSync } from "./sqlite-transaction.js";
 
-export const MEMORY_PREPEND_QUEUE_DIRNAME = ".memory-queue";
-export const MEMORY_PREPEND_QUEUE_FILENAME = "pending.jsonl";
 export const MEMORY_PREPEND_BLOCK_LABEL = "[Associative recall]";
 export const DEFAULT_MEMORY_PREPEND_MAX_FRAGMENTS = 3;
 export const DEFAULT_MEMORY_PREPEND_MAX_CHARS = 2_500;
 
-const memoryPrependQueueEntrySchema = z
-  .object({
-    text: z.string().trim().min(1).optional(),
-    fragment: z.string().trim().min(1).optional(),
-    content: z.string().trim().min(1).optional(),
-    hash: z.string().trim().min(1).optional(),
-  })
-  .passthrough();
+const DEFAULT_MEMORY_PREPEND_CLAIM_LEASE_MS = 15 * 60_000;
+const DEFAULT_MEMORY_PREPEND_CLAIM_RENEW_MS = 60_000;
 
-type ParsedQueueLine =
-  | {
-      kind: "entry";
-      rawLine: string;
-      text: string;
-      dedupeKey: string;
-    }
-  | {
-      kind: "invalid";
-      rawLine: string;
-    };
+type MemoryPrependDatabase = Pick<OpenClawAgentKyselyDatabase, "memory_prepend_queue">;
+type MemoryPrependDatabaseScope = {
+  agentId?: string;
+  databasePath?: string;
+  env?: NodeJS.ProcessEnv;
+};
+type MemoryPrependQueueRow = {
+  id: string;
+  text: string;
+};
+type ClaimedMemoryPrependRow = MemoryPrependQueueRow & {
+  truncated: boolean;
+};
 
 export type MemoryPrependCommitResult =
   | { applied: true; reason: "updated" | "cleared" }
-  | { applied: false; reason: "noop" | "already_committed" | "missing" | "queue_changed" };
+  | { applied: false; reason: "noop" | "already_finalized" | "claim_lost" };
+
+export type MemoryPrependReleaseResult =
+  | { applied: true; reason: "released" }
+  | { applied: false; reason: "noop" | "already_finalized" | "claim_lost" };
 
 export type PreparedMemoryPrependQueueDrain = {
-  queuePath: string;
+  databasePath: string;
   block?: string;
   includedFragments: number;
-  malformedLines: number;
   truncated: boolean;
   commit: () => Promise<MemoryPrependCommitResult>;
+  release: () => Promise<MemoryPrependReleaseResult>;
 };
+
+const ensuredMemoryPrependDatabases = new WeakSet<DatabaseSync>();
 
 function normalizeAssociativeRecallText(text: string): string {
   return text.replace(/\r\n?/g, "\n").trim();
-}
-
-function expandLeadingHome(value: string, homeDir = os.homedir()): string {
-  if (!value.startsWith("~")) {
-    return value;
-  }
-  if (value === "~") {
-    return homeDir;
-  }
-  if (value.startsWith("~/") || value.startsWith("~\\")) {
-    return path.join(homeDir, value.slice(2));
-  }
-  return value;
-}
-
-function splitJsonlLines(raw: string): string[] {
-  return raw
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
 }
 
 function truncateAssociativeRecallText(text: string, maxChars: number): string {
@@ -73,92 +67,101 @@ function truncateAssociativeRecallText(text: string, maxChars: number): string {
     return text;
   }
   if (maxChars <= 1) {
-    return text.slice(0, Math.max(0, maxChars));
+    return maxChars === 1 ? "…" : "";
   }
-  return `${text.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+  return `${truncateUtf16Safe(text, maxChars - 1).trimEnd()}…`;
 }
 
 function hashAssociativeRecallText(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
 
-function parseQueueLine(rawLine: string): ParsedQueueLine {
-  try {
-    const parsed = memoryPrependQueueEntrySchema.parse(JSON.parse(rawLine));
-    const rawText = parsed.text ?? parsed.fragment ?? parsed.content;
-    if (!rawText) {
-      return { kind: "invalid", rawLine };
-    }
-    const text = normalizeAssociativeRecallText(rawText);
-    if (!text) {
-      return { kind: "invalid", rawLine };
-    }
-    const dedupeKey =
-      normalizeAssociativeRecallText(parsed.hash ?? "") || hashAssociativeRecallText(text);
-    return {
-      kind: "entry",
-      rawLine,
-      text,
-      dedupeKey,
-    };
-  } catch {
-    return { kind: "invalid", rawLine };
-  }
+function toDatabaseOptions(scope: MemoryPrependDatabaseScope): OpenClawAgentDatabaseOptions {
+  return {
+    agentId: normalizeAgentId(scope.agentId),
+    ...(scope.databasePath ? { path: scope.databasePath } : {}),
+    ...(scope.env ? { env: scope.env } : {}),
+  };
 }
 
-function startsWithLines(full: readonly string[], prefix: readonly string[]): boolean {
-  if (prefix.length > full.length) {
-    return false;
+function ensureMemoryPrependSchema(options: OpenClawAgentDatabaseOptions): OpenClawAgentDatabase {
+  const database = openOpenClawAgentDatabase(options);
+  if (ensuredMemoryPrependDatabases.has(database.db)) {
+    return database;
   }
-  for (let index = 0; index < prefix.length; index += 1) {
-    if (full[index] !== prefix[index]) {
+  if (database.db.isTransaction) {
+    throw new Error("memory-prepend schema must be ensured before the write transaction starts");
+  }
+  runSqliteImmediateTransactionSync(
+    database.db,
+    () => ensureOpenClawAgentMemoryPrependSchemaInTransaction(database.db),
+    {
+      databaseLabel: database.path,
+      operationLabel: "memory-prepend.ensure-schema",
+    },
+  );
+  ensuredMemoryPrependDatabases.add(database.db);
+  return database;
+}
+
+function runMemoryPrependWrite<T>(
+  scope: MemoryPrependDatabaseScope,
+  operationLabel: string,
+  operation: (database: OpenClawAgentDatabase) => T,
+): T {
+  const options = toDatabaseOptions(scope);
+  ensureMemoryPrependSchema(options);
+  return runOpenClawAgentWriteTransaction(operation, options, { operationLabel });
+}
+
+function memoryPrependKysely(database: OpenClawAgentDatabase) {
+  return getNodeSqliteKysely<MemoryPrependDatabase>(database.db);
+}
+
+function countClaimRows(
+  database: OpenClawAgentDatabase,
+  claimId: string,
+  ids: readonly string[],
+): number {
+  if (ids.length === 0) {
+    return 0;
+  }
+  const row = executeSqliteQueryTakeFirstSync(
+    database.db,
+    memoryPrependKysely(database)
+      .selectFrom("memory_prepend_queue")
+      .select((eb) => eb.fn.countAll<number | bigint>().as("count"))
+      .where("claim_id", "=", claimId)
+      .where("id", "in", ids),
+  );
+  return Number(row?.count ?? 0);
+}
+
+function renewMemoryPrependClaim(params: {
+  scope: MemoryPrependDatabaseScope;
+  claimId: string;
+  ids: readonly string[];
+  leaseMs: number;
+  now: number;
+}): boolean {
+  return runMemoryPrependWrite(params.scope, "memory-prepend.renew", (database) => {
+    if (countClaimRows(database, params.claimId, params.ids) !== params.ids.length) {
       return false;
     }
-  }
-  return true;
-}
-
-async function writeQueueLines(queuePath: string, lines: readonly string[]): Promise<void> {
-  await fs.mkdir(path.dirname(queuePath), { recursive: true });
-  if (lines.length === 0) {
-    await fs.rm(queuePath, { force: true }).catch((error: unknown) => {
-      const code = (error as { code?: string } | undefined)?.code;
-      if (code !== "ENOENT") {
-        throw error;
-      }
-    });
-    return;
-  }
-
-  const tempPath = `${queuePath}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tempPath, `${lines.join("\n")}\n`, "utf-8");
-  await fs.rename(tempPath, queuePath);
-}
-
-export function resolveDefaultMemoryPrependQueuePath(homeDir = os.homedir()): string {
-  return path.join(
-    homeDir,
-    ".openclaw",
-    "workspace",
-    MEMORY_PREPEND_QUEUE_DIRNAME,
-    MEMORY_PREPEND_QUEUE_FILENAME,
-  );
-}
-
-export function resolveMemoryPrependQueuePath(params: {
-  workspaceDir?: string;
-  queuePath?: string;
-  homeDir?: string;
-}): string {
-  const explicitQueuePath = params.queuePath?.trim();
-  if (explicitQueuePath) {
-    return path.resolve(expandLeadingHome(explicitQueuePath, params.homeDir));
-  }
-  const workspaceDir = params.workspaceDir?.trim();
-  if (workspaceDir) {
-    return path.join(workspaceDir, MEMORY_PREPEND_QUEUE_DIRNAME, MEMORY_PREPEND_QUEUE_FILENAME);
-  }
-  return resolveDefaultMemoryPrependQueuePath(params.homeDir);
+    return (
+      executeSqliteQuerySync(
+        database.db,
+        memoryPrependKysely(database)
+          .updateTable("memory_prepend_queue")
+          .set({
+            claim_expires_at: params.now + params.leaseMs,
+            updated_at: params.now,
+          })
+          .where("claim_id", "=", params.claimId)
+          .where("id", "in", params.ids),
+      ).numAffectedRows === BigInt(params.ids.length)
+    );
+  });
 }
 
 export function formatAssociativeRecallBlocks(texts: readonly string[]): string {
@@ -178,129 +181,300 @@ export function prependAssociativeRecallBlockToText(params: {
   return params.body.trim() ? `${recallBlock}\n\n${params.body}` : recallBlock;
 }
 
-export async function prepareMemoryPrependQueueDrain(params: {
-  workspaceDir?: string;
-  queuePath?: string;
-  maxFragments?: number;
-  maxChars?: number;
-}): Promise<PreparedMemoryPrependQueueDrain> {
-  const queuePath = resolveMemoryPrependQueuePath({
-    workspaceDir: params.workspaceDir,
-    queuePath: params.queuePath,
+/** Enqueue one memory fragment, deduplicating only against currently queued work. */
+export function enqueueMemoryPrepend(
+  params: MemoryPrependDatabaseScope & {
+    text: string;
+    hash?: string;
+    id?: string;
+    now?: number;
+  },
+): { enqueued: boolean; id: string } {
+  const text = normalizeAssociativeRecallText(params.text);
+  if (!text) {
+    throw new Error("memory prepend text must not be empty");
+  }
+  const dedupeKey =
+    normalizeAssociativeRecallText(params.hash ?? "") || hashAssociativeRecallText(text);
+  const id = params.id?.trim() || generateSecureUuid();
+  const now = params.now ?? Date.now();
+  return runMemoryPrependWrite(params, "memory-prepend.enqueue", (database) => {
+    const db = memoryPrependKysely(database);
+    const inserted =
+      executeSqliteQuerySync(
+        database.db,
+        db
+          .insertInto("memory_prepend_queue")
+          .values({
+            id,
+            dedupe_key: dedupeKey,
+            text,
+            status: "pending",
+            claim_id: null,
+            claim_expires_at: null,
+            created_at: now,
+            updated_at: now,
+          })
+          .onConflict((conflict) => conflict.doNothing()),
+      ).numAffectedRows === 1n;
+    if (inserted) {
+      return { enqueued: true, id };
+    }
+    const existing = executeSqliteQueryTakeFirstSync(
+      database.db,
+      db
+        .selectFrom("memory_prepend_queue")
+        .select("id")
+        .where("dedupe_key", "=", dedupeKey)
+        .limit(1),
+    );
+    if (!existing) {
+      throw new Error(`memory prepend queue id collision: ${id}`);
+    }
+    return { enqueued: false, id: existing.id };
   });
+}
+
+/** Return whether work is claimable now without mutating queue ownership. */
+export function hasPendingMemoryPrepend(
+  params: MemoryPrependDatabaseScope & { now?: number },
+): boolean {
+  const database = ensureMemoryPrependSchema(toDatabaseOptions(params));
+  const now = params.now ?? Date.now();
+  return Boolean(
+    executeSqliteQueryTakeFirstSync(
+      database.db,
+      memoryPrependKysely(database)
+        .selectFrom("memory_prepend_queue")
+        .select("id")
+        .where((eb) =>
+          eb.or([
+            eb("status", "=", "pending"),
+            eb.and([eb("status", "=", "claimed"), eb("claim_expires_at", "<=", now)]),
+          ]),
+        )
+        .limit(1),
+    ),
+  );
+}
+
+/** Atomically claim a bounded batch; callers ack success or release failure. */
+export async function prepareMemoryPrependQueueDrain(
+  params: MemoryPrependDatabaseScope & {
+    maxFragments?: number;
+    maxChars?: number;
+    now?: number;
+    leaseMs?: number;
+    renewLease?: boolean;
+  },
+): Promise<PreparedMemoryPrependQueueDrain> {
+  const scope: MemoryPrependDatabaseScope = {
+    ...(params.agentId ? { agentId: params.agentId } : {}),
+    ...(params.databasePath ? { databasePath: params.databasePath } : {}),
+    ...(params.env ? { env: params.env } : {}),
+  };
   const maxFragments = Math.max(
     1,
     Math.floor(params.maxFragments ?? DEFAULT_MEMORY_PREPEND_MAX_FRAGMENTS),
   );
   const maxChars = Math.max(1, Math.floor(params.maxChars ?? DEFAULT_MEMORY_PREPEND_MAX_CHARS));
+  const leaseMs = Math.max(1, Math.floor(params.leaseMs ?? DEFAULT_MEMORY_PREPEND_CLAIM_LEASE_MS));
+  const claimId = generateSecureUuid();
+  const now = params.now ?? Date.now();
+  let databasePath = "";
 
-  let raw = "";
-  try {
-    raw = await fs.readFile(queuePath, "utf-8");
-  } catch (error) {
-    const code = (error as { code?: string } | undefined)?.code;
-    if (code === "ENOENT") {
-      return {
-        queuePath,
-        includedFragments: 0,
-        malformedLines: 0,
-        truncated: false,
-        commit: async () => ({ applied: false, reason: "noop" }),
-      };
+  const rows = runMemoryPrependWrite(scope, "memory-prepend.claim", (database) => {
+    databasePath = database.path;
+    const db = memoryPrependKysely(database);
+    executeSqliteQuerySync(
+      database.db,
+      db
+        .updateTable("memory_prepend_queue")
+        .set({
+          status: "pending",
+          claim_id: null,
+          claim_expires_at: null,
+          updated_at: now,
+        })
+        .where("status", "=", "claimed")
+        .where("claim_expires_at", "<=", now),
+    );
+    const pending = executeSqliteQuerySync(
+      database.db,
+      db
+        .selectFrom("memory_prepend_queue")
+        .select(["id", "text"])
+        .where("status", "=", "pending")
+        .orderBy("created_at", "asc")
+        .orderBy("id", "asc")
+        .limit(maxFragments),
+    ).rows as MemoryPrependQueueRow[];
+    const selected: ClaimedMemoryPrependRow[] = [];
+    let selectedChars = 0;
+    for (const row of pending) {
+      const remainingChars = maxChars - selectedChars;
+      if (remainingChars <= 0) {
+        break;
+      }
+      const text =
+        row.text.length <= remainingChars
+          ? row.text
+          : selected.length === 0 && row.text.length > maxChars
+            ? truncateAssociativeRecallText(row.text, maxChars)
+            : "";
+      if (!text) {
+        // Preserve a fragment that fits an empty batch instead of deleting its
+        // undisplayed tail merely because earlier rows consumed this batch.
+        break;
+      }
+      selected.push({ id: row.id, text, truncated: text.length < row.text.length });
+      selectedChars += text.length;
+      if (selectedChars >= maxChars) {
+        break;
+      }
     }
-    throw error;
-  }
+    if (selected.length === 0) {
+      return selected;
+    }
+    const ids = selected.map((row) => row.id);
+    const claimed = executeSqliteQuerySync(
+      database.db,
+      db
+        .updateTable("memory_prepend_queue")
+        .set({
+          status: "claimed",
+          claim_id: claimId,
+          claim_expires_at: now + leaseMs,
+          updated_at: now,
+        })
+        .where("status", "=", "pending")
+        .where("id", "in", ids),
+    ).numAffectedRows;
+    if (claimed !== BigInt(ids.length)) {
+      throw new Error("memory prepend claim changed inside its write transaction");
+    }
+    return selected;
+  });
 
-  const originalLines = splitJsonlLines(raw);
-  if (originalLines.length === 0) {
+  if (rows.length === 0) {
     return {
-      queuePath,
+      databasePath,
       includedFragments: 0,
-      malformedLines: 0,
       truncated: false,
       commit: async () => ({ applied: false, reason: "noop" }),
+      release: async () => ({ applied: false, reason: "noop" }),
     };
   }
 
-  const parsedLines = originalLines.map(parseQueueLine);
-  const consumedIndices = new Set<number>();
-  const seenKeys = new Set<string>();
-  const includedTexts: string[] = [];
-  let malformedLines = 0;
-  let totalChars = 0;
-  let truncated = false;
+  const includedTexts = rows.map((row) => row.text);
+  const truncated = rows.some((row) => row.truncated);
+  const ids = rows.map((row) => row.id);
+  let finalized = false;
+  let claimLost = false;
+  let renewTimer: NodeJS.Timeout | undefined;
 
-  for (const [index, parsedLine] of parsedLines.entries()) {
-    if (parsedLine.kind === "invalid") {
-      malformedLines += 1;
-      consumedIndices.add(index);
-      continue;
+  const stopRenewal = () => {
+    if (renewTimer) {
+      clearInterval(renewTimer);
+      renewTimer = undefined;
     }
-
-    if (seenKeys.has(parsedLine.dedupeKey)) {
-      consumedIndices.add(index);
-      continue;
-    }
-
-    if (includedTexts.length >= maxFragments) {
-      continue;
-    }
-
-    const remainingChars = maxChars - totalChars;
-    if (remainingChars <= 0) {
-      continue;
-    }
-
-    const nextText = truncateAssociativeRecallText(parsedLine.text, remainingChars);
-    if (!nextText) {
-      continue;
-    }
-
-    includedTexts.push(nextText);
-    consumedIndices.add(index);
-    seenKeys.add(parsedLine.dedupeKey);
-    totalChars += nextText.length;
-    truncated ||= nextText.length < parsedLine.text.length;
+  };
+  if (params.renewLease !== false) {
+    const renewEveryMs = Math.max(
+      1,
+      Math.min(DEFAULT_MEMORY_PREPEND_CLAIM_RENEW_MS, Math.floor(leaseMs / 3)),
+    );
+    renewTimer = setInterval(() => {
+      if (finalized || claimLost) {
+        stopRenewal();
+        return;
+      }
+      try {
+        claimLost = !renewMemoryPrependClaim({
+          scope,
+          claimId,
+          ids,
+          leaseMs,
+          now: Date.now(),
+        });
+      } catch {
+        // A transient SQLite failure should not consume memory. Keep retrying
+        // until the lease expires; commit/release will still verify ownership.
+      }
+    }, renewEveryMs);
+    renewTimer.unref();
   }
 
-  const block = includedTexts.length > 0 ? formatAssociativeRecallBlocks(includedTexts) : undefined;
-  const remainingLines = originalLines.filter((_, index) => !consumedIndices.has(index));
-  let committed = false;
-
   return {
-    queuePath,
-    block,
+    databasePath,
+    block: formatAssociativeRecallBlocks(includedTexts),
     includedFragments: includedTexts.length,
-    malformedLines,
     truncated,
     commit: async () => {
-      if (committed) {
-        return { applied: false, reason: "already_committed" };
+      if (finalized) {
+        return { applied: false, reason: "already_finalized" };
       }
-
-      let currentRaw = "";
+      if (claimLost) {
+        finalized = true;
+        stopRenewal();
+        return { applied: false, reason: "claim_lost" };
+      }
       try {
-        currentRaw = await fs.readFile(queuePath, "utf-8");
-      } catch (error) {
-        const code = (error as { code?: string } | undefined)?.code;
-        if (code === "ENOENT") {
-          return { applied: false, reason: "missing" };
-        }
-        throw error;
+        return runMemoryPrependWrite(scope, "memory-prepend.commit", (database) => {
+          if (countClaimRows(database, claimId, ids) !== ids.length) {
+            return { applied: false, reason: "claim_lost" } as const;
+          }
+          executeSqliteQuerySync(
+            database.db,
+            memoryPrependKysely(database)
+              .deleteFrom("memory_prepend_queue")
+              .where("claim_id", "=", claimId)
+              .where("id", "in", ids),
+          );
+          const remaining = executeSqliteQueryTakeFirstSync(
+            database.db,
+            memoryPrependKysely(database)
+              .selectFrom("memory_prepend_queue")
+              .select((eb) => eb.fn.countAll<number | bigint>().as("count")),
+          );
+          return {
+            applied: true,
+            reason: Number(remaining?.count ?? 0) > 0 ? "updated" : "cleared",
+          } as const;
+        });
+      } finally {
+        finalized = true;
+        stopRenewal();
       }
-
-      const currentLines = splitJsonlLines(currentRaw);
-      if (!startsWithLines(currentLines, originalLines)) {
-        return { applied: false, reason: "queue_changed" };
+    },
+    release: async () => {
+      if (finalized) {
+        return { applied: false, reason: "already_finalized" };
       }
-
-      const appendedLines = currentLines.slice(originalLines.length);
-      await writeQueueLines(queuePath, [...remainingLines, ...appendedLines]);
-      committed = true;
-      return {
-        applied: true,
-        reason: remainingLines.length + appendedLines.length > 0 ? "updated" : "cleared",
-      };
+      try {
+        return runMemoryPrependWrite(scope, "memory-prepend.release", (database) => {
+          if (countClaimRows(database, claimId, ids) !== ids.length) {
+            return { applied: false, reason: "claim_lost" } as const;
+          }
+          executeSqliteQuerySync(
+            database.db,
+            memoryPrependKysely(database)
+              .updateTable("memory_prepend_queue")
+              .set({
+                status: "pending",
+                claim_id: null,
+                claim_expires_at: null,
+                updated_at: Date.now(),
+              })
+              .where("claim_id", "=", claimId)
+              .where("id", "in", ids),
+          );
+          return { applied: true, reason: "released" } as const;
+        });
+      } finally {
+        finalized = true;
+        stopRenewal();
+      }
     },
   };
 }

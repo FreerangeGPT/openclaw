@@ -19,7 +19,10 @@ import {
   AGENT_V14_BOARD_SCHEMA_SQL,
   ensureOpenClawAgentBoardSchemaInTransaction,
 } from "./openclaw-agent-board-schema.js";
-import { OPENCLAW_AGENT_SCHEMA_VERSION } from "./openclaw-agent-db-contract.js";
+import {
+  LAZY_ADDITIVE_AGENT_TABLES,
+  OPENCLAW_AGENT_SCHEMA_VERSION,
+} from "./openclaw-agent-db-contract.js";
 import { OPENCLAW_AGENT_SCHEMA_SQL } from "./openclaw-agent-schema.generated.js";
 import {
   AGENT_V14_ADDITIVE_SCHEMA_SQL,
@@ -34,6 +37,7 @@ type ExistingAgentSchemaMeta = {
 };
 
 const AGENT_SCHEMA_COMPATIBILITY = {
+  allowedMissingTables: LAZY_ADDITIVE_AGENT_TABLES,
   allowedColumnDefinitions: {
     "conversations.delivery_target": ["delivery_target TEXT NOT NULL DEFAULT ''"],
   },

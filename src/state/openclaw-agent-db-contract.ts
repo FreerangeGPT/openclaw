@@ -19,6 +19,9 @@ import type { OpenClawStateDatabaseOptions } from "./openclaw-state-db.js";
 // change is folded in structure-gated migrations, so v2 main DBs and
 // pre-merge v4 flip DBs both converge on this schema.
 export const OPENCLAW_AGENT_SCHEMA_VERSION = 16;
+// Added after v16 shipped. The table stays optional until the memory-prepend
+// feature performs its lazy ensure; fold it into the next natural schema bump.
+export const LAZY_ADDITIVE_AGENT_TABLES = ["memory_prepend_queue"] as const;
 
 /** Open per-agent SQLite database handle plus lifecycle maintenance. */
 export type OpenClawAgentDatabase = {

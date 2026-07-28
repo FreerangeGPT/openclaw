@@ -385,6 +385,28 @@ CREATE INDEX IF NOT EXISTS idx_agent_cache_expiry
 CREATE INDEX IF NOT EXISTS idx_agent_cache_updated
   ON cache_entries(scope, updated_at DESC, key);
 
+CREATE TABLE IF NOT EXISTS memory_prepend_queue (
+  id TEXT NOT NULL PRIMARY KEY,
+  dedupe_key TEXT NOT NULL UNIQUE,
+  text TEXT NOT NULL CHECK (length(text) > 0),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'claimed')),
+  claim_id TEXT,
+  claim_expires_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  CHECK (
+    (status = 'pending' AND claim_id IS NULL AND claim_expires_at IS NULL) OR
+    (status = 'claimed' AND claim_id IS NOT NULL AND claim_expires_at IS NOT NULL)
+  )
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_agent_memory_prepend_pending
+  ON memory_prepend_queue(status, created_at, id);
+
+CREATE INDEX IF NOT EXISTS idx_agent_memory_prepend_claim_expiry
+  ON memory_prepend_queue(claim_expires_at, id)
+  WHERE status = 'claimed';
+
 CREATE TABLE IF NOT EXISTS auth_profile_store (
   store_key TEXT NOT NULL PRIMARY KEY,
   store_json TEXT NOT NULL,
