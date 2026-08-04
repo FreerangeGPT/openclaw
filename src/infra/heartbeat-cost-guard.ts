@@ -4,11 +4,13 @@ export type ExpensiveMainSessionHeartbeatSkip = {
   promptChars: number;
   threshold: number;
   totalTokens: number;
+  cacheKeeperCacheViable?: boolean;
 };
 
 export type AutoIsolatedMainSessionHeartbeat = {
   threshold: number;
   totalTokens: number;
+  cacheKeeperCacheViable?: boolean;
 };
 
 export function shouldUseIsolatedHeartbeatSession(params: {
@@ -38,6 +40,8 @@ function resolveFreshPromptTokens(params: {
 
 export function shouldAutoIsolateMainSessionHeartbeat(params: {
   configuredIsolated?: boolean;
+  preserveMainSessionCache: boolean;
+  cacheKeeperCacheViable?: boolean;
   totalTokens?: number;
   totalTokensFresh?: boolean;
   hasExecCompletion: boolean;
@@ -49,6 +53,11 @@ export function shouldAutoIsolateMainSessionHeartbeat(params: {
   isManualReason: boolean;
 }): AutoIsolatedMainSessionHeartbeat | null {
   if (params.configuredIsolated !== undefined) {
+    return null;
+  }
+  // A main-session heartbeat is intentional cache maintenance only when its
+  // resolved retention outlives the cadence; otherwise isolation prevents a costly rewrite.
+  if (params.preserveMainSessionCache && params.cacheKeeperCacheViable === true) {
     return null;
   }
   if (
@@ -69,11 +78,14 @@ export function shouldAutoIsolateMainSessionHeartbeat(params: {
   return {
     totalTokens,
     threshold: FULL_CONTEXT_HEARTBEAT_TOKEN_GUARD,
+    ...(params.cacheKeeperCacheViable === false ? { cacheKeeperCacheViable: false } : {}),
   };
 }
 
 export function shouldSkipExpensiveMainSessionHeartbeat(params: {
   prompt: string;
+  preserveMainSessionCache: boolean;
+  cacheKeeperCacheViable?: boolean;
   totalTokens?: number;
   totalTokensFresh?: boolean;
   hasExecCompletion: boolean;
@@ -86,6 +98,9 @@ export function shouldSkipExpensiveMainSessionHeartbeat(params: {
   useIsolatedSession: boolean;
 }): ExpensiveMainSessionHeartbeatSkip | null {
   if (params.useIsolatedSession) {
+    return null;
+  }
+  if (params.preserveMainSessionCache && params.cacheKeeperCacheViable === true) {
     return null;
   }
   if (
@@ -107,5 +122,6 @@ export function shouldSkipExpensiveMainSessionHeartbeat(params: {
     totalTokens,
     threshold: FULL_CONTEXT_HEARTBEAT_TOKEN_GUARD,
     promptChars: params.prompt.length,
+    ...(params.cacheKeeperCacheViable === false ? { cacheKeeperCacheViable: false } : {}),
   };
 }

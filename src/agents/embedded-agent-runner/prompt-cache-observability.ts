@@ -6,6 +6,7 @@ import {
   sortPromptCacheToolsByName,
   splitSystemPromptCacheBoundary,
 } from "@openclaw/ai/internal/shared";
+import { resolveAnthropicMessagesUrl } from "@openclaw/ai/transports";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { stableStringify } from "../stable-stringify.js";
 import type { NormalizedUsage } from "../usage.js";
@@ -35,10 +36,11 @@ type PromptCacheToolDescriptor = {
   readonly parameters?: unknown;
 };
 
-type PromptCacheSnapshot = {
+export type PromptCacheSnapshot = {
   provider: string;
   modelId: string;
   modelApi?: string | null;
+  baseUrlDigest?: string;
   cacheRetention?: "none" | "short" | "long";
   streamStrategy: string;
   transport?: string;
@@ -50,6 +52,7 @@ type PromptCacheSnapshot = {
 
 type PromptCacheObservationStart = {
   snapshot: PromptCacheSnapshot;
+  identity: string;
   changes: PromptCacheChange[] | null;
   previousCacheRead: number | null;
 };
@@ -193,6 +196,12 @@ function diffSnapshots(
       detail: `${previous.modelApi ?? "unknown"} -> ${next.modelApi ?? "unknown"}`,
     });
   }
+  if ((previous.baseUrlDigest ?? null) !== (next.baseUrlDigest ?? null)) {
+    changes.push({
+      code: "transport",
+      detail: "provider endpoint changed",
+    });
+  }
   if (previous.cacheRetention !== next.cacheRetention) {
     changes.push({
       code: "cacheRetention",
@@ -276,6 +285,7 @@ export function beginPromptCacheObservation(params: {
   provider: string;
   modelId: string;
   modelApi?: string | null;
+  baseUrl?: string;
   cacheRetention?: "none" | "short" | "long";
   streamStrategy: string;
   transport?: string;
@@ -284,10 +294,15 @@ export function beginPromptCacheObservation(params: {
 }): PromptCacheObservationStart {
   const key = buildTrackerKey(params);
   const tools = sortPromptCacheToolsByName(params.tools);
+  const effectiveBaseUrl =
+    params.modelApi === "anthropic-messages"
+      ? resolveAnthropicMessagesUrl(params.baseUrl)
+      : params.baseUrl;
   const snapshot: PromptCacheSnapshot = {
     provider: params.provider,
     modelId: params.modelId,
     modelApi: params.modelApi,
+    ...(effectiveBaseUrl ? { baseUrlDigest: digestText(effectiveBaseUrl) } : {}),
     cacheRetention: params.cacheRetention,
     streamStrategy: params.streamStrategy,
     transport: params.transport,
@@ -307,6 +322,7 @@ export function beginPromptCacheObservation(params: {
   });
   return {
     snapshot,
+    identity: digestText(stableStringify(snapshot)),
     changes,
     previousCacheRead: previous?.lastCacheRead ?? null,
   };

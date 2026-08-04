@@ -1,4 +1,3 @@
-import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { hasOutboundReplyContent } from "openclaw/plugin-sdk/reply-payload";
 import { resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { appendCronStyleCurrentTimeLine } from "../agents/current-time.js";
@@ -53,11 +52,11 @@ import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
 import { formatErrorMessage } from "./errors.js";
 import { isWithinActiveHours } from "./heartbeat-active-hours.js";
 import {
-  shouldAutoIsolateMainSessionHeartbeat,
-  shouldSkipExpensiveMainSessionHeartbeat,
-  shouldUseIsolatedHeartbeatSession,
-} from "./heartbeat-cost-guard.js";
-import { isCronSystemEvent, isExecCompletionEvent } from "./heartbeat-events-filter.js";
+  resolveExpensiveMainSessionHeartbeatSkip,
+  resolveHeartbeatCacheKeeperReplyOptions,
+  resolveHeartbeatSessionIsolation,
+  resolvePromptAwareHeartbeatCacheKeeperPolicy,
+} from "./heartbeat-cache-keeper.js";
 import { emitHeartbeatEvent } from "./heartbeat-events.js";
 import { invokeHeartbeatWithMemoryPrepend } from "./heartbeat-memory-prepend.js";
 import { HEARTBEAT_RUN_SCOPE, type HeartbeatRunScope } from "./heartbeat-run-scope.js";
@@ -345,36 +344,30 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
   const { entry, sessionKey } = preflight.session;
   const previousUpdatedAt = entry?.updatedAt;
   const hasMemoryPrepend = hasPendingMemoryPrepend({ agentId });
+  const cacheKeeperPolicy = await resolvePromptAwareHeartbeatCacheKeeperPolicy({
+    ...preflight.session,
+    ...wake,
+    nowMs: startedAt,
+  });
 
   // Isolated heartbeat runs use the cron-style fresh-session lifecycle. The
   // main entry remains the delivery owner, but its transcript is never sent.
-  const pendingHasExecCompletion = preflight.pendingEventEntries.some((event) =>
-    isExecCompletionEvent(event.text),
-  );
-  const pendingHasCronEvents =
-    preflight.hasTaggedCronEvents ||
-    preflight.pendingEventEntries.some((event) => isCronSystemEvent(event.text));
-  const autoIsolatedMainSession = shouldAutoIsolateMainSessionHeartbeat({
-    configuredIsolated: heartbeat?.isolatedSession,
-    totalTokens: entry?.totalTokens,
-    totalTokensFresh: entry?.totalTokensFresh,
-    hasExecCompletion: pendingHasExecCompletion,
-    hasCronEvents: pendingHasCronEvents,
-    hasDueCommitments: preflight.dueCommitments.length > 0,
-    hasScheduledTasks: scheduledTasks.length > 0,
-    isCronEventReason: preflight.isCronWake,
-    isExecEventReason: preflight.isExecEventWake,
-    isManualReason: wake.wakeSource === "manual",
-  });
-  const useIsolatedSession = shouldUseIsolatedHeartbeatSession({
-    configuredIsolated: heartbeat?.isolatedSession,
-    hasMemoryPrepend,
-    autoIsolatedMainSession: Boolean(autoIsolatedMainSession),
-  });
+  const { autoIsolatedMainSession, mainSessionCacheKeeper, useIsolatedSession } =
+    resolveHeartbeatSessionIsolation({
+      heartbeat,
+      policy: cacheKeeperPolicy,
+      entry,
+      preflight,
+      scheduledTaskCount: scheduledTasks.length,
+      wakeSource: wake.wakeSource,
+      hasMemoryPrepend,
+    });
   if (autoIsolatedMainSession) {
     log.info("heartbeat: auto-isolating large routine main-session run", {
       sessionKey,
       agentId,
+      cacheRetention: cacheKeeperPolicy.heartbeatCacheRetention,
+      heartbeatIntervalMs: cacheKeeperPolicy.heartbeatIntervalMs,
       ...autoIsolatedMainSession,
     });
   }
@@ -440,14 +433,18 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
   const canRelayToUser = Boolean(
     delivery.channel !== "none" && delivery.to && visibility.showAlerts,
   );
-  let useHeartbeatResponseToolPrompt = shouldUseHeartbeatResponseToolPrompt({
-    cfg,
-    agentId,
-    heartbeat,
-    entry,
-    sessionKey,
-    chatType: delivery.chatType,
-  });
+  // A keeper must retain the ordinary main-dialogue tool prefix; adding
+  // heartbeat_respond would invalidate the cache it is meant to refresh.
+  let useHeartbeatResponseToolPrompt =
+    !mainSessionCacheKeeper &&
+    shouldUseHeartbeatResponseToolPrompt({
+      cfg,
+      agentId,
+      heartbeat,
+      entry,
+      sessionKey,
+      chatType: delivery.chatType,
+    });
   let heartbeatRunPrompt = resolveHeartbeatRunPrompt({
     cfg,
     heartbeat,
@@ -475,23 +472,21 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
     }
     return { kind: "skipped", reason: "not-due" } as const;
   }
-  const expensiveMainSessionSkip = shouldSkipExpensiveMainSessionHeartbeat({
-    prompt: heartbeatRunPrompt.prompt,
-    totalTokens: entry?.totalTokens,
-    totalTokensFresh: entry?.totalTokensFresh,
-    hasExecCompletion: heartbeatRunPrompt.hasExecCompletion,
-    hasCronEvents: heartbeatRunPrompt.hasCronEvents,
-    hasDueCommitments: heartbeatRunPrompt.hasDueCommitments,
-    hasScheduledTasks: scheduledTasks.length > 0,
-    isCronEventReason: preflight.isCronWake,
-    isExecEventReason: preflight.isExecEventWake,
-    isManualReason: wake.wakeSource === "manual",
+  const expensiveMainSessionSkip = resolveExpensiveMainSessionHeartbeatSkip({
+    runPrompt: heartbeatRunPrompt,
+    policy: cacheKeeperPolicy,
+    entry,
+    preflight,
+    scheduledTaskCount: scheduledTasks.length,
+    wakeSource: wake.wakeSource,
     useIsolatedSession,
   });
   if (expensiveMainSessionSkip) {
     log.warn("heartbeat: skipping large routine main-session run", {
       sessionKey,
       agentId,
+      cacheRetention: cacheKeeperPolicy.heartbeatCacheRetention,
+      heartbeatIntervalMs: cacheKeeperPolicy.heartbeatIntervalMs,
       ...expensiveMainSessionSkip,
     });
     emitHeartbeatEvent({
@@ -635,6 +630,12 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
       hasCronEvents,
     }),
     autoIsolatedMainSession: Boolean(autoIsolatedMainSession),
+    cacheKeeperReplyOptions: resolveHeartbeatCacheKeeperReplyOptions({
+      heartbeat,
+      mainSessionCacheKeeper,
+      policy: cacheKeeperPolicy,
+      useIsolatedSession,
+    }),
     memoryPrependEnabled: useIsolatedSession,
   } as const;
 }
@@ -654,14 +655,13 @@ export async function invokeHeartbeatAgentRun(
   const { replyPrefix, runSessionKey, sender, suppressOriginatingContext } = prepared;
   const { usesHeartbeatResponseTool } = prepared;
   const replyOperationRunState: ReplyOperationRunState = {};
-  const heartbeatModelOverride = normalizeOptionalString(heartbeat?.model);
   const getReplyFromConfig =
     opts.deps?.getReplyFromConfig ?? (await loadHeartbeatRunnerRuntime()).getReplyFromConfig;
   const replyOpts = {
     isHeartbeat: true,
     [HEARTBEAT_RUN_SCOPE]: runScope,
     [REPLY_OPERATION_RUN_STATE]: replyOperationRunState,
-    ...(heartbeatModelOverride ? { heartbeatModelOverride } : {}),
+    ...prepared.cacheKeeperReplyOptions,
     suppressToolErrorWarnings: false,
     ...(usesHeartbeatResponseTool ? { enableHeartbeatTool: true, forceHeartbeatTool: true } : {}),
     ...(usesHeartbeatResponseTool ? { sourceReplyDeliveryMode: "message_tool_only" as const } : {}),

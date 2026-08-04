@@ -1,3 +1,8 @@
+import {
+  invalidateLivePromptCacheEvidence,
+  isMainSessionCacheKeeperIdentityMismatchError,
+  isReplaySafeMainSessionCacheKeeperIdentityMismatch,
+} from "../agents/embedded-agent-runner/prompt-cache-evidence.js";
 import { resolveResponsePrefixTemplate } from "../auto-reply/reply/response-prefix-template.js";
 import { HEARTBEAT_TOKEN } from "../auto-reply/tokens.js";
 import { sendDurableMessageBatch } from "../channels/message/runtime.js";
@@ -166,6 +171,19 @@ export async function runHeartbeatOnce(opts: HeartbeatRunOptions): Promise<Heart
       outboundIdentity,
     });
   } catch (err) {
+    const cacheEvidenceId = (
+      prepared.cacheKeeperReplyOptions as { heartbeatPromptCacheEvidenceId?: string }
+    ).heartbeatPromptCacheEvidenceId;
+    if (cacheEvidenceId && isMainSessionCacheKeeperIdentityMismatchError(err)) {
+      invalidateLivePromptCacheEvidence(cacheEvidenceId);
+      if (isReplaySafeMainSessionCacheKeeperIdentityMismatch(err)) {
+        log.info("heartbeat: cache identity changed; rerunning through isolation policy", {
+          agentId,
+          sessionKey: runSessionKey,
+        });
+        return await runHeartbeatOnce(opts);
+      }
+    }
     const reason = formatErrorMessage(err);
     emitHeartbeatEvent({
       status: "failed",

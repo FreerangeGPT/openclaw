@@ -125,6 +125,31 @@ function uniqueProviders(provider: string, acceptedProviderIds?: readonly string
   return [...providers];
 }
 
+/** Verifies that a cache-pinned profile is still an eligible route before a heartbeat is admitted. */
+export function isAuthProfileAvailableForProviders(params: {
+  cfg: OpenClawConfig;
+  provider: string;
+  acceptedProviderIds?: readonly string[];
+  agentDir: string;
+  profileId: string;
+  forModel?: string;
+}): boolean {
+  try {
+    const store = ensureAuthProfileStore(params.agentDir, {
+      allowKeychainPrompt: false,
+      config: params.cfg,
+    });
+    const providers = uniqueProviders(params.provider, params.acceptedProviderIds);
+    return (
+      isProfileForProvider({ cfg: params.cfg, providers, profileId: params.profileId, store }) &&
+      !isProfileInCooldown(store, params.profileId, Date.now(), params.forModel)
+    );
+  } catch {
+    // Cache reuse requires positive auth-route proof; isolation owns any later recovery.
+    return false;
+  }
+}
+
 /** Clears an auth-profile override from a session and persists it when possible. */
 export async function clearSessionAuthProfileOverride(params: {
   sessionEntry: SessionEntry;

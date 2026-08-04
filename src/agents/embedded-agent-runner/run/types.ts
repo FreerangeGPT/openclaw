@@ -97,6 +97,8 @@ export type EmbeddedRunAttemptTrajectoryRecorder = {
 export type EmbeddedRunAttemptParams = EmbeddedRunAttemptBase & {
   /** Sticky operation identity used to suppress ordinary retry and hook policy. */
   operation?: EmbeddedRunAttemptOperation;
+  /** The pre-session anchor guard already removed this attempt's synthetic keeper turn. */
+  promptCacheKeeperTurnRollbackCompleted?: boolean;
   preparedModelRuntime?: PreparedModelRuntimeSnapshot;
   /** Active file-backed artifact target resolved by the run/session target seam. */
   sessionFile: string;

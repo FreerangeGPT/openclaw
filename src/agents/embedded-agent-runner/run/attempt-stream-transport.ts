@@ -2,6 +2,7 @@
  * Selects and configures the provider transport for one embedded attempt.
  */
 import { createCodexNativeWebSearchWrapper } from "../../../llm/providers/stream-wrappers/openai.js";
+import type { AssistantMessageEventStreamLike } from "../../../llm/types.js";
 import type { ProviderRuntimePluginHandle } from "../../../plugins/provider-hook-runtime.js";
 import { resolveProviderTextTransforms } from "../../../plugins/provider-runtime.js";
 import { wrapStreamFnTextTransforms } from "../../plugin-text-transforms.js";
@@ -16,7 +17,16 @@ import {
   resolvePreparedExtraParams,
 } from "../extra-params.js";
 import { log } from "../logger.js";
-import { resolveCacheRetention } from "../prompt-cache-retention.js";
+import {
+  assertMainSessionCacheKeeperEvidenceFresh,
+  assertMainSessionCacheKeeperProviderIdentity,
+  isCanonicalAgentMainSession,
+  refreshLivePromptCacheEvidence,
+} from "../prompt-cache-evidence.js";
+import {
+  resolveCacheRetention,
+  resolveMainSessionCacheRetention,
+} from "../prompt-cache-retention.js";
 import {
   type ProviderPromptState,
   wrapStreamFnWithProviderPromptState,
@@ -33,6 +43,42 @@ import {
   resolveAttemptToolPolicyMessageProvider,
 } from "./attempt.run-decisions.js";
 import type { EmbeddedRunAttemptParams } from "./types.js";
+
+export function observeCacheKeeperStream(params: {
+  stream: AssistantMessageEventStreamLike;
+  evidenceId: string;
+  providerCallStartedAt: number;
+}): AssistantMessageEventStreamLike {
+  let refreshAttempted = false;
+  const refreshEvidence = (
+    usage: Parameters<typeof refreshLivePromptCacheEvidence>[0]["usage"],
+  ) => {
+    if (refreshAttempted) {
+      return;
+    }
+    refreshAttempted = true;
+    refreshLivePromptCacheEvidence({
+      evidenceId: params.evidenceId,
+      timestamp: params.providerCallStartedAt,
+      usage,
+    });
+  };
+  return {
+    result: async () => {
+      const message = await params.stream.result();
+      refreshEvidence(message.usage);
+      return message;
+    },
+    async *[Symbol.asyncIterator]() {
+      for await (const event of params.stream) {
+        if (event.type === "done") {
+          refreshEvidence(event.message.usage);
+        }
+        yield event;
+      }
+    },
+  };
+}
 
 export async function prepareEmbeddedAttemptTransport(input: {
   attempt: EmbeddedRunAttemptParams;
@@ -63,8 +109,33 @@ export async function prepareEmbeddedAttemptTransport(input: {
     settingsManager: input.settingsManager,
     sessionTransport: session.agent.transport,
   });
+  const resolvedExtraParams = resolveExtraParams({
+    cfg: attempt.config,
+    provider: attempt.provider,
+    modelId: attempt.modelId,
+    agentId: input.sessionAgentId,
+  });
+  const configuredAndRunExtraParams = {
+    ...resolvedExtraParams,
+    ...attempt.streamParams,
+  };
+  const mainSessionCacheRetention = isCanonicalAgentMainSession({
+    cfg: attempt.config ?? {},
+    agentId: input.sessionAgentId,
+    sessionKey: attempt.sessionKey,
+  })
+    ? resolveMainSessionCacheRetention(
+        configuredAndRunExtraParams,
+        attempt.provider,
+        attempt.model.api,
+        attempt.modelId,
+        undefined,
+        attempt.model.baseUrl,
+      )
+    : undefined;
   const streamExtraParamsOverride = {
     ...attempt.streamParams,
+    ...(mainSessionCacheRetention ? { cacheRetention: mainSessionCacheRetention } : {}),
     fastMode: attempt.fastMode,
   };
   const preparedRuntimeExtraParams = attempt.runtimePlan?.transport.resolveExtraParams({
@@ -74,12 +145,6 @@ export async function prepareEmbeddedAttemptTransport(input: {
     workspaceDir: input.workspaceDir,
     model: attempt.model,
     resolvedTransport,
-  });
-  const resolvedExtraParams = resolveExtraParams({
-    cfg: attempt.config,
-    provider: attempt.provider,
-    modelId: attempt.modelId,
-    agentId: input.sessionAgentId,
   });
   const effectiveExtraParams =
     preparedRuntimeExtraParams ??
@@ -125,11 +190,56 @@ export async function prepareEmbeddedAttemptTransport(input: {
     authProfileId: resolveAttemptStreamAuthProfileId(attempt),
     authStorage: attempt.authStorage,
   });
+  const promptCacheKeeperEvidenceId = attempt.promptCacheKeeperEvidenceId;
+  let cacheKeeperProviderCalls = 0;
   // Install inside provider/config wrappers so their full onPayload chain runs
   // before admission hashes the request body that the built-in transport sends.
   session.agent.streamFn = wrapStreamFnWithProviderPromptState({
     streamFn: session.agent.streamFn,
     ...input.providerPromptState,
+    ...(promptCacheKeeperEvidenceId
+      ? {
+          assertCacheIdentity: (
+            identity: {
+              cachePrefixIdentity: string;
+              cacheRequestOptionsIdentity: string;
+              providerMessageIdentity?: string;
+              messageContinuity: {
+                deepestLongCachePrefixIndex?: number;
+                prefixIdentities: readonly string[];
+                tokenUpperBounds: readonly number[];
+              };
+            },
+            providerCallStartedAt: number,
+          ) => {
+            const replaySafe = cacheKeeperProviderCalls === 0;
+            // Payload hooks may be asynchronous. Recheck the one-hour proof at
+            // the literal final-payload boundary so an expired cache cannot dispatch.
+            assertMainSessionCacheKeeperEvidenceFresh(
+              promptCacheKeeperEvidenceId,
+              providerCallStartedAt,
+              replaySafe,
+            );
+            assertMainSessionCacheKeeperProviderIdentity({
+              evidenceId: promptCacheKeeperEvidenceId,
+              providerCachePrefixIdentity: identity.cachePrefixIdentity,
+              requestOptionsIdentity: identity.cacheRequestOptionsIdentity,
+              providerMessageLongCachePrefixIndex:
+                identity.messageContinuity.deepestLongCachePrefixIndex,
+              providerMessagePrefixIdentities: identity.messageContinuity.prefixIdentities,
+              providerMessageTokenUpperBounds: identity.messageContinuity.tokenUpperBounds,
+              replaySafe,
+            });
+            cacheKeeperProviderCalls += 1;
+          },
+          observeProviderStream: (stream, providerCallStartedAt) =>
+            observeCacheKeeperStream({
+              stream,
+              evidenceId: promptCacheKeeperEvidenceId,
+              providerCallStartedAt,
+            }),
+        }
+      : {}),
   });
   const providerTextTransforms = resolveProviderTextTransforms({
     provider: attempt.provider,
@@ -184,6 +294,17 @@ export async function prepareEmbeddedAttemptTransport(input: {
       ...nativeWebSearchPolicyContext,
       codeModeToolSurfaceEnabled: true,
     });
+  }
+  if (promptCacheKeeperEvidenceId) {
+    const streamWithCacheIdentity = session.agent.streamFn;
+    session.agent.streamFn = async (model, context, options) => {
+      assertMainSessionCacheKeeperEvidenceFresh(
+        promptCacheKeeperEvidenceId,
+        Date.now(),
+        cacheKeeperProviderCalls === 0,
+      );
+      return streamWithCacheIdentity(model, context, options);
+    };
   }
   const effectivePromptCacheRetention = resolveCacheRetention(
     effectiveExtraParams,

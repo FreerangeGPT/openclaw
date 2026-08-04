@@ -66,6 +66,7 @@ export async function runEmbeddedFallbackCandidate(params: {
   runAbortSignal?: AbortSignal;
   allowTransientCooldownProbe?: boolean;
   isFinalFallbackAttempt?: boolean;
+  modelFallbacksDisabled: boolean;
   suppressQueuedUserPersistenceForCandidate: boolean;
   suppressAssistantErrorPersistenceForCandidate: boolean;
   onAssistantErrorMessagePersisted: () => void;
@@ -202,12 +203,27 @@ export async function runEmbeddedFallbackCandidate(params: {
         groupSpace: normalizeOptionalString(turn.sessionCtx.GroupSpace),
         ...senderContext,
         ...runBaseParams,
+        ...(turn.isHeartbeat && turn.opts?.heartbeatAuthProfileOverride
+          ? {
+              authProfileId: turn.opts.heartbeatAuthProfileOverride,
+              authProfileIdSource: "user" as const,
+            }
+          : {}),
         provider: embeddedRunProvider,
         agentHarnessId: embeddedRunHarnessOverride,
         agentHarnessRuntimeOverride: embeddedRunHarnessOverride,
         fastModeStartedAtMs: params.fastModeStartedAtMs,
         fastModeAutoProgressState: params.fastModeAutoProgressState,
         isFinalFallbackAttempt: params.isFinalFallbackAttempt,
+        ...(params.modelFallbacksDisabled
+          ? { modelSelectionLocked: true, modelFallbacksOverride: [] }
+          : {}),
+        ...(turn.isHeartbeat && turn.opts?.heartbeatPromptCacheEvidenceId
+          ? {
+              promptCacheKeeperEvidenceId: turn.opts.heartbeatPromptCacheEvidenceId,
+              promptCacheKeeperTranscriptAnchorId: turn.opts.heartbeatPromptCacheTranscriptAnchorId,
+            }
+          : {}),
         sandboxSessionKey: turn.runtimePolicySessionKey,
         prompt: turn.commandBody,
         transcriptPrompt: turn.transcriptCommandBody,
@@ -238,6 +254,13 @@ export async function runEmbeddedFallbackCandidate(params: {
         forceHeartbeatTool: turn.opts?.forceHeartbeatTool,
         bootstrapContextMode: turn.opts?.bootstrapContextMode,
         bootstrapContextRunKind: params.bootstrapContextRunKind,
+        streamParams:
+          turn.isHeartbeat && turn.opts?.heartbeatCacheRetentionOverride
+            ? {
+                ...runBaseParams.streamParams,
+                cacheRetention: turn.opts.heartbeatCacheRetentionOverride,
+              }
+            : runBaseParams.streamParams,
         images: params.currentTurnImages.images,
         imageOrder: params.currentTurnImages.imageOrder,
         abortSignal: params.runAbortSignal,

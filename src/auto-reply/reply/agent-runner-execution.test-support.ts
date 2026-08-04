@@ -1,6 +1,7 @@
 // Shared mocks and fixtures for agent-runner execution tests.
 import { afterEach, beforeEach, expect, vi } from "vitest";
 import { testing as cliBackendsTesting } from "../../agents/cli-backends.test-support.js";
+import type { AgentStreamParams } from "../../agents/command/shared-types.js";
 import { AUTH_INVALID_TOKEN_USER_TEXT } from "../../agents/embedded-agent-helpers/errors.js";
 import type { runEmbeddedAgentEntry } from "../../agents/embedded-agent-runner/run-entry.js";
 import type { EmbeddedAgentRunResult } from "../../agents/embedded-agent-runner/types.js";
@@ -195,6 +196,7 @@ vi.mock("./agent-runner-utils.js", () => ({
       authProfileIdSource?: "auto" | "user";
       agentAccountId?: string;
       chatType?: string;
+      streamParams?: AgentStreamParams;
     };
     replyRoute?: {
       originatingChannel?: string;
@@ -222,6 +224,7 @@ vi.mock("./agent-runner-utils.js", () => ({
       authProfileId: params.provider === params.run.provider ? params.run.authProfileId : undefined,
       authProfileIdSource:
         params.provider === params.run.provider ? params.run.authProfileIdSource : undefined,
+      streamParams: params.run.streamParams,
     },
   }),
   resolveQueuedReplyRuntimeConfig: <T>(config: T) => config,

@@ -103,7 +103,7 @@ Commitments:
 ${JSON.stringify(items)}`;
 }
 
-type HeartbeatPreflight = HeartbeatWakePayloadFlags & {
+export type HeartbeatPreflight = HeartbeatWakePayloadFlags & {
   session: ReturnType<typeof resolveHeartbeatSession>;
   pendingEventEntries: ReturnType<typeof peekSystemEventEntries>;
   turnSourceDeliveryContext: ReturnType<typeof resolveSystemEventDeliveryContext>;

@@ -135,6 +135,16 @@ export type GetReplyOptions = {
   suppressTyping?: boolean;
   /** Resolved heartbeat model override (provider/model string from merged per-agent config). */
   heartbeatModelOverride?: string;
+  /** One-shot prompt-cache retention override for a heartbeat run. */
+  heartbeatCacheRetentionOverride?: "none" | "short" | "long";
+  /** Prevent an admitted main-session cache keeper from selecting an unverified fallback model. */
+  heartbeatModelFallbacksDisabled?: boolean;
+  /** Process-local proof for the exact main-dialogue cache identity a heartbeat may reuse. */
+  heartbeatPromptCacheEvidenceId?: string;
+  /** Active transcript leaf captured atomically with heartbeat cache evidence admission. */
+  heartbeatPromptCacheTranscriptAnchorId?: string;
+  /** One-shot credential route pinned by admitted main-dialogue cache evidence. */
+  heartbeatAuthProfileOverride?: string;
   /** One-shot thinking level override for this run; does not persist to the session. */
   thinkingLevelOverride?: string;
   /** One-shot fast-mode override for this run; does not persist to the session. */

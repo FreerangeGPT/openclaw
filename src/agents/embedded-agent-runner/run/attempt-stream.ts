@@ -13,6 +13,7 @@ import { resolveAgentTimeoutMs } from "../../timeout.js";
 import type { TranscriptPolicy } from "../../transcript-policy.js";
 import { shouldAllowProviderOwnedThinkingReplay } from "../../transcript-policy.js";
 import { log } from "../logger.js";
+import { isCanonicalAgentMainSession } from "../prompt-cache-evidence.js";
 import { collectPromptCacheTools } from "../prompt-cache-observability.js";
 import { repairRejectedThinkingReplayInSessionManager } from "../thinking-replay-repair.js";
 import {
@@ -82,7 +83,16 @@ export function installEmbeddedAttemptStreamGuards(input: {
 }) {
   const attempt = input.attempt;
   const session = input.session;
-  const cacheObservabilityEnabled = Boolean(input.cacheTrace) || log.isEnabled("debug");
+  // Main-dialogue evidence needs the same exact prompt/tool identity even when
+  // debug observability is off; other session classes keep the opt-in path.
+  const cacheObservabilityEnabled =
+    Boolean(input.cacheTrace) ||
+    log.isEnabled("debug") ||
+    isCanonicalAgentMainSession({
+      cfg: attempt.config ?? {},
+      agentId: input.sessionAgentId,
+      sessionKey: attempt.sessionKey,
+    });
   const promptCacheTools = cacheObservabilityEnabled
     ? collectPromptCacheTools(input.allCustomTools)
     : [];

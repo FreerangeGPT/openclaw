@@ -77,6 +77,10 @@ export type RunEmbeddedAgentParams = {
   lifecycleGeneration?: string;
   /** Provider prompt-cache affinity key; distinct from transcript/session identity. */
   promptCacheKey?: string;
+  /** Process-local proof required before a main-session cache-keeper provider call. */
+  promptCacheKeeperEvidenceId?: string;
+  /** Active transcript leaf that the admitted keeper user turn must directly follow. */
+  promptCacheKeeperTranscriptAnchorId?: string;
   /** Session-like key for sandbox and tool-policy resolution. Defaults to sessionKey. */
   sandboxSessionKey?: string;
   agentId?: string;

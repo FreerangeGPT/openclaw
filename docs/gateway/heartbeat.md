@@ -462,10 +462,13 @@ openclaw system heartbeat disable  # disable heartbeats
 
 Heartbeats run full agent turns. Shorter intervals burn more tokens. To reduce cost:
 
-- Routine heartbeats with a fresh main-session token count of at least 50,000 are auto-isolated when `isolatedSession` is unset, so they do not rebuild a large provider cache just to say `HEARTBEAT_OK`.
-- If `isolatedSession: false` is set explicitly, OpenClaw respects that choice; the same large routine heartbeat is skipped with `reason=full-context-heartbeat-guard`.
+- To keep the canonical main dialogue cache warm, leave `isolatedSession` and `lightContext` false/unset and keep `every` below one hour. First-party Anthropic (`api.anthropic.com`) main-dialogue turns default to one-hour retention; configured custom endpoints require explicit long retention. A large routine heartbeat stays on main only while this process has provider-confirmed proof of a covering one-hour write or refresh, and its exact prompt/tool/model/endpoint/credential identity still matches before provider I/O.
+- If that cache-keeper policy is absent or nonviable, a large routine heartbeat is auto-isolated when `isolatedSession` is unset. With `isolatedSession: false`, the same run is skipped with `reason=full-context-heartbeat-guard` instead of paying for a full cache rewrite.
+- After a restart, model, prompt/tool, credential, compaction/reset, other model-facing transcript change, or gap longer than the retention window, routine heartbeats stay isolated until a normal main-dialogue turn establishes fresh matching proof.
+- A main-session cache-keeper turn is pinned to its verified provider/model and auth profile. Configured model fallbacks remain available to normal dialogue and isolated heartbeat turns, but cannot receive the large main transcript from this maintenance run.
 - Exec-completion, cron-event, manual, scheduled-task, and due-commitment heartbeats are treated as actionable and are allowed through the guard.
 - Use `isolatedSession: true` to avoid sending full conversation history (~100K tokens down to ~2-5K per run).
+- Isolated heartbeat runs use short cache retention when the main agent uses long retention. This preserves inexpensive reuse inside the maintenance turn without buying a one-hour cache for a disposable session; an explicit `cacheRetention: "none"` remains uncached.
 - Use `lightContext: true` to skip workspace bootstrap files for heartbeat runs.
 - Set a cheaper `model` (e.g. `ollama/llama3.2:1b`).
 - Keep the monitor scratch small.

@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import type { StreamFn } from "openclaw/plugin-sdk/agent-core";
 import {
   createAssistantMessageEventStream,
@@ -160,6 +161,89 @@ describe("provider prompt state", () => {
     clearProviderPromptState(runId);
   });
 
+  it("fingerprints final cache-affecting thinking, tier, and tool-choice options", async () => {
+    const runId = "cache-request-options";
+    const state = getProviderPromptState(runId);
+    const context = { systemPrompt: "system", messages: [], tools: [] } as Context;
+    const requestOptionIdentities: string[] = [];
+    const cachePrefixIdentities: string[] = [];
+    const payloads = [
+      {
+        system: [
+          { type: "text", text: "stable", cache_control: { type: "ephemeral" } },
+          { type: "text", text: "dynamic first" },
+        ],
+        tools: [{ name: "message", input_schema: { type: "object" } }],
+        messages: [{ role: "user", content: "first" }],
+        thinking: { type: "adaptive" },
+        output_config: { effort: "high" },
+        service_tier: "auto",
+        tool_choice: { type: "auto" },
+      },
+      {
+        system: [
+          { type: "text", text: "stable", cache_control: { type: "ephemeral" } },
+          { type: "text", text: "dynamic second" },
+        ],
+        tools: [{ name: "message", input_schema: { type: "object" } }],
+        messages: [{ role: "user", content: "different tail" }],
+        thinking: { type: "adaptive" },
+        output_config: { effort: "high" },
+        service_tier: "auto",
+        tool_choice: { type: "auto" },
+      },
+      {
+        system: [
+          { type: "text", text: "changed stable", cache_control: { type: "ephemeral" } },
+          { type: "text", text: "dynamic" },
+        ],
+        tools: [{ name: "message", input_schema: { type: "object" } }],
+        messages: [],
+        thinking: { type: "disabled" },
+        output_config: { effort: "high" },
+        service_tier: "auto",
+        tool_choice: { type: "auto" },
+      },
+      {
+        system: [
+          { type: "text", text: "stable", cache_control: { type: "ephemeral" } },
+          { type: "text", text: "dynamic third" },
+        ],
+        tools: [{ name: "changed", input_schema: { type: "object" } }],
+        messages: [],
+        thinking: { type: "adaptive" },
+        output_config: { effort: "low" },
+        service_tier: "standard_only",
+        tool_choice: { type: "tool", name: "message" },
+      },
+    ];
+    const wrapped = wrapStreamFnWithProviderPromptState({
+      streamFn: async (_model, _context, options) => {
+        await options?.onPayload?.(payloads.shift(), model);
+        return createResultStream("stop");
+      },
+      state,
+      effectiveContextTokenBudget: 128_000,
+      assertCacheIdentity: (identity) => {
+        requestOptionIdentities.push(identity.cacheRequestOptionsIdentity);
+        cachePrefixIdentities.push(identity.cachePrefixIdentity);
+      },
+    });
+
+    for (let index = 0; index < 4; index += 1) {
+      const result = await wrapped(model, context);
+      await result.result();
+    }
+
+    expect(requestOptionIdentities[0]).toBe(requestOptionIdentities[1]);
+    expect(
+      new Set([requestOptionIdentities[0], requestOptionIdentities[2], requestOptionIdentities[3]])
+        .size,
+    ).toBe(3);
+    expect(new Set(cachePrefixIdentities).size).toBe(4);
+    clearProviderPromptState(runId);
+  });
+
   it("keeps a rejected primary identity across successful auxiliary attempts", async () => {
     const runId = "success-preserves-rejection";
     const state = getProviderPromptState(runId);
@@ -299,6 +383,113 @@ describe("provider prompt state", () => {
       timestamp: 1,
     });
     await result.result();
+    clearProviderPromptState(runId);
+  });
+
+  it("checks the final boundary and proves prior provider messages before bounding the suffix", async () => {
+    const runId = "provider-message-continuity";
+    const state = getProviderPromptState(runId);
+    const denseSuffix = Buffer.from(
+      Array.from({ length: 2_000 }, (_, index) => index % 256),
+    ).toString("base64");
+    const payloads = [
+      {
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "stable",
+                cache_control: { type: "ephemeral", ttl: "1h" },
+              },
+            ],
+          },
+        ],
+      },
+      {
+        messages: [
+          { role: "user", content: [{ type: "text", text: "stable" }] },
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: denseSuffix,
+                cache_control: { type: "ephemeral", ttl: "1h" },
+              },
+            ],
+          },
+        ],
+      },
+      {
+        messages: [
+          { role: "user", content: [{ type: "text", text: "stable" }] },
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: denseSuffix,
+                cache_control: { type: "ephemeral" },
+              },
+            ],
+          },
+        ],
+      },
+    ];
+    let nowMs = 1_000;
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+    const observed: Array<{
+      boundaryAt: number;
+      deepestLongCachePrefixIndex?: number;
+      providerMessageIdentity?: string;
+      prefixIdentities: readonly string[];
+      tokenUpperBounds: readonly number[];
+    }> = [];
+    const wrapped = wrapStreamFnWithProviderPromptState({
+      streamFn: async (_model, _context, options) => {
+        await options?.onPayload?.(payloads.shift(), model);
+        return createResultStream("stop");
+      },
+      state,
+      effectiveContextTokenBudget: 128_000,
+      assertCacheIdentity: (identity, boundaryAt) => {
+        observed.push({
+          boundaryAt,
+          deepestLongCachePrefixIndex: identity.messageContinuity.deepestLongCachePrefixIndex,
+          providerMessageIdentity: identity.providerMessageIdentity,
+          prefixIdentities: identity.messageContinuity.prefixIdentities,
+          tokenUpperBounds: identity.messageContinuity.tokenUpperBounds,
+        });
+      },
+      observeProviderStream: (stream, boundaryAt) => {
+        expect(boundaryAt).toBe(nowMs);
+        return stream;
+      },
+    });
+
+    for (let index = 0; index < 3; index += 1) {
+      const result = await wrapped(
+        model,
+        { systemPrompt: "system", messages: [], tools: [] },
+        {
+          onPayload: async (payload) => {
+            await Promise.resolve();
+            nowMs += 100;
+            return payload;
+          },
+        },
+      );
+      await result.result();
+    }
+
+    expect(observed.map((entry) => entry.boundaryAt)).toEqual([1_100, 1_200, 1_300]);
+    expect(observed[1]?.prefixIdentities[1]).toBe(observed[0]?.providerMessageIdentity);
+    expect(observed.map((entry) => entry.deepestLongCachePrefixIndex)).toEqual([1, 2, undefined]);
+    expect(observed[2]?.providerMessageIdentity).toBeUndefined();
+    expect(observed[1]?.tokenUpperBounds[1]).toBeGreaterThanOrEqual(Buffer.byteLength(denseSuffix));
+    dateNow.mockRestore();
     clearProviderPromptState(runId);
   });
 });

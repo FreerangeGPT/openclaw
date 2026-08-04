@@ -1,6 +1,6 @@
 // Coverage for prompt-cache diagnostic tracking across turns.
 import { SYSTEM_PROMPT_CACHE_BOUNDARY } from "@openclaw/ai/internal/shared";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   beginPromptCacheObservation,
   collectPromptCacheTools,
@@ -17,6 +17,10 @@ function scopedKey(value: string): string {
 describe("prompt cache observability", () => {
   beforeEach(() => {
     currentTestScope = String(++testScope);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it("collects canonical trimmed tool snapshots", () => {
@@ -210,6 +214,69 @@ describe("prompt cache observability", () => {
         { code: "transport", detail: "sse -> websocket" },
         { code: "systemPrompt", detail: "system prompt digest changed" },
       ],
+    });
+  });
+
+  it("fingerprints provider endpoints without retaining URL credentials", () => {
+    const baseUrl = "https://api.example.test/v1?opaque=trace-only-value";
+    const first = beginPromptCacheObservation({
+      sessionId: scopedKey("endpoint-session"),
+      provider: "anthropic-proxy",
+      modelId: "claude",
+      modelApi: "anthropic-messages",
+      baseUrl,
+      streamStrategy: "boundary-aware:anthropic-messages",
+      systemPrompt: "stable system",
+      tools: [],
+    });
+
+    expect(first.snapshot).not.toHaveProperty("baseUrl");
+    expect(first.snapshot.baseUrlDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify(first.snapshot)).not.toContain("trace-only-value");
+
+    const second = beginPromptCacheObservation({
+      sessionId: scopedKey("endpoint-session"),
+      provider: "anthropic-proxy",
+      modelId: "claude",
+      modelApi: "anthropic-messages",
+      baseUrl: "https://api.example.test/v2",
+      streamStrategy: "boundary-aware:anthropic-messages",
+      systemPrompt: "stable system",
+      tools: [],
+    });
+    expect(second.changes).toContainEqual({
+      code: "transport",
+      detail: "provider endpoint changed",
+    });
+  });
+
+  it("fingerprints the effective Anthropic environment endpoint", () => {
+    vi.stubEnv("ANTHROPIC_BASE_URL", "https://anthropic-proxy.example/v1");
+    const first = beginPromptCacheObservation({
+      sessionId: scopedKey("anthropic-env-endpoint"),
+      provider: "anthropic",
+      modelId: "claude-opus-4-8",
+      modelApi: "anthropic-messages",
+      streamStrategy: "boundary-aware:anthropic-messages",
+      systemPrompt: "stable system",
+      tools: [],
+    });
+
+    vi.stubEnv("ANTHROPIC_BASE_URL", "https://other-proxy.example/v1");
+    const second = beginPromptCacheObservation({
+      sessionId: scopedKey("anthropic-env-endpoint"),
+      provider: "anthropic",
+      modelId: "claude-opus-4-8",
+      modelApi: "anthropic-messages",
+      streamStrategy: "boundary-aware:anthropic-messages",
+      systemPrompt: "stable system",
+      tools: [],
+    });
+
+    expect(first.identity).not.toBe(second.identity);
+    expect(second.changes).toContainEqual({
+      code: "transport",
+      detail: "provider endpoint changed",
     });
   });
 

@@ -12,9 +12,16 @@ import { guardSessionManager } from "../../session-tool-result-guard-wrapper.js"
 import { SessionManager } from "../../sessions/index.js";
 import { runContextEngineMaintenance } from "../context-engine-maintenance.js";
 import { log } from "../logger.js";
+import {
+  assertMainSessionCacheKeeperTranscriptAnchor,
+  MainSessionCacheKeeperIdentityMismatchError,
+} from "../prompt-cache-evidence.js";
 import { prewarmSessionFile, trackSessionManagerAccess } from "../session-manager-cache.js";
 import { prepareSessionManagerForRun } from "../session-manager-init.js";
-import { resolveExistingAttemptTranscriptState } from "./attempt-transcript-helpers.js";
+import {
+  resolveExistingAttemptTranscriptState,
+  rollbackReplaySafeMainSessionCacheKeeperTurn,
+} from "./attempt-transcript-helpers.js";
 import {
   runAttemptContextEngineBootstrap,
   type AttemptContextEngine,
@@ -216,6 +223,39 @@ export async function prepareEmbeddedAttemptSessionManager(input: {
       sessionId: attempt.sessionId,
       cwd: input.effectiveCwd,
     });
+
+    if (attempt.promptCacheKeeperEvidenceId) {
+      const leaf = sessionManager.getLeafEntry();
+      // Cache admission observed the prior active leaf before the heartbeat user
+      // turn was persisted. Under ownership, that exact turn must be its only child.
+      try {
+        assertMainSessionCacheKeeperTranscriptAnchor({
+          currentLeaf: leaf
+            ? {
+                id: leaf.id,
+                parentId: leaf.parentId,
+                type: leaf.type,
+                ...(leaf.type === "message" ? { message: leaf.message } : {}),
+              }
+            : undefined,
+          expectedParentId: attempt.promptCacheKeeperTranscriptAnchorId,
+          persistedUserMessageId: attempt.userTurnTranscriptRecorder?.getPersistedMessageId?.(),
+        });
+      } catch (error) {
+        const rollback = rollbackReplaySafeMainSessionCacheKeeperTurn({
+          attempt,
+          promptError: error,
+          sessionManager,
+        });
+        if (rollback !== "rolled-back") {
+          throw new MainSessionCacheKeeperIdentityMismatchError({ replaySafe: false });
+        }
+        // Settlement sees the original replay-safe error too. Carry ownership
+        // forward so it does not mistake this completed removal for a rollback failure.
+        attempt.promptCacheKeeperTurnRollbackCompleted = true;
+        throw error;
+      }
+    }
   });
   // Bootstrap may repair or migrate transcript rows. Only user writes after
   // preparation can be the active prompt source at the provider boundary.

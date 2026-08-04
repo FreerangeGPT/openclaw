@@ -148,6 +148,7 @@ export async function runEmbeddedAttemptSettledPhase(
     removeAbortSignalListener: removeAttemptAbortSignalListener,
   } = attemptTimeout;
   let promptCacheChangesForTurn: PromptCacheChange[] | null = null;
+  let promptCacheIdentity: string | undefined;
   let lastAssistant: AssistantMessage | undefined;
   let currentAttemptAssistant: EmbeddedRunAttemptResult["currentAttemptAssistant"];
   let currentAttemptCompletedAssistant: EmbeddedRunAttemptResult["currentAttemptCompletedAssistant"];
@@ -273,6 +274,9 @@ export async function runEmbeddedAttemptSettledPhase(
         setPromptCacheChangesForTurn: (changes) => {
           promptCacheChangesForTurn = changes;
         },
+        setPromptCacheIdentity: (identity) => {
+          promptCacheIdentity = identity;
+        },
         setFinalPromptText: (prompt) => {
           finalPromptText = prompt;
         },
@@ -356,6 +360,7 @@ export async function runEmbeddedAttemptSettledPhase(
         },
         runAbortSignal: input.runAbortController.signal,
         isProbeSession,
+        sessionAgentId: input.setup.sessionAgentId,
         onBlockReplyFlush,
         abortable,
         prePromptMessageCount: sessionRuntimeState.prePromptMessageCount,
@@ -363,6 +368,7 @@ export async function runEmbeddedAttemptSettledPhase(
         cache: {
           observabilityEnabled: cacheObservabilityEnabled,
           changesForTurn: promptCacheChangesForTurn,
+          identity: promptCacheIdentity,
           retention: effectivePromptCacheRetention,
         },
       },

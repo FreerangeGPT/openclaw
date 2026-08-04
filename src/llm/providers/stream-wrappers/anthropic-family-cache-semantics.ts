@@ -1,6 +1,7 @@
 // Anthropic-family cache wrapper preserves cache-control semantics in tool payloads.
 import {
   normalizeLowercaseStringOrEmpty,
+  normalizeOptionalString,
   normalizeOptionalLowercaseString,
 } from "@openclaw/normalization-core/string-coerce";
 
@@ -11,6 +12,35 @@ type AnthropicCacheRetentionFamily =
 
 export function isAnthropicModelRef(modelId: string): boolean {
   return normalizeLowercaseStringOrEmpty(modelId).startsWith("anthropic/");
+}
+
+function resolveEndpointHostname(baseUrl: string): string | undefined {
+  const candidate = /^[a-z0-9.[\]-]+(?::\d+)?(?:[/?#].*)?$/i.test(baseUrl)
+    ? `https://${baseUrl}`
+    : baseUrl;
+  try {
+    return normalizeOptionalLowercaseString(new URL(candidate).hostname);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Implicit one-hour retention is safe only on the first-party Anthropic Messages endpoint. */
+export function isDirectAnthropicCacheEndpoint(params: {
+  provider: string;
+  modelApi?: string;
+  baseUrl?: string;
+}): boolean {
+  if (
+    normalizeOptionalLowercaseString(params.provider) !== "anthropic" ||
+    params.modelApi !== "anthropic-messages"
+  ) {
+    return false;
+  }
+  const effectiveBaseUrl =
+    normalizeOptionalString(params.baseUrl) ??
+    normalizeOptionalString(process.env.ANTHROPIC_BASE_URL);
+  return !effectiveBaseUrl || resolveEndpointHostname(effectiveBaseUrl) === "api.anthropic.com";
 }
 
 /** Matches Application Inference Profile ARNs across all AWS partitions with Bedrock. */

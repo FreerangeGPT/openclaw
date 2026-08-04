@@ -386,6 +386,15 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
         })
       : [provider];
   const resolveRuntimeAuthProfile = async () => {
+    const heartbeatAuthProfileOverride = normalizeOptionalString(
+      opts?.heartbeatAuthProfileOverride,
+    );
+    if (heartbeatAuthProfileOverride) {
+      return {
+        authProfileId: heartbeatAuthProfileOverride,
+        authProfileIdSource: "user" as const,
+      };
+    }
     if (useFastReplyRuntime) {
       return {
         authProfileId: preparedSessionState.sessionEntry?.authProfileOverride,

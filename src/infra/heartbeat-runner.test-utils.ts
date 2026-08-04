@@ -133,6 +133,7 @@ export async function seedMainSessionStore(
 export async function withTempHeartbeatSandbox<T>(
   fn: (ctx: { tmpDir: string; storePath: string; replySpy: HeartbeatReplySpy }) => Promise<T>,
   options?: {
+    heartbeatScratchContent?: string;
     prefix?: string;
     unsetEnvVars?: string[];
   },
@@ -146,7 +147,9 @@ export async function withTempHeartbeatSandbox<T>(
     previousEnv.set(envName, process.env[envName]);
     process.env[envName] = envName === "OPENCLAW_STATE_DIR" ? path.join(tmpDir, "state") : "";
   }
-  await seedHeartbeatScratchForTest({ content: "- Check status\n" });
+  await seedHeartbeatScratchForTest({
+    content: options?.heartbeatScratchContent ?? "- Check status\n",
+  });
   try {
     return await fn({ tmpDir, storePath, replySpy });
   } finally {

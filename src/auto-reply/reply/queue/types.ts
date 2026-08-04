@@ -3,6 +3,7 @@ import type { FastMode } from "@openclaw/normalization-core/string-coerce";
 import type { AutoFallbackPrimaryProbe } from "../../../agents/agent-scope.js";
 import type { ExecToolDefaults } from "../../../agents/bash-tools.js";
 import type { CliSessionBindingFacts } from "../../../agents/cli-runner/types.js";
+import type { AgentStreamParams } from "../../../agents/command/shared-types.js";
 import type { CurrentInboundPromptContext } from "../../../agents/embedded-agent-runner/run/params.js";
 import type { ModelFallbackRouteResolution } from "../../../agents/model-fallback.types.js";
 import type { SilentReplyPromptMode } from "../../../agents/system-prompt.types.js";
@@ -172,6 +173,7 @@ export type FollowupRun = {
     fastModeAutoOnSecondsOverride?: boolean;
     verboseLevel?: VerboseLevel;
     reasoningLevel?: ReasoningLevel;
+    streamParams?: AgentStreamParams;
     elevatedLevel?: ElevatedLevel;
     execOverrides?: Pick<ExecToolDefaults, "host" | "security" | "ask" | "node" | "nodeCwd">;
     bashElevated?: {

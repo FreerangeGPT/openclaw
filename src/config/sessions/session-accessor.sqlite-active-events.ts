@@ -5,6 +5,7 @@ import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
   getNodeSqliteKysely,
+  iterateSqliteQuerySync,
 } from "../../infra/kysely-sync.js";
 import { runSqliteDeferredTransactionSync } from "../../infra/sqlite-transaction.js";
 import type { DB as OpenClawAgentKyselyDatabase } from "../../state/openclaw-agent-db.generated.js";
@@ -280,6 +281,36 @@ export function readSessionTranscriptMessageEvents(
   return withCurrentProjectionSnapshot(scope, (projection) => {
     const visible = resolveVisibleMessagePositions(projection);
     return readVisibleMessageRange(projection, 0, visible.total);
+  });
+}
+
+/** Finds the newest matching event on the projected active path without materializing it. */
+export function findSessionTranscriptActiveEvent(
+  scope: SessionTranscriptReadScope,
+  match: (event: TranscriptEvent) => boolean,
+): { activeLeafEntryId: string | null; event: TranscriptEvent } | undefined {
+  return withCurrentProjectionSnapshot(scope, (projection) => {
+    const db = getActiveTranscriptKysely(projection.database);
+    const rows = iterateSqliteQuerySync(
+      projection.database.db,
+      db
+        .selectFrom("session_transcript_active_events as active")
+        .innerJoin("transcript_events as event", (join) =>
+          join
+            .onRef("event.session_id", "=", "active.session_id")
+            .onRef("event.seq", "=", "active.event_seq"),
+        )
+        .select("event.event_json")
+        .where("active.session_id", "=", projection.resolved.sessionId)
+        .orderBy("active.active_position", "desc"),
+    );
+    for (const row of rows) {
+      const event = JSON.parse(row.event_json) as TranscriptEvent;
+      if (match(event)) {
+        return { activeLeafEntryId: projection.state.leafEventId, event };
+      }
+    }
+    return undefined;
   });
 }
 

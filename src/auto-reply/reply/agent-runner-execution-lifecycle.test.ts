@@ -634,4 +634,38 @@ describe("runAgentTurnWithFallback: run lifecycle and ownership", () => {
       toolsAllow: ["message"],
     });
   });
+
+  it("passes cache retention and fallback guards to embedded heartbeat runs", async () => {
+    state.runEmbeddedAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "ok" }],
+      meta: {},
+    });
+
+    const runAgentTurnWithFallback = await getRunAgentTurnWithFallback();
+    const params = createMinimalRunAgentTurnParams({
+      opts: {
+        heartbeatCacheRetentionOverride: "short",
+        heartbeatModelFallbacksDisabled: true,
+        heartbeatPromptCacheEvidenceId: "cache-evidence-1",
+        heartbeatPromptCacheTranscriptAnchorId: "preflight-leaf-1",
+        heartbeatAuthProfileOverride: "anthropic:main",
+      },
+    });
+    params.followupRun.run.streamParams = { stop: ["done"], temperature: 0.25 };
+    params.isHeartbeat = true;
+    await runAgentTurnWithFallback(params);
+
+    expectMockCallArgFields(state.runWithModelFallbackMock, 0, "fallback params", {
+      fallbacksOverride: [],
+    });
+    expectMockCallArgFields(state.runEmbeddedAgentMock, 0, "embedded run params", {
+      modelSelectionLocked: true,
+      modelFallbacksOverride: [],
+      promptCacheKeeperEvidenceId: "cache-evidence-1",
+      promptCacheKeeperTranscriptAnchorId: "preflight-leaf-1",
+      authProfileId: "anthropic:main",
+      authProfileIdSource: "user",
+      streamParams: { cacheRetention: "short", stop: ["done"], temperature: 0.25 },
+    });
+  });
 });

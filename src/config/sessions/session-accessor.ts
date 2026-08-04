@@ -206,6 +206,7 @@ export {
 } from "./session-accessor.transcript.js";
 export { persistSessionTranscriptTurn } from "./session-accessor.transcript-turn.js";
 export {
+  findSessionTranscriptActiveEvent,
   isSessionTranscriptProjectionUnavailableError,
   readRecentSessionTranscriptMessageEvents,
   readSessionTranscriptActiveLeafEvents,

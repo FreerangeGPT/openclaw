@@ -79,6 +79,7 @@ export async function runEmbeddedAttemptPromptPhase(input: {
     setPromptCacheChangesForTurn: (
       changes: PromptAssemblyResult["promptCacheChangesForTurn"],
     ) => void;
+    setPromptCacheIdentity: (identity: PromptAssemblyResult["promptCacheIdentity"]) => void;
     setFinalPromptText: (prompt: string) => void;
     markBeforeAgentRunBlocked: (outcome: BeforeAgentRunOutcome) => void;
     markYieldAborted: () => void;
@@ -155,6 +156,7 @@ export async function runEmbeddedAttemptPromptPhase(input: {
     promptAssembly;
   leasedSteering = promptAssembly.leasedSteering ?? leasedSteering;
   input.lifecycle.setPromptCacheChangesForTurn(promptAssembly.promptCacheChangesForTurn);
+  input.lifecycle.setPromptCacheIdentity(promptAssembly.promptCacheIdentity);
 
   try {
     const heartbeatOutcomeContext =

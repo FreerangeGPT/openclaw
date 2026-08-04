@@ -15,6 +15,7 @@ import type { AgentMessage } from "../../runtime/index.js";
 import { guardSessionManager } from "../../session-tool-result-guard-wrapper.js";
 import { sanitizeToolUseResultPairing } from "../../session-transcript-repair.js";
 import { log } from "../logger.js";
+import { isReplaySafeMainSessionCacheKeeperIdentityMismatch } from "../prompt-cache-evidence.js";
 import { canContinueFromMessage, trimToContinuableTail } from "./compaction-timeout.js";
 import { MID_TURN_PRECHECK_ERROR_MESSAGE } from "./midturn-precheck.js";
 import type { EmbeddedRunAttemptParams } from "./types.js";
@@ -33,6 +34,73 @@ export function repairAttemptToolUseResultPairing(
     erroredAssistantResultPolicy: "drop",
     ...(isOpenAIResponsesApi ? { missingToolResultText: "aborted" } : {}),
   });
+}
+
+export type CacheKeeperTurnRollback = "not-replayable" | "rolled-back" | "rollback-failed";
+
+/** Removes only the exact synthetic keeper leaf before an isolated replay. */
+export function rollbackReplaySafeMainSessionCacheKeeperTurn(params: {
+  activeSession?: {
+    messages?: AgentMessage[];
+    agent: { state: { messages: AgentMessage[] } };
+  };
+  attempt: Pick<
+    EmbeddedRunAttemptParams,
+    | "promptCacheKeeperEvidenceId"
+    | "promptCacheKeeperTurnRollbackCompleted"
+    | "userTurnTranscriptRecorder"
+  >;
+  promptError: unknown;
+  sessionManager: AttemptSessionManager;
+}): CacheKeeperTurnRollback {
+  if (
+    !params.attempt.promptCacheKeeperEvidenceId ||
+    !isReplaySafeMainSessionCacheKeeperIdentityMismatch(params.promptError)
+  ) {
+    return "not-replayable";
+  }
+  const synchronizeActiveSession = () => {
+    const rebuiltMessages = params.sessionManager.buildSessionContext().messages;
+    const stateMessages = params.activeSession?.agent.state.messages;
+    if (stateMessages) {
+      stateMessages.splice(0, stateMessages.length, ...rebuiltMessages);
+      const sessionMessages = params.activeSession?.messages;
+      if (sessionMessages && sessionMessages !== stateMessages) {
+        sessionMessages.splice(0, sessionMessages.length, ...rebuiltMessages);
+      }
+    }
+  };
+  if (params.attempt.promptCacheKeeperTurnRollbackCompleted) {
+    try {
+      // Preparation owns the durable removal before AgentSession exists;
+      // settlement owns synchronizing both later-created in-memory views.
+      synchronizeActiveSession();
+      return "rolled-back";
+    } catch {
+      return "rollback-failed";
+    }
+  }
+  const persistedMessageId = params.attempt.userTurnTranscriptRecorder?.getPersistedMessageId?.();
+  if (!persistedMessageId) {
+    return "rollback-failed";
+  }
+  try {
+    const removed = params.sessionManager.removeTrailingEntries(
+      (entry) => entry.id === persistedMessageId,
+      {
+        // A raced-in suffix stays authoritative. SessionManager reparents it
+        // across the removed synthetic turn while preserving its exact bytes.
+        preserveTrailing: (entry) => entry.id !== persistedMessageId,
+      },
+    );
+    if (removed !== 1) {
+      return "rollback-failed";
+    }
+    synchronizeActiveSession();
+    return "rolled-back";
+  } catch {
+    return "rollback-failed";
+  }
 }
 
 function isMidTurnPrecheckAssistantError(message: AgentMessage | undefined): boolean {

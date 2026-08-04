@@ -47,6 +47,8 @@ export async function runAgentFallbackCandidates(params: AgentFallbackCycleParam
       : turn.opts?.isHeartbeat
         ? ("heartbeat" as const)
         : ("default" as const);
+  const heartbeatModelFallbacksDisabled =
+    turn.isHeartbeat && turn.opts?.heartbeatModelFallbacksDisabled === true;
 
   params.timing.logMilestoneIfSlow({
     runId: params.runId,
@@ -63,7 +65,7 @@ export async function runAgentFallbackCandidates(params: AgentFallbackCycleParam
         model: selection.model,
         requestedRouteResolution: selection.requestedRouteResolution,
         agentDir: selection.agentDir,
-        fallbacksOverride: selection.fallbacksOverride,
+        fallbacksOverride: heartbeatModelFallbacksDisabled ? [] : selection.fallbacksOverride,
       },
       identity: {
         runId: params.runId,
@@ -219,6 +221,7 @@ export async function runAgentFallbackCandidates(params: AgentFallbackCycleParam
             params.state.lifecycleGeneration = generation;
           },
           allowTransientCooldownProbe: runOptions?.allowTransientCooldownProbe,
+          modelFallbacksDisabled: heartbeatModelFallbacksDisabled,
           suppressAssistantErrorPersistenceForCandidate: assistantErrorPersistedAcrossFallback,
           onAssistantErrorMessagePersisted: () => {
             assistantErrorPersistedAcrossFallback = true;

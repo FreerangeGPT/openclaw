@@ -71,21 +71,35 @@ agents:
       every: "55m"
 ```
 
-Routine heartbeats do not rely on cadence alone as proof that a provider cache is warm. When the
-main session has a fresh token count of at least 50,000, OpenClaw automatically runs an
-otherwise-unconfigured routine heartbeat in a fresh isolated session with lightweight bootstrap
-context. If `isolatedSession: false` explicitly requires the main session, OpenClaw skips that
-routine heartbeat instead. Manual heartbeats and runs carrying cron events, exec completions,
-scheduled tasks, or due commitments remain actionable and are not redirected by this guard.
+Routine heartbeats do not rely on cadence alone as proof that a provider cache is warm. A large
+routine heartbeat may stay on the canonical main dialogue only when `isolatedSession` and
+`lightContext` are false/unset, the effective retention outlives the heartbeat interval, and this
+gateway process has confirmed a covering one-hour Anthropic cache write or a subsequent read that
+refreshed that same confirmed entry. Before provider I/O, OpenClaw also verifies the exact stable
+system prompt, tool definitions, provider endpoint, model, transport, and credential fingerprint.
+The cached-token volume must cover all but at most 10,000 prompt tokens, so a small static-prefix
+hit cannot authorize the full dialogue. First-party Anthropic (`api.anthropic.com`) canonical-main
+turns default to one-hour retention; configured custom endpoints require explicit long retention,
+and explicit `none`, `short`, or `long` configuration always wins. The admitted cache-keeper
+turn is pinned to the verified model and auth profile; configured model fallbacks cannot receive
+its large transcript.
+Without a viable cache keeper, OpenClaw uses a fresh isolated session when `isolatedSession` is
+unset, or skips the run when it is explicitly `false`. This also prevents a routine heartbeat after
+a restart, model, prompt/tool, credential, compaction/reset, other model-facing transcript change,
+or long gap from paying to rebuild the full dialogue cache. Isolated
+heartbeat runs receive a one-shot `"short"` retention override when the main agent uses `"long"`;
+explicit `"none"` remains uncached. Manual heartbeats and runs carrying cron events, exec
+completions, scheduled tasks, or due commitments remain actionable and are not redirected by this
+guard.
 
 ## Provider behavior
 
 ### Anthropic (direct API and Vertex AI)
 
 - `cacheRetention` is supported for `anthropic` and `anthropic-vertex` providers, and for Claude models on `amazon-bedrock` and custom `anthropic-messages`-compatible endpoints when `cacheRetention` is set explicitly.
-- When unset, OpenClaw seeds `cacheRetention: "short"` for direct Anthropic (`anthropic` and `anthropic-vertex` providers only; other Anthropic-family routes require an explicit value).
+- When unset, the canonical main conversation defaults to `cacheRetention: "long"` for the `anthropic` provider on its first-party `api.anthropic.com` endpoint. A configured custom base URL does not receive that implicit upgrade. Isolated heartbeats, channel/session variants, and other non-main runs keep the direct-Anthropic `"short"` default. Other Anthropic-family routes require an explicit value.
 - Native Anthropic Messages responses expose `cache_read_input_tokens` and `cache_creation_input_tokens`, mapped to `cacheRead` and `cacheWrite`.
-- `cacheRetention: "short"` maps to the default 5-minute ephemeral cache. `cacheRetention: "long"` requests the 1-hour TTL (`cache_control: { type: "ephemeral", ttl: "1h" }`) when set explicitly. An implicit/env-driven long retention (`OPENCLAW_CACHE_RETENTION=long` with no explicit `cacheRetention`) only upgrades to the 1-hour TTL on `api.anthropic.com` or Vertex AI (`aiplatform.googleapis.com` / `*-aiplatform.googleapis.com`) hosts; other hosts keep the 5-minute cache.
+- `cacheRetention: "short"` maps to the default 5-minute ephemeral cache. `cacheRetention: "long"` requests the 1-hour TTL (`cache_control: { type: "ephemeral", ttl: "1h" }`). OpenClaw's implicit canonical-main long retention is limited to the first-party `anthropic` endpoint. A legacy `OPENCLAW_CACHE_RETENTION=short|long` selection overrides that main-session default. Environment-driven long retention on other request paths only upgrades to the 1-hour TTL on `api.anthropic.com` or Vertex AI (`aiplatform.googleapis.com` / `*-aiplatform.googleapis.com`) hosts; other hosts keep the 5-minute cache.
 
 Source: `packages/ai/src/transports/anthropic-payload-policy.ts` (`resolveAnthropicEphemeralCacheControl`, `isLongTtlEligibleEndpoint`).
 

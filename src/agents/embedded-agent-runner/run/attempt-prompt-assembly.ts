@@ -26,6 +26,10 @@ import {
 } from "../../system-prompt.js";
 import { log } from "../logger.js";
 import {
+  assertMainSessionCacheKeeperIdentity,
+  fingerprintPromptCacheCredential,
+} from "../prompt-cache-evidence.js";
+import {
   beginPromptCacheObservation,
   type PromptCacheChange,
   type PromptCacheToolSnapshot,
@@ -67,6 +71,7 @@ type EmbeddedAttemptPromptAssembly = {
   transcriptLeafId: string | null;
   heartbeatSummary?: ReturnType<typeof resolveHeartbeatSummaryForAgent>;
   promptCacheChangesForTurn: PromptCacheChange[] | null;
+  promptCacheIdentity?: string;
   leasedSteering?: EmbeddedAttemptSteeringLease;
 };
 
@@ -194,6 +199,7 @@ export async function prepareEmbeddedAttemptPromptAssembly(input: {
   }
 
   let promptCacheChangesForTurn: PromptCacheChange[] | null = null;
+  let promptCacheIdentity: string | undefined;
   if (input.cache.observabilityEnabled) {
     const cacheObservation = beginPromptCacheObservation({
       sessionId: attempt.sessionId,
@@ -202,6 +208,7 @@ export async function prepareEmbeddedAttemptPromptAssembly(input: {
       provider: attempt.provider,
       modelId: attempt.modelId,
       modelApi: attempt.model.api,
+      baseUrl: attempt.model.baseUrl,
       cacheRetention: input.cache.retention,
       streamStrategy: input.cache.streamStrategy,
       transport: input.cache.transport,
@@ -209,6 +216,17 @@ export async function prepareEmbeddedAttemptPromptAssembly(input: {
       tools: input.cache.tools,
     });
     promptCacheChangesForTurn = cacheObservation.changes;
+    promptCacheIdentity = cacheObservation.identity;
+    if (attempt.promptCacheKeeperEvidenceId) {
+      assertMainSessionCacheKeeperIdentity({
+        evidenceId: attempt.promptCacheKeeperEvidenceId,
+        promptIdentity: cacheObservation.identity,
+        authFingerprint: fingerprintPromptCacheCredential({
+          apiKey: attempt.resolvedApiKey,
+          authProfileId: attempt.authProfileId,
+        }),
+      });
+    }
     input.cache.trace?.recordStage("cache:state", {
       options: {
         snapshot: cacheObservation.snapshot,
@@ -345,6 +363,7 @@ export async function prepareEmbeddedAttemptPromptAssembly(input: {
     transcriptLeafId,
     heartbeatSummary,
     promptCacheChangesForTurn,
+    promptCacheIdentity,
     leasedSteering,
   };
 }

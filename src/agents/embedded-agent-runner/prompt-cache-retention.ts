@@ -2,9 +2,12 @@
  * Resolves provider/model prompt-cache retention behavior.
  */
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
-import { resolveAnthropicCacheRetentionFamily } from "../../llm/providers/stream-wrappers/anthropic-family-cache-semantics.js";
+import {
+  isDirectAnthropicCacheEndpoint,
+  resolveAnthropicCacheRetentionFamily,
+} from "../../llm/providers/stream-wrappers/anthropic-family-cache-semantics.js";
 
-type CacheRetention = "none" | "short" | "long";
+export type CacheRetention = "none" | "short" | "long";
 
 export function parseCacheRetention(value: unknown): CacheRetention | undefined {
   return value === "none" || value === "short" || value === "long" ? value : undefined;
@@ -64,4 +67,40 @@ export function resolveCacheRetention(
   }
 
   return family === "anthropic-direct" ? "short" : undefined;
+}
+
+/**
+ * Canonical main-dialogue turns buy the one-hour Anthropic cache by default.
+ * Explicit operator retention still wins; non-main callers use resolveCacheRetention directly.
+ */
+export function resolveMainSessionCacheRetention(
+  extraParams: Record<string, unknown> | undefined,
+  provider: string,
+  modelApi?: string,
+  modelId?: string,
+  supportsPromptCacheKey?: boolean,
+  baseUrl?: string,
+): CacheRetention | undefined {
+  const resolved = resolveCacheRetention(
+    extraParams,
+    provider,
+    modelApi,
+    modelId,
+    supportsPromptCacheKey,
+  );
+  const hasExplicitCacheConfig =
+    extraParams?.cacheRetention !== undefined || extraParams?.cacheControlTtl !== undefined;
+  const environmentRetention =
+    process.env.OPENCLAW_CACHE_RETENTION === "short" ||
+    process.env.OPENCLAW_CACHE_RETENTION === "long"
+      ? process.env.OPENCLAW_CACHE_RETENTION
+      : undefined;
+  if (!hasExplicitCacheConfig && environmentRetention) {
+    return environmentRetention;
+  }
+  return !hasExplicitCacheConfig &&
+    resolved === "short" &&
+    isDirectAnthropicCacheEndpoint({ provider, modelApi, baseUrl })
+    ? "long"
+    : resolved;
 }

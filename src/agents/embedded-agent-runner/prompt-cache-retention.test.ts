@@ -1,8 +1,113 @@
 // Coverage for prompt-cache retention resolution by provider and model API.
-import { describe, expect, it } from "vitest";
-import { isGooglePromptCacheEligible, resolveCacheRetention } from "./prompt-cache-retention.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  isGooglePromptCacheEligible,
+  resolveCacheRetention,
+  resolveMainSessionCacheRetention,
+} from "./prompt-cache-retention.js";
 
 describe("prompt cache retention", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("defaults only a direct Anthropic canonical main turn to one-hour retention", () => {
+    expect(
+      resolveMainSessionCacheRetention(
+        undefined,
+        "anthropic",
+        "anthropic-messages",
+        "claude-opus-4-8",
+      ),
+    ).toBe("long");
+    expect(
+      resolveMainSessionCacheRetention(
+        { cacheRetention: "short" },
+        "anthropic",
+        "anthropic-messages",
+        "claude-opus-4-8",
+      ),
+    ).toBe("short");
+    expect(
+      resolveMainSessionCacheRetention(
+        { cacheRetention: "none" },
+        "anthropic",
+        "anthropic-messages",
+        "claude-opus-4-8",
+      ),
+    ).toBe("none");
+    expect(
+      resolveMainSessionCacheRetention(
+        undefined,
+        "anthropic-proxy",
+        "anthropic-messages",
+        "claude-opus-4-8",
+      ),
+    ).toBeUndefined();
+    expect(
+      resolveMainSessionCacheRetention(
+        undefined,
+        "anthropic",
+        "anthropic-messages",
+        "claude-opus-4-8",
+        undefined,
+        "https://anthropic-proxy.example/v1",
+      ),
+    ).toBe("short");
+    expect(
+      resolveMainSessionCacheRetention(
+        undefined,
+        "anthropic-vertex",
+        "anthropic-messages",
+        "claude-opus-4-8",
+      ),
+    ).toBe("short");
+  });
+
+  it("honors an Anthropic endpoint override before choosing the implicit main-session TTL", () => {
+    vi.stubEnv("ANTHROPIC_BASE_URL", "https://anthropic-proxy.example/v1");
+    expect(
+      resolveMainSessionCacheRetention(
+        undefined,
+        "anthropic",
+        "anthropic-messages",
+        "claude-opus-4-8",
+      ),
+    ).toBe("short");
+
+    vi.stubEnv("OPENCLAW_CACHE_RETENTION", "long");
+    expect(
+      resolveMainSessionCacheRetention(
+        undefined,
+        "anthropic",
+        "anthropic-messages",
+        "claude-opus-4-8",
+      ),
+    ).toBe("long");
+  });
+
+  it("preserves a legacy environment retention selection on the canonical main turn", () => {
+    vi.stubEnv("OPENCLAW_CACHE_RETENTION", "short");
+    expect(
+      resolveMainSessionCacheRetention(
+        undefined,
+        "anthropic",
+        "anthropic-messages",
+        "claude-opus-4-8",
+      ),
+    ).toBe("short");
+
+    vi.stubEnv("OPENCLAW_CACHE_RETENTION", "long");
+    expect(
+      resolveMainSessionCacheRetention(
+        undefined,
+        "anthropic",
+        "anthropic-messages",
+        "claude-opus-4-8",
+      ),
+    ).toBe("long");
+  });
+
   it("passes explicit cacheRetention through for direct Google models", () => {
     expect(
       resolveCacheRetention(

@@ -11,6 +11,8 @@ export type AgentStreamParams = {
   stop?: string[];
   /** Provider fast-mode override (best-effort). */
   fastMode?: boolean;
+  /** Prompt-cache retention override for this run (best-effort). */
+  cacheRetention?: "none" | "short" | "long";
   responseFormat?: Record<string, unknown>;
   frequencyPenalty?: number;
   presencePenalty?: number;
