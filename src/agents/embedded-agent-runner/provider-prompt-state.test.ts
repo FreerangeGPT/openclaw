@@ -76,6 +76,8 @@ describe("provider prompt state", () => {
       tools: [],
     } as Context;
     const sentPayloads: unknown[] = [];
+    const observedPayloads: unknown[] = [];
+    const observedHeaders: Array<Record<string, string> | undefined> = [];
     const transport = vi.fn<StreamFn>(async (_model, _context, options) => {
       const rawPayload = { input: "raw", model: model.id };
       const replacement = await options?.onPayload?.(rawPayload, model);
@@ -106,9 +108,14 @@ describe("provider prompt state", () => {
       streamFn: transport,
       state,
       effectiveContextTokenBudget: 128_000,
+      observeProviderPayload: ({ headers, payload }) => {
+        observedHeaders.push(headers);
+        observedPayloads.push(payload);
+      },
     });
 
     const first = await wrapped(model, context, {
+      headers: { "x-cache-parent": "main" },
       onPayload: () => finalPayload,
     });
     await first.result();
@@ -127,6 +134,8 @@ describe("provider prompt state", () => {
     ).rejects.toThrow("byte-identical provider payload");
     expect(transport).toHaveBeenCalledTimes(3);
     expect(sentPayloads).toEqual([finalPayload, changedPayload]);
+    expect(observedPayloads).toEqual([finalPayload, changedPayload]);
+    expect(observedHeaders).toEqual([{ "x-cache-parent": "main" }, undefined]);
     expect(JSON.stringify(state)).not.toContain("final");
     clearProviderPromptState(runId);
   });

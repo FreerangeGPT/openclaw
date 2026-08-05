@@ -7,6 +7,7 @@ import {
 } from "../../context-engine/registry.js";
 import { buildContextEngineRuntimeSettings } from "../../context-engine/runtime-settings.js";
 import { formatErrorMessage } from "../../infra/errors.js";
+import { discardMainSessionCacheTouch } from "../../infra/main-session-cache-keeper.js";
 import {
   retireSessionMcpRuntime,
   retireSessionMcpRuntimeForSessionKey,
@@ -626,6 +627,7 @@ export async function runPreparedEmbeddedLoop(
       await maybeEmitFastModeAutoResetBestEffort();
     }
     forgetPromptBuildDrainCacheForRun(params.runId);
+    discardMainSessionCacheTouch(params.runId);
     clearProviderPromptState(params.runId);
     stopRuntimeAuthRefreshTimer();
     await runAgentCleanupStep({

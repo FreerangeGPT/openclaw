@@ -279,6 +279,12 @@ export function wrapStreamFnWithProviderPromptState(params: {
     stream: AssistantMessageEventStreamLike,
     providerCallStartedAt: number,
   ) => AssistantMessageEventStreamLike;
+  observeProviderPayload?: (params: {
+    headers?: Record<string, string>;
+    model: Model;
+    payload: unknown;
+    providerCallStartedAt: number;
+  }) => void;
 }): StreamFn {
   return async (model, context, options) => {
     beginProviderPromptAttempt(params.state);
@@ -308,6 +314,13 @@ export function wrapStreamFnWithProviderPromptState(params: {
           },
           providerCallStartedAt,
         );
+        const headers = (options as { headers?: Record<string, string> } | undefined)?.headers;
+        params.observeProviderPayload?.({
+          ...(headers ? { headers } : {}),
+          model: payloadModel,
+          payload: finalPayload,
+          providerCallStartedAt,
+        });
         recordProviderPromptAttempt(params.state, attemptedSnapshot);
         return finalPayload;
       },

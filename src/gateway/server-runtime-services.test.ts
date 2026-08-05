@@ -25,6 +25,8 @@ const hoisted = vi.hoisted(() => {
   };
   const stopSessionUpstreamMonitor = vi.fn();
   const stopSessionDeliveryRuntime = vi.fn();
+  const stopMainSessionCacheKeeper = vi.fn();
+  const updateMainSessionCacheKeeperConfig = vi.fn();
   return {
     heartbeatRunner,
     startHeartbeatRunner: vi.fn(() => heartbeatRunner),
@@ -35,6 +37,12 @@ const hoisted = vi.hoisted(() => {
     })),
     stopSessionUpstreamMonitor,
     stopSessionDeliveryRuntime,
+    stopMainSessionCacheKeeper,
+    updateMainSessionCacheKeeperConfig,
+    startMainSessionCacheKeeper: vi.fn(() => ({
+      stop: stopMainSessionCacheKeeper,
+      updateConfig: updateMainSessionCacheKeeperConfig,
+    })),
     startSessionDeliveryRuntime: vi.fn<StartSessionDeliveryRuntime>(
       () => stopSessionDeliveryRuntime,
     ),
@@ -53,6 +61,10 @@ vi.mock("../infra/heartbeat-runner.js", () => ({
     { agentId: "main", heartbeat: cfg.agents?.defaults?.heartbeat },
   ],
   startHeartbeatRunner: hoisted.startHeartbeatRunner,
+}));
+
+vi.mock("../infra/main-session-cache-keeper.js", () => ({
+  startMainSessionCacheKeeper: hoisted.startMainSessionCacheKeeper,
 }));
 
 vi.mock("../sessions/session-upstream-monitor.js", () => ({
@@ -116,6 +128,9 @@ describe("server-runtime-services", () => {
     hoisted.startSessionUpstreamMonitor.mockClear();
     hoisted.stopSessionUpstreamMonitor.mockClear();
     hoisted.stopSessionDeliveryRuntime.mockClear();
+    hoisted.startMainSessionCacheKeeper.mockClear();
+    hoisted.stopMainSessionCacheKeeper.mockClear();
+    hoisted.updateMainSessionCacheKeeperConfig.mockClear();
     hoisted.startSessionDeliveryRuntime.mockClear();
     hoisted.schedulePendingSessionDeliveries.mockClear();
     hoisted.recoverPendingDeliveries.mockClear();
@@ -327,7 +342,10 @@ describe("server-runtime-services", () => {
 
     expect(hoisted.startHeartbeatRunner).toHaveBeenCalledTimes(1);
     expect(cronStart).toHaveBeenCalledTimes(1);
-    expect(services.heartbeatRunner.updateConfig).toBe(hoisted.heartbeatRunner.updateConfig);
+    const reloadedConfig = { gateway: {} } as never;
+    services.heartbeatRunner.updateConfig(reloadedConfig);
+    expect(hoisted.updateMainSessionCacheKeeperConfig).toHaveBeenCalledTimes(1);
+    expect(hoisted.heartbeatRunner.updateConfig).toHaveBeenCalledWith(reloadedConfig);
     await vi.advanceTimersByTimeAsync(1_250);
     await vi.dynamicImportSettled();
     expect(log.child).toHaveBeenNthCalledWith(1, "delivery-recovery");

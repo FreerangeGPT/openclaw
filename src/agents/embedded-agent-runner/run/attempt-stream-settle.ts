@@ -2,6 +2,7 @@
  * Settles async tools and compaction, then snapshots the completed stream.
  */
 import { formatErrorMessage } from "../../../infra/errors.js";
+import { commitMainSessionCacheTouch } from "../../../infra/main-session-cache-keeper.js";
 import type { AssistantMessage } from "../../../llm/types.js";
 import type { AgentRunAttemptFailureSource } from "../../agent-run-terminal-outcome.js";
 import type { subscribeEmbeddedAgentSession } from "../../embedded-agent-subscribe.js";
@@ -420,6 +421,16 @@ export async function settleEmbeddedAttemptStream(input: {
         // Missing provenance makes the next large heartbeat isolate; the answer
         // itself has already completed and must not be failed by diagnostics.
         log.warn(`failed to persist prompt cache evidence: ${String(entryErr)}`);
+      }
+      const expectedCachedTokens =
+        (lastCallUsage?.cacheRead ?? 0) + (lastCallUsage?.cacheWrite ?? 0);
+      const anchorId = sessionManager.getLeafId();
+      if (anchorId && expectedCachedTokens > 0) {
+        commitMainSessionCacheTouch({
+          anchorId,
+          expectedCachedTokens,
+          runId: attempt.runId,
+        });
       }
     }
 

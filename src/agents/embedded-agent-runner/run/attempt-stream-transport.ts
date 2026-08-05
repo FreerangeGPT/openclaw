@@ -1,6 +1,10 @@
 /**
  * Selects and configures the provider transport for one embedded attempt.
  */
+import {
+  discardMainSessionCacheTouch,
+  stageMainSessionCacheTouch,
+} from "../../../infra/main-session-cache-keeper.js";
 import { createCodexNativeWebSearchWrapper } from "../../../llm/providers/stream-wrappers/openai.js";
 import type { AssistantMessageEventStreamLike } from "../../../llm/types.js";
 import type { ProviderRuntimePluginHandle } from "../../../plugins/provider-hook-runtime.js";
@@ -178,6 +182,9 @@ export async function prepareEmbeddedAttemptTransport(input: {
     model: attempt.model,
     resolvedApiKey: transportApiKey,
   });
+  // A fallback attempt must not leave the prior provider payload blocking the
+  // last confirmed main parent while this attempt selects a different route.
+  discardMainSessionCacheTouch(attempt.runId);
   session.agent.streamFn = resolveEmbeddedAgentStreamFn({
     currentStreamFn: defaultSessionStreamFn,
     providerStreamFn,
@@ -191,12 +198,56 @@ export async function prepareEmbeddedAttemptTransport(input: {
     authStorage: attempt.authStorage,
   });
   const promptCacheKeeperEvidenceId = attempt.promptCacheKeeperEvidenceId;
+  const mainSessionKey = attempt.sessionKey;
   let cacheKeeperProviderCalls = 0;
   // Install inside provider/config wrappers so their full onPayload chain runs
   // before admission hashes the request body that the built-in transport sends.
   session.agent.streamFn = wrapStreamFnWithProviderPromptState({
     streamFn: session.agent.streamFn,
     ...input.providerPromptState,
+    ...(mainSessionCacheRetention === "long" &&
+    attempt.trigger === "user" &&
+    mainSessionKey &&
+    streamStrategy === "boundary-aware:anthropic-messages" &&
+    !promptCacheKeeperEvidenceId
+      ? {
+          observeProviderPayload: ({
+            headers,
+            model,
+            payload,
+            providerCallStartedAt,
+          }: {
+            headers?: Record<string, string>;
+            model: EmbeddedRunAttemptParams["model"];
+            payload: unknown;
+            providerCallStartedAt: number;
+          }) => {
+            if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+              return;
+            }
+            try {
+              stageMainSessionCacheTouch({
+                agentId: input.sessionAgentId,
+                apiKey: transportApiKey ?? "",
+                ...(headers ? { headers } : {}),
+                model: model as EmbeddedRunAttemptParams["model"] & {
+                  api: "anthropic-messages";
+                },
+                payload: payload as Record<string, unknown>,
+                providerCallStartedAt,
+                runId: attempt.runId,
+                sessionFile: attempt.sessionFile,
+                sessionId: attempt.sessionId,
+                sessionKey: mainSessionKey,
+              });
+            } catch (error) {
+              // Cache maintenance is advisory; payload capture must never fail
+              // the foreground main request it is intended to protect.
+              log.warn(`failed to stage main cache-touch parent: ${String(error)}`);
+            }
+          },
+        }
+      : {}),
     ...(promptCacheKeeperEvidenceId
       ? {
           assertCacheIdentity: (

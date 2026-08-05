@@ -148,6 +148,10 @@ type AnthropicTransportOptions = AnthropicOptions &
 type AnthropicAdaptiveEffort = NonNullable<AnthropicOptions["effort"]> | "xhigh";
 type AnthropicMessagesClient = {
   messages: {
+    create(
+      params: Record<string, unknown>,
+      options?: { signal?: AbortSignal },
+    ): Promise<Record<string, unknown>>;
     stream(
       params: Record<string, unknown>,
       options?: { signal?: AbortSignal },
@@ -867,6 +871,32 @@ function createAnthropicMessagesClient(params: {
   const url = resolveAnthropicMessagesUrl(params.baseURL);
   return {
     messages: {
+      async create(body: Record<string, unknown>, options?: { signal?: AbortSignal }) {
+        const headers = mergeTransportHeaders(
+          {
+            "content-type": "application/json",
+            "anthropic-version": "2023-06-01",
+            ...(params.apiKey ? { "x-api-key": params.apiKey } : {}),
+            ...(params.authToken ? { authorization: `Bearer ${params.authToken}` } : {}),
+          },
+          params.defaultHeaders,
+        );
+        const response = await params.fetch(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal: options?.signal,
+        });
+        if (!response.ok) {
+          const detail = await readAnthropicMessagesErrorBodySnippet(response);
+          throw new Error(formatAnthropicMessagesHttpError(response, detail));
+        }
+        const value: unknown = await response.json();
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+          throw new Error("Anthropic Messages response was not an object");
+        }
+        return value as Record<string, unknown>;
+      },
       async *stream(body: Record<string, unknown>, options?: { signal?: AbortSignal }) {
         const headers = mergeTransportHeaders(
           {
@@ -894,6 +924,176 @@ function createAnthropicMessagesClient(params: {
       },
     },
   };
+}
+
+export type AnthropicPromptCacheTouchResult = {
+  mode: "max-tokens-zero" | "stream-start";
+  usage: Usage;
+};
+
+function hasOneHourAnthropicCacheControl(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  const cacheControl = record.cache_control;
+  if (
+    cacheControl &&
+    typeof cacheControl === "object" &&
+    !Array.isArray(cacheControl) &&
+    (cacheControl as Record<string, unknown>).type === "ephemeral" &&
+    (cacheControl as Record<string, unknown>).ttl === "1h"
+  ) {
+    return true;
+  }
+  return Object.values(record).some((entry) =>
+    Array.isArray(entry)
+      ? entry.some(hasOneHourAnthropicCacheControl)
+      : hasOneHourAnthropicCacheControl(entry),
+  );
+}
+
+/** True only when a captured direct-Anthropic request contains an explicit one-hour boundary. */
+export function isAnthropicPromptCacheTouchPayload(
+  payload: unknown,
+): payload is Record<string, unknown> {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return false;
+  }
+  const record = payload as Record<string, unknown>;
+  return (
+    Array.isArray(record.messages) &&
+    [record.system, record.tools, record.messages].some((value) =>
+      Array.isArray(value)
+        ? value.some(hasOneHourAnthropicCacheControl)
+        : hasOneHourAnthropicCacheControl(value),
+    )
+  );
+}
+
+/** True when the model resolves to Anthropic's first-party Messages endpoint. */
+export function isDirectAnthropicPromptCacheTouchModel(
+  model: Model<"anthropic-messages">,
+): boolean {
+  return isDirectAnthropicModel(withEffectiveAnthropicBaseUrl(model as AnthropicTransportModel));
+}
+
+function buildAnthropicPromptCacheTouchPayload(params: {
+  payload: Record<string, unknown>;
+  useMaxTokensZero: boolean;
+}): Record<string, unknown> {
+  const payload = structuredClone(params.payload);
+  const messages = payload.messages;
+  if (!Array.isArray(messages)) {
+    throw new Error("Anthropic cache-touch payload has no messages array");
+  }
+  messages.push({
+    role: "user",
+    content: [{ type: "text", text: "OpenClaw cache maintenance. Reply with one character." }],
+  });
+  payload.stream = !params.useMaxTokensZero;
+  if (params.useMaxTokensZero) {
+    payload.max_tokens = 0;
+  }
+  return payload;
+}
+
+function canUseAnthropicMaxTokensZero(payload: Record<string, unknown>, apiKey: string): boolean {
+  // Anthropic rejects zero-output prewarming with thinking, structured output,
+  // forced tool selection, or Claude subscription OAuth. Preserve those exact
+  // request options and cancel at message_start instead.
+  const toolChoice = payload.tool_choice as Record<string, unknown> | undefined;
+  return (
+    !isAnthropicOAuthToken(apiKey) &&
+    payload.thinking === undefined &&
+    payload.output_config === undefined &&
+    (!toolChoice || toolChoice.type === "auto" || toolChoice.type === "none")
+  );
+}
+
+function readAnthropicPromptCacheTouchUsage(
+  model: AnthropicTransportModel,
+  usageValue: unknown,
+): Usage {
+  if (!usageValue || typeof usageValue !== "object" || Array.isArray(usageValue)) {
+    throw new Error("Anthropic cache-touch response omitted usage");
+  }
+  const usageRecord = usageValue as Record<string, unknown>;
+  const promptUsage = readAnthropicPromptUsageSnapshot(usageRecord);
+  if (!promptUsage) {
+    throw new Error("Anthropic cache-touch response contained invalid usage");
+  }
+  const usage: Usage = createEmptyTransportUsage();
+  usage.input = promptUsage.input;
+  usage.output = readAnthropicUsageTokenCount(usageRecord.output_tokens) ?? 0;
+  usage.cacheRead = promptUsage.cacheRead;
+  usage.cacheWrite = promptUsage.cacheWrite;
+  usage.cacheWrite1h = readAnthropicCacheWriteUsage(usageRecord).cacheWrite1h;
+  usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+  calculateCost(model, usage);
+  return usage;
+}
+
+/**
+ * Replays a captured direct-Anthropic prompt through its existing one-hour
+ * breakpoint. The disposable suffix is never returned to the agent runtime.
+ */
+export async function touchAnthropicPromptCache(params: {
+  model: Model<"anthropic-messages">;
+  payload: Record<string, unknown>;
+  apiKey: string;
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+}): Promise<AnthropicPromptCacheTouchResult> {
+  const model = withEffectiveAnthropicBaseUrl(params.model as AnthropicTransportModel);
+  if (!isDirectAnthropicModel(model) || !isAnthropicPromptCacheTouchPayload(params.payload)) {
+    throw new Error("Anthropic cache touch requires a direct request with a one-hour breakpoint");
+  }
+  const apiKey = params.apiKey.trim();
+  if (!apiKey) {
+    throw new Error("Anthropic cache touch requires an API key");
+  }
+  const context = { systemPrompt: "", messages: [], tools: [] } as Context;
+  const options = { apiKey, headers: params.headers, signal: params.signal };
+  const { client } = createAnthropicTransportClient({ model, context, apiKey, options });
+  const useMaxTokensZero = canUseAnthropicMaxTokensZero(params.payload, apiKey);
+  const payload = buildAnthropicPromptCacheTouchPayload({
+    payload: params.payload,
+    useMaxTokensZero,
+  });
+  applyClaudeRequestContract(payload, model);
+  notifyLlmRequestActivity(params.signal);
+
+  if (useMaxTokensZero) {
+    const response = await client.messages.create(payload, { signal: params.signal });
+    return {
+      mode: "max-tokens-zero",
+      usage: readAnthropicPromptCacheTouchUsage(model, response.usage),
+    };
+  }
+
+  const stopController = new AbortController();
+  const signal = params.signal
+    ? AbortSignal.any([params.signal, stopController.signal])
+    : stopController.signal;
+  try {
+    for await (const event of client.messages.stream(payload, { signal })) {
+      if (event.type === "error") {
+        const error = event.error as { message?: string } | undefined;
+        throw new Error(error?.message || "Anthropic Messages cache touch failed");
+      }
+      if (event.type !== "message_start") {
+        continue;
+      }
+      const message = event.message as { usage?: unknown } | undefined;
+      const usage = readAnthropicPromptCacheTouchUsage(model, message?.usage);
+      stopController.abort();
+      return { mode: "stream-start", usage };
+    }
+    throw new Error("Anthropic cache-touch stream ended before message_start");
+  } finally {
+    stopController.abort();
+  }
 }
 
 function formatAnthropicMessagesHttpError(response: Response, detail: string): string {

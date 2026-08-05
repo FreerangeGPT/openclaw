@@ -215,6 +215,7 @@ describe("embedded attempt phase lifecycle state", () => {
       appendCustomEntry,
       buildSessionContext: () => ({ messages }),
       getEntries: () => [],
+      getLeafId: () => "assistant-1",
       removeTrailingEntries: vi.fn(() => 0),
     };
     const activeSession = {

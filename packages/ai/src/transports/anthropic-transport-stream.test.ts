@@ -68,6 +68,7 @@ function redactTestSecrets<T>(value: T): T {
 }
 
 let createAnthropicMessagesTransportStreamFn: typeof import("./anthropic-transport-stream.js").createAnthropicMessagesTransportStreamFn;
+let touchAnthropicPromptCache: typeof import("./anthropic-transport-stream.js").touchAnthropicPromptCache;
 
 type AnthropicMessagesModel = Model<"anthropic-messages">;
 type AnthropicStreamFn = ReturnType<typeof createAnthropicMessagesTransportStreamFn>;
@@ -326,7 +327,7 @@ async function runTransportStream(
 
 describe("anthropic transport stream", () => {
   beforeAll(async () => {
-    ({ createAnthropicMessagesTransportStreamFn } =
+    ({ createAnthropicMessagesTransportStreamFn, touchAnthropicPromptCache } =
       await import("./anthropic-transport-stream.js"));
   });
 
@@ -361,6 +362,114 @@ describe("anthropic transport stream", () => {
 
   afterAll(() => {
     configureAiTransportHost(coreTransportHost);
+  });
+
+  it("prewarms an exact one-hour prefix with max_tokens zero and a disposable suffix", async () => {
+    guardedFetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          id: "msg_touch",
+          usage: {
+            input_tokens: 8,
+            output_tokens: 0,
+            cache_read_input_tokens: 12_000,
+            cache_creation_input_tokens: 0,
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    const original = {
+      model: "claude-sonnet-4-6",
+      max_tokens: 8_192,
+      stream: true,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "stable main prefix",
+              cache_control: { type: "ephemeral", ttl: "1h" },
+            },
+          ],
+        },
+      ],
+    };
+
+    const result = await touchAnthropicPromptCache({
+      model: makeAnthropicTransportModel(),
+      payload: original,
+      apiKey: "sk-ant-api",
+    });
+
+    expect(result.mode).toBe("max-tokens-zero");
+    expect(result.usage).toMatchObject({ cacheRead: 12_000, cacheWrite: 0, output: 0 });
+    expect(latestAnthropicRequest().payload).toMatchObject({
+      max_tokens: 0,
+      stream: false,
+      messages: [
+        original.messages[0],
+        {
+          role: "user",
+          content: [{ type: "text", text: expect.stringContaining("cache maintenance") }],
+        },
+      ],
+    });
+    expect(original).toMatchObject({ max_tokens: 8_192, stream: true });
+    expect(original.messages).toHaveLength(1);
+  });
+
+  it("preserves thinking options and stops after message_start usage proves the touch", async () => {
+    guardedFetchMock.mockResolvedValueOnce(
+      createSseResponse([
+        {
+          type: "message_start",
+          message: {
+            id: "msg_touch_thinking",
+            usage: {
+              input_tokens: 8,
+              output_tokens: 0,
+              cache_read_input_tokens: 12_000,
+              cache_creation_input_tokens: 0,
+            },
+          },
+        },
+        { type: "content_block_start", index: 0, content_block: { type: "thinking" } },
+      ]),
+    );
+    const result = await touchAnthropicPromptCache({
+      model: makeAnthropicTransportModel({ id: "claude-opus-5" }),
+      apiKey: "sk-ant-api",
+      payload: {
+        model: "claude-opus-5",
+        max_tokens: 32_000,
+        stream: true,
+        thinking: { type: "adaptive" },
+        output_config: { effort: "high" },
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "stable main prefix",
+                cache_control: { type: "ephemeral", ttl: "1h" },
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(result.mode).toBe("stream-start");
+    expect(result.usage.cacheRead).toBe(12_000);
+    expect(latestAnthropicRequest().payload).toMatchObject({
+      max_tokens: 32_000,
+      stream: true,
+      thinking: { type: "adaptive" },
+      output_config: { effort: "high" },
+    });
   });
 
   it.each([

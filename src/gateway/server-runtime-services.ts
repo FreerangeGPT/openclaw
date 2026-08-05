@@ -8,6 +8,7 @@ import {
   type HeartbeatRunner,
 } from "../infra/heartbeat-runner.js";
 import { resolveHeartbeatIntervalMs } from "../infra/heartbeat-summary.js";
+import { startMainSessionCacheKeeper } from "../infra/main-session-cache-keeper.js";
 import {
   schedulePendingSessionDeliveries,
   startSessionDeliveryRuntime,
@@ -337,6 +338,7 @@ export function activateGatewayScheduledServices(params: {
     cfg: params.cfgAtStart,
     readCurrentConfig: getRuntimeConfig,
   });
+  const mainSessionCacheKeeper = startMainSessionCacheKeeper();
   const sessionUpstreamMonitor = startSessionUpstreamMonitor();
   const stopSessionDeliveryRuntime = startPendingSessionDeliveryRuntime({
     deps: params.deps,
@@ -344,10 +346,14 @@ export function activateGatewayScheduledServices(params: {
     maxEnqueuedAt: params.sessionDeliveryRecoveryMaxEnqueuedAt,
   });
   const heartbeatRunnerWithUpstreamMonitor: HeartbeatRunner = {
-    updateConfig: heartbeatRunner.updateConfig,
+    updateConfig: (cfg) => {
+      mainSessionCacheKeeper.updateConfig();
+      heartbeatRunner.updateConfig(cfg);
+    },
     stop: () => {
       stopSessionDeliveryRuntime();
       sessionUpstreamMonitor.stop();
+      mainSessionCacheKeeper.stop();
       heartbeatRunner.stop();
     },
   };

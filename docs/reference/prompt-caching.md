@@ -71,6 +71,22 @@ agents:
       every: "55m"
 ```
 
+For a canonical main conversation on the first-party Anthropic API, cache refresh does not depend
+on a heartbeat turn. After a successful user turn with a covering one-hour cache, OpenClaw keeps
+the exact final provider request as a process-local parent. At 45 minutes it replays that request
+with a disposable user suffix after the existing cache breakpoint. Compatible requests use
+Anthropic's zero-output prewarm mode; requests with thinking or other incompatible output options
+preserve those options and stop as soon as `message_start` proves the cache read or write. The
+suffix and generated output are never added to the conversation.
+
+The Gateway checks the schedule every 3 minutes and also owns one precise timer for the next due
+touch. Hard failures retry after 5, 3, 2, and 1 minutes, producing attempts at 45, 50, 53, 55, and
+56 minutes after the last confirmed touch. A newer main provider request blocks the old parent,
+and its successful turn replaces the parent using the active transcript leaf as the freshness
+anchor. Restart, compaction, reset, model/auth changes, or other main-branch movement require a new
+successful main turn before this keeper resumes. Successful touches append only an
+`openclaw.main-cache-touch` metadata event with usage and estimated cost for observability.
+
 Routine heartbeats do not rely on cadence alone as proof that a provider cache is warm. A large
 routine heartbeat may stay on the canonical main dialogue only when `isolatedSession` and
 `lightContext` are false/unset, the effective retention outlives the heartbeat interval, and this
@@ -86,9 +102,10 @@ its large transcript.
 Without a viable cache keeper, OpenClaw uses a fresh isolated session when `isolatedSession` is
 unset, or skips the run when it is explicitly `false`. This also prevents a routine heartbeat after
 a restart, model, prompt/tool, credential, compaction/reset, other model-facing transcript change,
-or long gap from paying to rebuild the full dialogue cache. Isolated
-heartbeat runs receive a one-shot `"short"` retention override when the main agent uses `"long"`;
-explicit `"none"` remains uncached. Manual heartbeats and runs carrying cron events, exec
+or long gap from paying to rebuild the full dialogue cache. Auto-isolated routine heartbeats for a
+canonical main agent retain their own lightweight prefix for one hour; explicitly isolated
+non-main heartbeat runs use a one-shot `"short"` override when the agent uses `"long"`.
+Explicit `"none"` remains uncached. Manual heartbeats and runs carrying cron events, exec
 completions, scheduled tasks, or due commitments remain actionable and are not redirected by this
 guard.
 
