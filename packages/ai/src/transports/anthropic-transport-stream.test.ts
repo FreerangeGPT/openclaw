@@ -365,6 +365,61 @@ describe("anthropic transport stream", () => {
 
   it.each([
     {
+      name: "preserves one-hour cache writes from message-start usage",
+      id: "msg_1h_start_usage",
+      model: "claude-sonnet-4-6",
+      initial: {
+        input_tokens: 12,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 1_000,
+        cache_creation: {
+          ephemeral_5m_input_tokens: 600,
+          ephemeral_1h_input_tokens: 400,
+        },
+      },
+      final: { output_tokens: 10 },
+      expected: {
+        input: 12,
+        output: 10,
+        cacheRead: 0,
+        cacheWrite: 1_000,
+        cacheWrite1h: 400,
+        totalTokens: 1_022,
+      },
+      context: { state: "available", promptTokens: 1_012, totalTokens: 1_022 },
+    },
+    {
+      name: "updates one-hour cache writes from final usage",
+      id: "msg_1h_final_usage",
+      model: "claude-sonnet-4-6",
+      initial: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+      final: {
+        input_tokens: 12,
+        output_tokens: 10,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 1_000,
+        cache_creation: {
+          ephemeral_5m_input_tokens: 600,
+          ephemeral_1h_input_tokens: 400,
+        },
+      },
+      expected: {
+        input: 12,
+        output: 10,
+        cacheRead: 0,
+        cacheWrite: 1_000,
+        cacheWrite1h: 400,
+        totalTokens: 1_022,
+      },
+      context: { state: "available", promptTokens: 1_012, totalTokens: 1_022 },
+    },
+    {
       name: "keeps aggregate cache billing buckets out of the context total",
       id: "msg_usage",
       model: "claude-fable-5",

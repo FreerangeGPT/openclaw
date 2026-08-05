@@ -631,6 +631,7 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
     }),
     autoIsolatedMainSession: Boolean(autoIsolatedMainSession),
     cacheKeeperReplyOptions: resolveHeartbeatCacheKeeperReplyOptions({
+      autoIsolatedMainSession: Boolean(autoIsolatedMainSession),
       heartbeat,
       mainSessionCacheKeeper,
       policy: cacheKeeperPolicy,

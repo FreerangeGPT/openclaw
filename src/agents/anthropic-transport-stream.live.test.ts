@@ -248,6 +248,66 @@ describeOpusTupleLive("anthropic Opus tuple schema provider live", () => {
 });
 
 describeProviderLive("anthropic transport stream provider live", () => {
+  it("reuses a one-hour system prefix across fresh sessions", async () => {
+    const modelId = process.env.OPENCLAW_LIVE_ANTHROPIC_TOOL_MODEL || "claude-haiku-4-5-20251001";
+    const model: AnthropicMessagesModel = {
+      id: modelId,
+      name: modelId,
+      api: "anthropic-messages",
+      provider: "anthropic",
+      baseUrl: "https://api.anthropic.com",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 200_000,
+      maxTokens: 512,
+    };
+    const stablePrefix = [
+      `OpenClaw one-hour transport cache probe ${Date.now()}.`,
+      "Keep this byte-identical system prefix cached across fresh sessions. ".repeat(2_000),
+    ].join("\n");
+    const streamFn = createAnthropicMessagesTransportStreamFn();
+    const run = async (sessionId: string, reply: string) => {
+      const stream = await Promise.resolve(
+        streamFn(
+          model,
+          {
+            systemPrompt: stablePrefix,
+            messages: [{ role: "user", content: `Reply with exactly ${reply}.` }],
+          } as AnthropicStreamContext,
+          {
+            apiKey: ANTHROPIC_KEY,
+            cacheRetention: "long",
+            maxTokens: 32,
+            sessionId,
+          } as AnthropicStreamOptions,
+        ),
+      );
+      return await stream.result();
+    };
+
+    const first = await run(`openclaw-1h-cache-first-${Date.now()}`, "CACHE-FIRST");
+    if (skipAnthropicBillingDrift("one-hour cache write", first)) {
+      return;
+    }
+    expect(
+      first.stopReason,
+      `one-hour cache write failed; errorClass=${classifyProviderError(first.errorMessage)}`,
+    ).toBe("stop");
+    expect(first.usage.cacheWrite).toBeGreaterThan(0);
+    expect(first.usage.cacheWrite1h ?? 0).toBeGreaterThan(0);
+
+    const second = await run(`openclaw-1h-cache-second-${Date.now()}`, "CACHE-SECOND");
+    if (skipAnthropicBillingDrift("one-hour cache read", second)) {
+      return;
+    }
+    expect(
+      second.stopReason,
+      `one-hour cache read failed; errorClass=${classifyProviderError(second.errorMessage)}`,
+    ).toBe("stop");
+    expect(second.usage.cacheRead).toBeGreaterThan(0);
+  }, 60_000);
+
   it("keeps a healthy forced tool when a sibling descriptor is unreadable", async () => {
     const modelId = process.env.OPENCLAW_LIVE_ANTHROPIC_TOOL_MODEL || "claude-haiku-4-5-20251001";
     const model: AnthropicMessagesModel = {

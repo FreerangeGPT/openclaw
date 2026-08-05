@@ -42,6 +42,7 @@ import {
   resolveClaudeSonnet5ModelIdentity,
   resolveOriginalAnthropicToolName,
   readAnthropicFallbackBoundary,
+  readAnthropicCacheWriteUsage,
   readAnthropicPromptUsageSnapshot,
   readAnthropicUsageTokenCount,
   readLastAnthropicIterationUsage,
@@ -191,6 +192,7 @@ type MutableAssistantOutput = {
     output: number;
     cacheRead: number;
     cacheWrite: number;
+    cacheWrite1h?: number;
     contextUsage?: ContextUsage;
     totalTokens: number;
     cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
@@ -1470,6 +1472,10 @@ export function createAnthropicMessagesTransportStreamFn(): StreamFn {
             if (cacheWriteTokens !== undefined) {
               output.usage.cacheWrite = cacheWriteTokens;
             }
+            const cacheWriteUsage = readAnthropicCacheWriteUsage(usage);
+            if (cacheWriteUsage.cacheWrite1h !== undefined) {
+              output.usage.cacheWrite1h = cacheWriteUsage.cacheWrite1h;
+            }
             output.usage.totalTokens =
               output.usage.input +
               output.usage.output +
@@ -1848,6 +1854,10 @@ export function createAnthropicMessagesTransportStreamFn(): StreamFn {
             );
             if (cacheWriteTokens !== undefined) {
               output.usage.cacheWrite = cacheWriteTokens;
+            }
+            const cacheWriteUsage = readAnthropicCacheWriteUsage(usage ?? {});
+            if (cacheWriteUsage.cacheWrite1h !== undefined) {
+              output.usage.cacheWrite1h = cacheWriteUsage.cacheWrite1h;
             }
             output.usage.totalTokens =
               output.usage.input +

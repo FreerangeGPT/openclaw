@@ -349,6 +349,7 @@ export async function resolvePromptAwareHeartbeatCacheKeeperPolicy(
 }
 
 export function resolveHeartbeatCacheKeeperReplyOptions(params: {
+  autoIsolatedMainSession: boolean;
   heartbeat?: HeartbeatConfig;
   mainSessionCacheKeeper: boolean;
   policy: HeartbeatCacheKeeperPolicy;
@@ -359,9 +360,13 @@ export function resolveHeartbeatCacheKeeperReplyOptions(params: {
     : undefined;
   const heartbeatModelOverride =
     mainSessionCacheKeeperModelOverride ?? normalizeOptionalString(params.heartbeat?.model);
+  // Canonical-main fallback reuses one lightweight prefix across fresh runs.
+  // Retain 1h there because the heartbeat cadence outlives Anthropic's 5m TTL.
   const heartbeatCacheRetentionOverride =
     params.useIsolatedSession && params.policy.heartbeatCacheRetention === "long"
-      ? ("short" as const)
+      ? params.autoIsolatedMainSession
+        ? ("long" as const)
+        : ("short" as const)
       : undefined;
   return {
     ...(heartbeatModelOverride ? { heartbeatModelOverride } : {}),

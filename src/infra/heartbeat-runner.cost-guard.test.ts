@@ -205,7 +205,7 @@ describe("runHeartbeatOnce large-session cost guard", () => {
         bootstrapContextMode: "lightweight",
       });
       expect(replySpy.mock.calls[0]?.[1]).toMatchObject({
-        heartbeatCacheRetentionOverride: "short",
+        heartbeatCacheRetentionOverride: "long",
       });
       expect(replySpy.mock.calls[0]?.[1]).not.toHaveProperty("heartbeatModelFallbacksDisabled");
     });
@@ -352,7 +352,7 @@ describe("runHeartbeatOnce large-session cost guard", () => {
       expect(replySpy.mock.calls[0]?.[0]).toMatchObject({ SessionKey: sessionKey });
       expect(replySpy.mock.calls[1]?.[0]).toMatchObject({ SessionKey: `${sessionKey}:heartbeat` });
       expect(replySpy.mock.calls[1]?.[1]).toMatchObject({
-        heartbeatCacheRetentionOverride: "short",
+        heartbeatCacheRetentionOverride: "long",
       });
     });
   });
