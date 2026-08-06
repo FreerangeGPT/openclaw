@@ -36,7 +36,7 @@ Proof: `src/channels/message/ingress-drain.test.ts`,
   `createTelegramTransportIngressDrain(...).drainOnce()` — no private claim
   loops.
 - Stall timeout: `OPENCLAW_TELEGRAM_SPOOLED_HANDLER_TIMEOUT_MS` →
-  `adoptionStallTimeoutMs` (default 5 min) via
+  `adoptionStallTimeoutMs` (default 10 min for polling) via
   `resolveTelegramAdoptionStallTimeoutMs`.
 - Non-retryable classifier: `telegram-ingress-non-retryable.ts`
   (missing harness, dispatch-dedupe rollback).

@@ -1,7 +1,6 @@
 // Telegram plugin module owns the channel-side durable ingress monitor adapter.
 import {
   createChannelIngressMonitor,
-  DEFAULT_INGRESS_ADOPTION_STALL_MS,
   type ChannelIngressMonitorLifecycle,
   type ChannelIngressQueue,
 } from "openclaw/plugin-sdk/channel-outbound";
@@ -30,6 +29,9 @@ import {
 import { createShouldSupersedeTelegramSpooledPending } from "./telegram-ingress-supersede.js";
 
 const TELEGRAM_SPOOLED_HANDLER_TIMEOUT_ENV = "OPENCLAW_TELEGRAM_SPOOLED_HANDLER_TIMEOUT_MS";
+// Telegram turns can compact before adoption, so keep the channel watchdog
+// above ordinary turn latency. Slow local providers can extend it via the env override.
+const TELEGRAM_SPOOLED_ADOPTION_STALL_TIMEOUT_MS = 10 * 60 * 1_000;
 const TELEGRAM_SPOOLED_DRAIN_START_LIMIT = 100;
 const TELEGRAM_SPOOLED_DRAIN_SCAN_LIMIT = TELEGRAM_SPOOLED_DRAIN_START_LIMIT * 10;
 const TELEGRAM_SPOOLED_DRAIN_POLL_INTERVAL_MS = 500;
@@ -49,7 +51,7 @@ export function resolveTelegramAdoptionStallTimeoutMs(params: {
       return timeoutMs;
     }
   }
-  return DEFAULT_INGRESS_ADOPTION_STALL_MS;
+  return TELEGRAM_SPOOLED_ADOPTION_STALL_TIMEOUT_MS;
 }
 
 function telegramSpooledLaneKey(update: unknown, botInfo?: TelegramBotInfo): string {
@@ -206,7 +208,8 @@ export function createTelegramIngressMonitor(params: CreateTelegramIngressMonito
       failedMaxEntries: TELEGRAM_SPOOLED_UPDATE_FAILED_MAX_ENTRIES,
     },
     drain: {
-      adoptionStallTimeoutMs: params.adoptionStallTimeoutMs ?? DEFAULT_INGRESS_ADOPTION_STALL_MS,
+      adoptionStallTimeoutMs:
+        params.adoptionStallTimeoutMs ?? TELEGRAM_SPOOLED_ADOPTION_STALL_TIMEOUT_MS,
       orderBy: "id",
       scanLimit: TELEGRAM_SPOOLED_DRAIN_SCAN_LIMIT,
       startLimit: TELEGRAM_SPOOLED_DRAIN_START_LIMIT,

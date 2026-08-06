@@ -5,7 +5,10 @@ import path from "node:path";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { createChannelIngressQueueForTests } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import { describe, expect, it } from "vitest";
-import { createTelegramIngressMonitor } from "./telegram-ingress-drain.js";
+import {
+  createTelegramIngressMonitor,
+  resolveTelegramAdoptionStallTimeoutMs,
+} from "./telegram-ingress-drain.js";
 import { telegramSpooledUpdateLaneKey } from "./telegram-ingress-spool.js";
 import type { TelegramSpooledUpdatePayload } from "./telegram-ingress-spool.payload.js";
 
@@ -26,6 +29,37 @@ const cfg = {
     },
   },
 } as OpenClawConfig;
+
+describe("resolveTelegramAdoptionStallTimeoutMs", () => {
+  it("defaults to the 10-minute polling allowance", () => {
+    expect(resolveTelegramAdoptionStallTimeoutMs({ env: {} })).toBe(600_000);
+  });
+
+  it("accepts a longer polling timeout from the environment", () => {
+    expect(
+      resolveTelegramAdoptionStallTimeoutMs({
+        env: { OPENCLAW_TELEGRAM_SPOOLED_HANDLER_TIMEOUT_MS: "1200000" },
+      }),
+    ).toBe(1_200_000);
+  });
+
+  it("prefers an explicit configured timeout over the environment", () => {
+    expect(
+      resolveTelegramAdoptionStallTimeoutMs({
+        configured: 900_000,
+        env: { OPENCLAW_TELEGRAM_SPOOLED_HANDLER_TIMEOUT_MS: "1200000" },
+      }),
+    ).toBe(900_000);
+  });
+
+  it("ignores an invalid environment timeout", () => {
+    expect(
+      resolveTelegramAdoptionStallTimeoutMs({
+        env: { OPENCLAW_TELEGRAM_SPOOLED_HANDLER_TIMEOUT_MS: "invalid" },
+      }),
+    ).toBe(600_000);
+  });
+});
 
 function updatePayload(updateId: number): TelegramSpooledUpdatePayload {
   return {
