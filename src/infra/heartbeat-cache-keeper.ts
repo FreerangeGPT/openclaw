@@ -25,10 +25,12 @@ import {
   shouldAutoIsolateMainSessionHeartbeat,
   shouldSkipExpensiveMainSessionHeartbeat,
   shouldUseIsolatedHeartbeatSession,
+  type ExpensiveMainSessionHeartbeatSkip,
 } from "./heartbeat-cost-guard.js";
 import { isCronSystemEvent, isExecCompletionEvent } from "./heartbeat-events-filter.js";
+import { emitHeartbeatEvent } from "./heartbeat-events.js";
 import type { HeartbeatRunScope } from "./heartbeat-run-scope.js";
-import type { HeartbeatConfig } from "./heartbeat-runner-config.js";
+import { heartbeatLog, type HeartbeatConfig } from "./heartbeat-runner-config.js";
 import { resolveHeartbeatRunPrompt, type HeartbeatPreflight } from "./heartbeat-runner-prompt.js";
 import { resolveHeartbeatIntervalMs } from "./heartbeat-summary.js";
 import type { HeartbeatScheduledTask } from "./heartbeat-wake.js";
@@ -435,13 +437,7 @@ export function resolveHeartbeatSessionIsolation(params: {
     autoIsolatedMainSession: Boolean(autoIsolatedMainSession),
   });
   const mainSessionCacheKeeper =
-    !useIsolatedSession &&
-    params.policy.cacheKeeperCacheViable === true &&
-    shouldAutoIsolateMainSessionHeartbeat({
-      ...guardFacts,
-      configuredIsolated: undefined,
-      cacheKeeperCacheViable: false,
-    }) !== null;
+    !useIsolatedSession && params.policy.cacheKeeperCacheViable === true;
   return {
     autoIsolatedMainSession,
     mainSessionCacheKeeper,
@@ -466,6 +462,28 @@ export function resolveExpensiveMainSessionHeartbeatSkip(params: {
   if (params.runPrompt.prompt === null) {
     return null;
   }
+  if (
+    !params.useIsolatedSession &&
+    params.policy.cacheKeeperCacheViable !== true &&
+    params.policy.preserveMainSessionCache &&
+    params.policy.heartbeatCacheRetention === "long"
+  ) {
+    // A canonical-main heartbeat may append only to a live, identity-bound 1h
+    // prefix. This is deliberately size-independent: a cheap synthetic turn
+    // cannot bootstrap trustworthy cache evidence for the real main prefix.
+    return {
+      kind: "failed",
+      reason: params.policy.lastCacheTouch
+        ? ("cache-evidence-not-viable" as const)
+        : ("cache-evidence-missing" as const),
+      details: {
+        cacheRetention: params.policy.heartbeatCacheRetention,
+        heartbeatIntervalMs: params.policy.heartbeatIntervalMs,
+        totalTokens: params.entry?.totalTokens,
+        totalTokensFresh: params.entry?.totalTokensFresh,
+      },
+    } as const;
+  }
   const cacheKeeperCacheViable =
     params.policy.cacheKeeperCacheViable === true && params.policy.heartbeatIntervalMs !== null
       ? resolveCacheKeeperCacheViable({
@@ -481,7 +499,7 @@ export function resolveExpensiveMainSessionHeartbeatSkip(params: {
             params.entry?.totalTokensFresh === true ? params.entry.totalTokens : undefined,
         })
       : params.policy.cacheKeeperCacheViable;
-  return shouldSkipExpensiveMainSessionHeartbeat({
+  const skip = shouldSkipExpensiveMainSessionHeartbeat({
     prompt: params.runPrompt.prompt,
     preserveMainSessionCache: params.policy.preserveMainSessionCache,
     cacheKeeperCacheViable,
@@ -496,4 +514,28 @@ export function resolveExpensiveMainSessionHeartbeatSkip(params: {
     isManualReason: params.wakeSource === "manual",
     useIsolatedSession: params.useIsolatedSession,
   });
+  return skip ? ({ kind: "skipped", ...skip } as const) : null;
+}
+
+export function reportExpensiveMainSessionHeartbeatSkip(params: {
+  agentId: string;
+  heartbeatIntervalMs: number | null;
+  cacheRetention: CacheRetention;
+  sessionKey: string;
+  skip: ExpensiveMainSessionHeartbeatSkip & { kind: "skipped" };
+  startedAt: number;
+}) {
+  heartbeatLog.warn("heartbeat: skipping large routine main-session run", {
+    sessionKey: params.sessionKey,
+    agentId: params.agentId,
+    cacheRetention: params.cacheRetention,
+    heartbeatIntervalMs: params.heartbeatIntervalMs,
+    ...params.skip,
+  });
+  emitHeartbeatEvent({
+    status: "skipped",
+    reason: "full-context-heartbeat-guard",
+    durationMs: Date.now() - params.startedAt,
+  });
+  return { kind: "skipped", reason: "full-context-heartbeat-guard" } as const;
 }

@@ -79,7 +79,7 @@ describe("main-session prompt cache evidence", () => {
         written.evidenceId,
         evidence.timestamp + 60 * 60_000,
       ),
-    ).toThrow(/identity changed/);
+    ).toThrow(/cache-evidence-expired/);
     let continuationFailure: unknown;
     try {
       assertMainSessionCacheKeeperEvidenceFresh(
@@ -179,7 +179,7 @@ describe("main-session prompt cache evidence", () => {
         refreshedAt + 60 * 60_000,
         false,
       ),
-    ).toThrow(/identity changed/);
+    ).toThrow(/cache-evidence-expired/);
 
     const continued = vi.fn();
     expect(
@@ -417,14 +417,14 @@ describe("main-session prompt cache evidence", () => {
         promptIdentity: "changed-prompt",
         authFingerprint: "auth-fingerprint-drift",
       }),
-    ).toThrow(/identity changed/);
+    ).toThrow(/prompt-or-credential-identity-changed/);
     expect(() =>
       assertMainSessionCacheKeeperIdentity({
         evidenceId: written.evidenceId,
         promptIdentity: "prompt-identity-drift",
         authFingerprint: "changed-auth",
       }),
-    ).toThrow(/identity changed/);
+    ).toThrow(/prompt-or-credential-identity-changed/);
     expect(() =>
       assertMainSessionCacheKeeperProviderIdentity({
         evidenceId: written.evidenceId,
@@ -434,7 +434,7 @@ describe("main-session prompt cache evidence", () => {
         providerMessagePrefixIdentities: ["empty", evidence.providerMessageIdentity],
         providerMessageTokenUpperBounds: [100],
       }),
-    ).toThrow(/identity changed/);
+    ).toThrow(/provider-payload-identity-changed/);
     let continuationFailure: unknown;
     try {
       assertMainSessionCacheKeeperProviderIdentity({
@@ -449,7 +449,10 @@ describe("main-session prompt cache evidence", () => {
     } catch (error) {
       continuationFailure = error;
     }
-    expect(continuationFailure).toMatchObject({ replaySafe: false });
+    expect(continuationFailure).toMatchObject({
+      reason: "provider-payload-identity-changed",
+      replaySafe: false,
+    });
 
     let coverageFailure: unknown;
     try {
@@ -465,7 +468,7 @@ describe("main-session prompt cache evidence", () => {
     } catch (error) {
       coverageFailure = error;
     }
-    expect(coverageFailure).toMatchObject({ replaySafe: false });
+    expect(coverageFailure).toMatchObject({ reason: "message-prefix-diverged", replaySafe: false });
 
     expect(() =>
       assertMainSessionCacheKeeperProviderIdentity({
@@ -476,7 +479,7 @@ describe("main-session prompt cache evidence", () => {
         providerMessagePrefixIdentities: ["empty", "different-message-prefix"],
         providerMessageTokenUpperBounds: [1],
       }),
-    ).toThrow(/identity changed/);
+    ).toThrow(/message-prefix-diverged/);
     expect(() =>
       assertMainSessionCacheKeeperProviderIdentity({
         evidenceId: written.evidenceId,
@@ -486,7 +489,7 @@ describe("main-session prompt cache evidence", () => {
         providerMessagePrefixIdentities: ["empty", evidence.providerMessageIdentity],
         providerMessageTokenUpperBounds: [],
       }),
-    ).toThrow(/identity changed/);
+    ).toThrow(/message-prefix-diverged/);
     expect(() =>
       assertMainSessionCacheKeeperProviderIdentity({
         evidenceId: written.evidenceId,
@@ -495,7 +498,7 @@ describe("main-session prompt cache evidence", () => {
         providerMessagePrefixIdentities: ["empty", evidence.providerMessageIdentity],
         providerMessageTokenUpperBounds: [1],
       }),
-    ).toThrow(/identity changed/);
+    ).toThrow(/message-prefix-diverged/);
   });
 
   it("requires the admitted keeper turn to remain the only child of its preflight leaf", () => {
@@ -522,7 +525,7 @@ describe("main-session prompt cache evidence", () => {
         expectedParentId: "preflight-leaf",
         persistedUserMessageId: "heartbeat-user",
       }),
-    ).toThrow(/identity changed/);
+    ).toThrow(/transcript-anchor-changed/);
   });
 
   it("does not confirm a one-hour entry when transcript persistence fails", () => {

@@ -248,7 +248,10 @@ export async function prepareEmbeddedAttemptSessionManager(input: {
           sessionManager,
         });
         if (rollback !== "rolled-back") {
-          throw new MainSessionCacheKeeperIdentityMismatchError({ replaySafe: false });
+          throw new MainSessionCacheKeeperIdentityMismatchError({
+            reason: "turn-rollback-failed",
+            replaySafe: false,
+          });
         }
         // Settlement sees the original replay-safe error too. Carry ownership
         // forward so it does not mistake this completed removal for a rollback failure.

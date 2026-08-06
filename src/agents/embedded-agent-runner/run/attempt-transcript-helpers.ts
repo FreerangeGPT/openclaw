@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { HEARTBEAT_TOKEN } from "../../../auto-reply/tokens.js";
 import { resolveStorePath } from "../../../config/sessions/paths.js";
 import {
   loadSessionEntry,
@@ -22,6 +23,25 @@ import type { EmbeddedRunAttemptParams } from "./types.js";
 
 type AttemptSessionManager = ReturnType<typeof guardSessionManager>;
 
+function synchronizeActiveSessionMessageViews(params: {
+  activeSession?: {
+    messages?: AgentMessage[];
+    agent: { state: { messages: AgentMessage[] } };
+  };
+  sessionManager: AttemptSessionManager;
+}): void {
+  const rebuiltMessages = params.sessionManager.buildSessionContext().messages;
+  const stateMessages = params.activeSession?.agent.state.messages;
+  if (!stateMessages) {
+    return;
+  }
+  stateMessages.splice(0, stateMessages.length, ...rebuiltMessages);
+  const sessionMessages = params.activeSession?.messages;
+  if (sessionMessages && sessionMessages !== stateMessages) {
+    sessionMessages.splice(0, sessionMessages.length, ...rebuiltMessages);
+  }
+}
+
 export function flushSessionManagerTranscript(sessionManager: AttemptSessionManager): void {
   sessionManager.flushPendingPersistence();
 }
@@ -37,6 +57,87 @@ export function repairAttemptToolUseResultPairing(
 }
 
 export type CacheKeeperTurnRollback = "not-replayable" | "rolled-back" | "rollback-failed";
+export type CacheKeeperHeartbeatAckDiscard = "discarded" | "not-discardable" | "discard-failed";
+
+function isPureHeartbeatAckAssistant(message: AgentMessage | undefined): boolean {
+  if (!message || message.role !== "assistant" || message.stopReason !== "stop") {
+    return false;
+  }
+  const visibleText: string[] = [];
+  for (const block of message.content) {
+    if (block.type === "thinking") {
+      continue;
+    }
+    if (block.type !== "text") {
+      return false;
+    }
+    visibleText.push(block.text);
+  }
+  return visibleText.length > 0 && visibleText.join("").trim() === HEARTBEAT_TOKEN;
+}
+
+/** Removes a completed no-op keeper turn while retaining its refreshed remote cache proof. */
+export function discardPureMainSessionHeartbeatAckTurn(params: {
+  activeSession?: {
+    messages?: AgentMessage[];
+    agent: { state: { messages: AgentMessage[] } };
+  };
+  attempt: Pick<
+    EmbeddedRunAttemptParams,
+    "promptCacheKeeperEvidenceId" | "trigger" | "userTurnTranscriptRecorder"
+  >;
+  cacheRefreshConfirmed: boolean;
+  compactionOccurredThisAttempt: boolean;
+  interrupted: boolean;
+  promptError: unknown;
+  sessionManager: AttemptSessionManager;
+  toolActivityCount: number;
+}): CacheKeeperHeartbeatAckDiscard {
+  if (
+    params.attempt.trigger !== "heartbeat" ||
+    !params.attempt.promptCacheKeeperEvidenceId ||
+    !params.cacheRefreshConfirmed ||
+    params.promptError ||
+    params.interrupted ||
+    params.compactionOccurredThisAttempt ||
+    params.toolActivityCount > 0
+  ) {
+    return "not-discardable";
+  }
+  const persistedUserMessageId =
+    params.attempt.userTurnTranscriptRecorder?.getPersistedMessageId?.();
+  const leaf = params.sessionManager.getLeafEntry();
+  if (!isPureHeartbeatAckAssistant(leaf?.type === "message" ? leaf.message : undefined)) {
+    return "not-discardable";
+  }
+  if (!persistedUserMessageId || leaf?.parentId !== persistedUserMessageId) {
+    return "discard-failed";
+  }
+  const branch = params.sessionManager.getBranch();
+  const persistedUserEntry = branch.at(-2);
+  const persistedAssistantEntry = branch.at(-1);
+  if (
+    persistedUserEntry?.id !== persistedUserMessageId ||
+    persistedAssistantEntry?.id !== leaf.id ||
+    persistedAssistantEntry.parentId !== persistedUserMessageId
+  ) {
+    return "discard-failed";
+  }
+  try {
+    // Validate the exact contiguous pair before SessionManager's single splice.
+    // Provider I/O is complete, so the local rewind cannot invalidate the cache hit.
+    const removed = params.sessionManager.removeTrailingEntries(
+      (entry) => entry.id === leaf.id || entry.id === persistedUserMessageId,
+    );
+    if (removed !== 2) {
+      return "discard-failed";
+    }
+    synchronizeActiveSessionMessageViews(params);
+    return "discarded";
+  } catch {
+    return "discard-failed";
+  }
+}
 
 /** Removes only the exact synthetic keeper leaf before an isolated replay. */
 export function rollbackReplaySafeMainSessionCacheKeeperTurn(params: {
@@ -59,22 +160,11 @@ export function rollbackReplaySafeMainSessionCacheKeeperTurn(params: {
   ) {
     return "not-replayable";
   }
-  const synchronizeActiveSession = () => {
-    const rebuiltMessages = params.sessionManager.buildSessionContext().messages;
-    const stateMessages = params.activeSession?.agent.state.messages;
-    if (stateMessages) {
-      stateMessages.splice(0, stateMessages.length, ...rebuiltMessages);
-      const sessionMessages = params.activeSession?.messages;
-      if (sessionMessages && sessionMessages !== stateMessages) {
-        sessionMessages.splice(0, sessionMessages.length, ...rebuiltMessages);
-      }
-    }
-  };
   if (params.attempt.promptCacheKeeperTurnRollbackCompleted) {
     try {
       // Preparation owns the durable removal before AgentSession exists;
       // settlement owns synchronizing both later-created in-memory views.
-      synchronizeActiveSession();
+      synchronizeActiveSessionMessageViews(params);
       return "rolled-back";
     } catch {
       return "rollback-failed";
@@ -96,7 +186,7 @@ export function rollbackReplaySafeMainSessionCacheKeeperTurn(params: {
     if (removed !== 1) {
       return "rollback-failed";
     }
-    synchronizeActiveSession();
+    synchronizeActiveSessionMessageViews(params);
     return "rolled-back";
   } catch {
     return "rollback-failed";

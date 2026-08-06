@@ -211,7 +211,7 @@ describe("runHeartbeatOnce large-session cost guard", () => {
     });
   });
 
-  it("keeps a 15-minute long-retention cache keeper on the main session", async () => {
+  it("keeps a scheduled 15-minute long-retention cache keeper on the main session", async () => {
     await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
       const cfg = createConfig({
         workspace: tmpDir,
@@ -225,6 +225,7 @@ describe("runHeartbeatOnce large-session cost guard", () => {
       const result = await runHeartbeatOnce({
         cfg,
         agentId: "main",
+        tasks: [{ jobId: "job-status", name: "status", prompt: "Check deployment status" }],
         deps: {
           getReplyFromConfig: replySpy,
           telegram: async () => ({ messageId: "m1", chatId: "-100155462274" }),
@@ -329,14 +330,16 @@ describe("runHeartbeatOnce large-session cost guard", () => {
     });
   });
 
-  it("reroutes a late cache identity mismatch into a fresh isolated heartbeat", async () => {
+  it("fails closed on a late cache identity mismatch without replaying", async () => {
     await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
       const cfg = createConfig({ workspace: tmpDir, storePath });
       const sessionKey = await seedLargeSession(storePath, cfg);
       await seedCacheTouch({ storePath, sessionKey });
-      replySpy
-        .mockRejectedValueOnce(new MainSessionCacheKeeperIdentityMismatchError())
-        .mockResolvedValueOnce({ text: "HEARTBEAT_OK" });
+      replySpy.mockRejectedValueOnce(
+        new MainSessionCacheKeeperIdentityMismatchError({
+          reason: "provider-payload-identity-changed",
+        }),
+      );
 
       const result = await runHeartbeatOnce({
         cfg,
@@ -347,17 +350,16 @@ describe("runHeartbeatOnce large-session cost guard", () => {
         },
       });
 
-      expect(result.status).toBe("ran");
-      expect(replySpy).toHaveBeenCalledTimes(2);
-      expect(replySpy.mock.calls[0]?.[0]).toMatchObject({ SessionKey: sessionKey });
-      expect(replySpy.mock.calls[1]?.[0]).toMatchObject({ SessionKey: `${sessionKey}:heartbeat` });
-      expect(replySpy.mock.calls[1]?.[1]).toMatchObject({
-        heartbeatCacheRetentionOverride: "long",
+      expect(result).toEqual({
+        status: "failed",
+        reason: "main-session-heartbeat-provider-payload-identity-changed",
       });
+      expect(replySpy).toHaveBeenCalledTimes(1);
+      expect(replySpy.mock.calls[0]?.[0]).toMatchObject({ SessionKey: sessionKey });
     });
   });
 
-  it("skips after a late cache identity mismatch when main-session use is explicit", async () => {
+  it("fails closed after a late cache identity mismatch when main-session use is explicit", async () => {
     await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
       const cfg = createConfig({ workspace: tmpDir, storePath, isolatedSession: false });
       const sessionKey = await seedLargeSession(storePath, cfg);
@@ -373,7 +375,10 @@ describe("runHeartbeatOnce large-session cost guard", () => {
         },
       });
 
-      expect(result).toEqual({ status: "skipped", reason: "full-context-heartbeat-guard" });
+      expect(result).toEqual({
+        status: "failed",
+        reason: "main-session-heartbeat-prompt-or-credential-identity-changed",
+      });
       expect(replySpy).toHaveBeenCalledTimes(1);
     });
   });
@@ -396,7 +401,10 @@ describe("runHeartbeatOnce large-session cost guard", () => {
         },
       });
 
-      expect(result.status).toBe("failed");
+      expect(result).toEqual({
+        status: "failed",
+        reason: "main-session-heartbeat-prompt-or-credential-identity-changed",
+      });
       expect(replySpy).toHaveBeenCalledTimes(1);
     });
   });
@@ -606,7 +614,7 @@ describe("runHeartbeatOnce large-session cost guard", () => {
     });
   });
 
-  it("skips the same routine run when main-session use is explicitly required", async () => {
+  it("fails closed when explicit main-session use has no live cache evidence", async () => {
     await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
       const cfg = createConfig({
         workspace: tmpDir,
@@ -625,21 +633,50 @@ describe("runHeartbeatOnce large-session cost guard", () => {
       });
 
       expect(result).toEqual({
-        status: "skipped",
-        reason: "full-context-heartbeat-guard",
+        status: "failed",
+        reason: "main-session-heartbeat-cache-evidence-missing",
       });
       expect(replySpy).not.toHaveBeenCalled();
     });
   });
 
-  it("keeps manual heartbeats on the explicitly configured main session", async () => {
+  it("does not use a small synthetic heartbeat to bootstrap main-session evidence", async () => {
     await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
       const cfg = createConfig({
         workspace: tmpDir,
         storePath,
         isolatedSession: false,
       });
-      const sessionKey = await seedLargeSession(storePath, cfg);
+      await seedLargeSession(storePath, cfg, {
+        totalTokens: 200,
+        totalTokensFresh: true,
+      });
+
+      const result = await runHeartbeatOnce({
+        cfg,
+        agentId: "main",
+        deps: {
+          getReplyFromConfig: replySpy,
+          telegram: async () => ({ messageId: "m1", chatId: "-100155462274" }),
+        },
+      });
+
+      expect(result).toEqual({
+        status: "failed",
+        reason: "main-session-heartbeat-cache-evidence-missing",
+      });
+      expect(replySpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it("fails a manual main heartbeat before provider I/O when cache proof is missing", async () => {
+    await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
+      const cfg = createConfig({
+        workspace: tmpDir,
+        storePath,
+        isolatedSession: false,
+      });
+      await seedLargeSession(storePath, cfg);
       replySpy.mockResolvedValue({ text: "HEARTBEAT_OK" });
 
       const result = await runHeartbeatOnce({
@@ -653,8 +690,11 @@ describe("runHeartbeatOnce large-session cost guard", () => {
         },
       });
 
-      expect(result.status).toBe("ran");
-      expect(replySpy.mock.calls[0]?.[0]).toMatchObject({ SessionKey: sessionKey });
+      expect(result).toEqual({
+        status: "failed",
+        reason: "main-session-heartbeat-cache-evidence-missing",
+      });
+      expect(replySpy).not.toHaveBeenCalled();
     });
   });
 });

@@ -212,11 +212,13 @@ export function shouldInjectHeartbeatPrompt(params: {
   agentId?: string;
   defaultAgentId?: string;
   isDefaultAgent: boolean;
+  preservePromptCacheIdentity?: boolean;
   trigger?: EmbeddedRunAttemptParams["trigger"];
   bootstrapContextRunKind?: EmbeddedRunAttemptParams["bootstrapContextRunKind"];
 }): boolean {
   return (
     params.isDefaultAgent &&
+    params.preservePromptCacheIdentity !== true &&
     params.bootstrapContextRunKind !== "commitment-only" &&
     shouldInjectHeartbeatPromptForTrigger(params.trigger) &&
     Boolean(

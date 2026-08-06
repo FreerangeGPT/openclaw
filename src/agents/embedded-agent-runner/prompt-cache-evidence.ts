@@ -227,12 +227,25 @@ export function refreshLivePromptCacheEvidence(params: {
   return true;
 }
 
+export type MainSessionCacheKeeperMismatchReason =
+  | "cache-evidence-expired"
+  | "cache-evidence-missing"
+  | "cache-evidence-not-viable"
+  | "message-prefix-diverged"
+  | "prompt-or-credential-identity-changed"
+  | "provider-payload-identity-changed"
+  | "transcript-anchor-changed"
+  | "turn-rollback-failed";
+
 export class MainSessionCacheKeeperIdentityMismatchError extends Error {
+  readonly reason: MainSessionCacheKeeperMismatchReason;
   readonly replaySafe: boolean;
 
-  constructor(params?: { replaySafe?: boolean }) {
-    super("Main-session cache keeper skipped because prompt or credential identity changed.");
+  constructor(params?: { reason?: MainSessionCacheKeeperMismatchReason; replaySafe?: boolean }) {
+    const reason = params?.reason ?? "prompt-or-credential-identity-changed";
+    super(`Main-session cache keeper rejected: ${reason}.`);
     this.name = "MainSessionCacheKeeperIdentityMismatchError";
+    this.reason = reason;
     this.replaySafe = params?.replaySafe !== false;
   }
 }
@@ -267,6 +280,21 @@ export function isReplaySafeMainSessionCacheKeeperIdentityMismatch(error: unknow
   return findMainSessionCacheKeeperIdentityMismatchError(error)?.replaySafe === true;
 }
 
+export function readMainSessionCacheKeeperMismatch(error: unknown):
+  | {
+      reason: MainSessionCacheKeeperMismatchReason;
+      replaySafe: boolean;
+    }
+  | undefined {
+  const mismatch = findMainSessionCacheKeeperIdentityMismatchError(error);
+  return mismatch
+    ? {
+        reason: mismatch.reason ?? "prompt-or-credential-identity-changed",
+        replaySafe: mismatch.replaySafe,
+      }
+    : undefined;
+}
+
 export function invalidateLivePromptCacheEvidence(evidenceId: string): void {
   liveEvidenceById.delete(evidenceId);
 }
@@ -280,7 +308,10 @@ export function assertMainSessionCacheKeeperEvidenceFresh(
   const evidence = liveEvidenceById.get(evidenceId);
   const ageMs = evidence ? nowMs - evidence.lastConfirmedTimestamp : Number.POSITIVE_INFINITY;
   if (!evidence || ageMs < 0 || ageMs >= LONG_CACHE_TTL_MS) {
-    throw new MainSessionCacheKeeperIdentityMismatchError({ replaySafe });
+    throw new MainSessionCacheKeeperIdentityMismatchError({
+      reason: evidence ? "cache-evidence-expired" : "cache-evidence-missing",
+      replaySafe,
+    });
   }
 }
 
@@ -297,7 +328,9 @@ export function assertMainSessionCacheKeeperIdentity(params: {
     evidence.data.promptIdentity !== params.promptIdentity ||
     evidence.data.authFingerprint !== params.authFingerprint
   ) {
-    throw new MainSessionCacheKeeperIdentityMismatchError();
+    throw new MainSessionCacheKeeperIdentityMismatchError({
+      reason: evidence ? "prompt-or-credential-identity-changed" : "cache-evidence-missing",
+    });
   }
 }
 
@@ -317,7 +350,10 @@ export function assertMainSessionCacheKeeperProviderIdentity(params: {
     evidence.data.providerCachePrefixIdentity !== params.providerCachePrefixIdentity ||
     evidence.data.requestOptionsIdentity !== params.requestOptionsIdentity
   ) {
-    throw new MainSessionCacheKeeperIdentityMismatchError({ replaySafe: params.replaySafe });
+    throw new MainSessionCacheKeeperIdentityMismatchError({
+      reason: evidence ? "provider-payload-identity-changed" : "cache-evidence-missing",
+      replaySafe: params.replaySafe,
+    });
   }
   const previouslyUncachedTokens = Math.max(
     0,
@@ -350,7 +386,10 @@ export function assertMainSessionCacheKeeperProviderIdentity(params: {
         )
     : Number.POSITIVE_INFINITY;
   if (appendedMessageTokenUpperBound > remainingUncachedAllowance) {
-    throw new MainSessionCacheKeeperIdentityMismatchError({ replaySafe: params.replaySafe });
+    throw new MainSessionCacheKeeperIdentityMismatchError({
+      reason: "message-prefix-diverged",
+      replaySafe: params.replaySafe,
+    });
   }
 }
 
@@ -374,7 +413,9 @@ export function assertMainSessionCacheKeeperTranscriptAnchor(params: {
     leaf.type !== "message" ||
     leaf.message?.role !== "user"
   ) {
-    throw new MainSessionCacheKeeperIdentityMismatchError();
+    throw new MainSessionCacheKeeperIdentityMismatchError({
+      reason: "transcript-anchor-changed",
+    });
   }
 }
 

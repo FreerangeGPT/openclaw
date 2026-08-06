@@ -81,6 +81,19 @@ describe("shouldInjectHeartbeatPrompt", () => {
       }),
     ).toBe(false);
   });
+
+  it("keeps cache-guarded main heartbeats on the ordinary system prefix", () => {
+    expect(
+      shouldInjectHeartbeatPrompt({
+        config: {},
+        agentId: "main",
+        defaultAgentId: "main",
+        isDefaultAgent: true,
+        preservePromptCacheIdentity: true,
+        trigger: "heartbeat",
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("mergeOrphanedTrailingUserPrompt", () => {

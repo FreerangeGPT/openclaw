@@ -1,7 +1,8 @@
 import {
   invalidateLivePromptCacheEvidence,
   isMainSessionCacheKeeperIdentityMismatchError,
-  isReplaySafeMainSessionCacheKeeperIdentityMismatch,
+  readMainSessionCacheKeeperMismatch,
+  type MainSessionCacheKeeperMismatchReason,
 } from "../agents/embedded-agent-runner/prompt-cache-evidence.js";
 import { resolveResponsePrefixTemplate } from "../auto-reply/reply/response-prefix-template.js";
 import { HEARTBEAT_TOKEN } from "../auto-reply/tokens.js";
@@ -33,6 +34,38 @@ import { buildOutboundSessionContext } from "./outbound/session-context.js";
 
 const log = heartbeatLog;
 
+function failClosedOnHeartbeatCacheMismatch(params: {
+  accountId?: string;
+  agentId: string;
+  cacheEvidenceId?: string;
+  channel?: string;
+  details?: Record<string, unknown>;
+  durationMs: number;
+  reason: MainSessionCacheKeeperMismatchReason;
+  replaySafe?: boolean;
+  sessionKey: string;
+}): HeartbeatRunResult {
+  const failureReason = `main-session-heartbeat-${params.reason}`;
+  const details = {
+    agentId: params.agentId,
+    sessionKey: params.sessionKey,
+    reason: params.reason,
+    ...(params.replaySafe !== undefined ? { replaySafe: params.replaySafe } : {}),
+    ...(params.cacheEvidenceId ? { cacheEvidenceId: params.cacheEvidenceId } : {}),
+    ...params.details,
+  };
+  log.error(`!!!!! FAILING CLOSED ON HEARTBEAT MISMATCH: ${params.reason}`, details);
+  emitHeartbeatEvent({
+    status: "failed",
+    reason: failureReason,
+    durationMs: params.durationMs,
+    ...(params.channel ? { channel: params.channel } : {}),
+    ...(params.accountId ? { accountId: params.accountId } : {}),
+    indicatorType: resolveIndicatorType("failed"),
+  });
+  return { status: "failed", reason: failureReason };
+}
+
 export async function runHeartbeatOnce(opts: HeartbeatRunOptions): Promise<HeartbeatRunResult> {
   const wake = await resolveHeartbeatWakeStage(opts);
   if (wake.kind === "skipped") {
@@ -41,6 +74,15 @@ export async function runHeartbeatOnce(opts: HeartbeatRunOptions): Promise<Heart
   const prepared = await prepareHeartbeatRunStage(wake);
   if (prepared.kind === "skipped") {
     return { status: "skipped", reason: prepared.reason };
+  }
+  if (prepared.kind === "failed") {
+    return failClosedOnHeartbeatCacheMismatch({
+      agentId: wake.agentId,
+      sessionKey: wake.preflight.session.sessionKey,
+      reason: prepared.reason,
+      details: prepared.details,
+      durationMs: Date.now() - wake.startedAt,
+    });
   }
   const { cfg, agentId, heartbeat, startedAt } = wake;
   const { delivery, visibility, replyPrefix, runSessionKey } = prepared;
@@ -176,12 +218,18 @@ export async function runHeartbeatOnce(opts: HeartbeatRunOptions): Promise<Heart
     ).heartbeatPromptCacheEvidenceId;
     if (cacheEvidenceId && isMainSessionCacheKeeperIdentityMismatchError(err)) {
       invalidateLivePromptCacheEvidence(cacheEvidenceId);
-      if (isReplaySafeMainSessionCacheKeeperIdentityMismatch(err)) {
-        log.info("heartbeat: cache identity changed; rerunning through isolation policy", {
+      const mismatch = readMainSessionCacheKeeperMismatch(err);
+      if (mismatch) {
+        return failClosedOnHeartbeatCacheMismatch({
           agentId,
           sessionKey: runSessionKey,
+          reason: mismatch.reason,
+          replaySafe: mismatch.replaySafe,
+          cacheEvidenceId,
+          durationMs: Date.now() - startedAt,
+          ...(delivery.channel !== "none" ? { channel: delivery.channel } : {}),
+          ...(delivery.accountId ? { accountId: delivery.accountId } : {}),
         });
-        return await runHeartbeatOnce(opts);
       }
     }
     const reason = formatErrorMessage(err);

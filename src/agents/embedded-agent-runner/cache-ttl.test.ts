@@ -28,7 +28,11 @@ vi.mock("../../plugins/provider-runtime.js", async () => {
   };
 });
 
-import { isCacheTtlEligibleProvider, readLastCacheTtlTimestamp } from "./cache-ttl.js";
+import {
+  isCacheTtlEligibleProvider,
+  MAIN_SESSION_CACHE_TOUCH_CUSTOM_TYPE,
+  readLastCacheTtlTimestamp,
+} from "./cache-ttl.js";
 
 describe("isCacheTtlEligibleProvider", () => {
   it("allows anthropic", () => {
@@ -144,5 +148,37 @@ describe("readLastCacheTtlTimestamp", () => {
         modelId: "claude-sonnet-4-5",
       }),
     ).toBeNull();
+  });
+
+  it("advances the pruning clock from a successful out-of-band main cache touch", () => {
+    const sessionManager = {
+      getEntries: () => [
+        {
+          type: "custom",
+          customType: "openclaw.cache-ttl",
+          data: {
+            timestamp: 1_700_000_000_000,
+            provider: "anthropic",
+            modelId: "claude-opus-4-8",
+          },
+        },
+        {
+          type: "custom",
+          customType: MAIN_SESSION_CACHE_TOUCH_CUSTOM_TYPE,
+          data: {
+            timestamp: 1_700_003_000_000,
+            provider: "anthropic",
+            modelId: "claude-opus-4-8",
+          },
+        },
+      ],
+    };
+
+    expect(
+      readLastCacheTtlTimestamp(sessionManager, {
+        provider: "anthropic",
+        modelId: "claude-opus-4-8",
+      }),
+    ).toBe(1_700_003_000_000);
   });
 });

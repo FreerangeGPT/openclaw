@@ -4,13 +4,14 @@ import {
   touchAnthropicPromptCache,
   type AnthropicPromptCacheTouchResult,
 } from "@openclaw/ai/transports";
+import { MAIN_SESSION_CACHE_TOUCH_CUSTOM_TYPE } from "../agents/embedded-agent-runner/cache-ttl.js";
 import { acquireSessionWriteLock } from "../agents/session-write-lock.js";
 import { SessionManager } from "../agents/sessions/index.js";
 import type { Model } from "../llm/types.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 
-export const MAIN_SESSION_CACHE_TOUCH_CUSTOM_TYPE = "openclaw.main-cache-touch";
+export { MAIN_SESSION_CACHE_TOUCH_CUSTOM_TYPE };
 export const MAIN_SESSION_CACHE_TOUCH_INTERVAL_MS = 45 * 60_000;
 export const MAIN_SESSION_CACHE_TOUCH_WATCHDOG_MS = 3 * 60_000;
 export const MAIN_SESSION_CACHE_TOUCH_RETRY_DELAYS_MS = [

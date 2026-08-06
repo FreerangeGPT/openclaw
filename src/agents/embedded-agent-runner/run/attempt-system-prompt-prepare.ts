@@ -206,6 +206,9 @@ export async function prepareEmbeddedAttemptSystemPrompt(params: {
     agentId: params.sessionAgentId,
     defaultAgentId: params.defaultAgentId,
     isDefaultAgent,
+    // The actual heartbeat instructions are the current user turn. Adding a
+    // heartbeat-only system section would invalidate the guarded main prefix.
+    preservePromptCacheIdentity: Boolean(attempt.promptCacheKeeperEvidenceId),
     trigger: attempt.trigger,
     bootstrapContextRunKind: attempt.bootstrapContextRunKind,
   })

@@ -15,6 +15,7 @@ import { isGooglePromptCacheEligible } from "./prompt-cache-retention.js";
 type CustomEntryLike = { type?: unknown; customType?: unknown; data?: unknown };
 
 const CACHE_TTL_CUSTOM_TYPE = "openclaw.cache-ttl";
+export const MAIN_SESSION_CACHE_TOUCH_CUSTOM_TYPE = "openclaw.main-cache-touch";
 
 type CacheTtlEntryData = {
   timestamp: number;
@@ -93,7 +94,11 @@ export function readLastCacheTtlTimestamp(
     let last: number | null = null;
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
-      if (entry?.type !== "custom" || entry?.customType !== CACHE_TTL_CUSTOM_TYPE) {
+      if (
+        entry?.type !== "custom" ||
+        (entry?.customType !== CACHE_TTL_CUSTOM_TYPE &&
+          entry?.customType !== MAIN_SESSION_CACHE_TOUCH_CUSTOM_TYPE)
+      ) {
         continue;
       }
       const data = entry?.data as Partial<CacheTtlEntryData> | undefined;

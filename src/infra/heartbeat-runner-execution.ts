@@ -52,6 +52,7 @@ import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
 import { formatErrorMessage } from "./errors.js";
 import { isWithinActiveHours } from "./heartbeat-active-hours.js";
 import {
+  reportExpensiveMainSessionHeartbeatSkip,
   resolveExpensiveMainSessionHeartbeatSkip,
   resolveHeartbeatCacheKeeperReplyOptions,
   resolveHeartbeatSessionIsolation,
@@ -481,20 +482,18 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
     wakeSource: wake.wakeSource,
     useIsolatedSession,
   });
+  if (expensiveMainSessionSkip?.kind === "failed") {
+    return expensiveMainSessionSkip;
+  }
   if (expensiveMainSessionSkip) {
-    log.warn("heartbeat: skipping large routine main-session run", {
+    return reportExpensiveMainSessionHeartbeatSkip({
       sessionKey,
       agentId,
       cacheRetention: cacheKeeperPolicy.heartbeatCacheRetention,
       heartbeatIntervalMs: cacheKeeperPolicy.heartbeatIntervalMs,
-      ...expensiveMainSessionSkip,
+      skip: expensiveMainSessionSkip,
+      startedAt,
     });
-    emitHeartbeatEvent({
-      status: "skipped",
-      reason: "full-context-heartbeat-guard",
-      durationMs: Date.now() - startedAt,
-    });
-    return { kind: "skipped", reason: "full-context-heartbeat-guard" } as const;
   }
   let runSessionKey = sessionKey;
   let runSessionEntry = entry;
