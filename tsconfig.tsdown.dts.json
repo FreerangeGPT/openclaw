@@ -1,0 +1,32 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "noEmit": false,
+    "noEmitOnError": false,
+    "rootDir": "."
+  },
+  "files": ["src/commitments/runtime.test-support.ts"],
+  "include": ["src/**/*", "packages/**/*", "extensions/**/*"],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/dist/**",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/*.spec.ts",
+    "**/*.spec.tsx",
+    "**/*test-helpers.ts",
+    "**/*test-harness.ts",
+    "**/*test-support.ts",
+    "**/*test-utils.ts",
+    "**/*test-fixtures.ts",
+    "**/*mock-setup.ts",
+    "**/*.fixture.ts",
+    "extensions/**/test/**",
+    "extensions/**/src/test-support/**",
+    "packages/**/test/**",
+    "src/**/test/**",
+    "test/**"
+  ]
+}

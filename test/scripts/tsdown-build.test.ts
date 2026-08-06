@@ -9,6 +9,7 @@ import { resolveWindowsTaskkillPath } from "../../scripts/lib/windows-taskkill.m
 import {
   cleanTsdownOutputRoots,
   createTsdownOutputScanner,
+  isTsdownMemoryFailure,
   listTsdownOutputRoots,
   parseTsdownBuildArgs,
   pruneSourceCheckoutBundledPluginNodeModules,
@@ -17,6 +18,7 @@ import {
   resolveTsdownBuildInvocation,
   resolveTsdownBuildInvocations,
   resolveTsdownCleanOutputRoots,
+  resolveTsdownLowMemoryRetryInvocation,
   runTsdownBuildInvocation,
   signalTsdownBuildProcessTree,
 } from "../../scripts/tsdown-build.mjs";
@@ -26,6 +28,7 @@ const { createTempDir } = createScriptTestHarness();
 const NO_MEMORY_LIMIT = {
   cgroupMemoryLimitPaths: [],
   procMeminfoPath: "/openclaw-test-missing-proc-meminfo",
+  totalMemoryBytes: null,
 };
 
 function expectedTaskkillPath(): string {
@@ -349,7 +352,7 @@ describe("resolveTsdownBuildInvocation", () => {
       cgroupMemoryLimitBytes: 7 * 1024 * 1024 * 1024,
     });
 
-    expect(result.options.env.NODE_OPTIONS).toBe("--max-old-space-size=6400");
+    expect(result.options.env.NODE_OPTIONS).toBe("--max-old-space-size=4778");
   });
 
   it("clamps explicit tsdown heap settings to the container memory limit", () => {
@@ -360,7 +363,7 @@ describe("resolveTsdownBuildInvocation", () => {
       cgroupMemoryLimitBytes: 7 * 1024 * 1024 * 1024,
     });
 
-    expect(result.options.env.NODE_OPTIONS).toBe("--trace-warnings --max-old-space-size=6400");
+    expect(result.options.env.NODE_OPTIONS).toBe("--trace-warnings --max-old-space-size=4778");
   });
 
   it("honors OPENCLAW_TSDOWN_MAX_OLD_SPACE_MB over platform and memory defaults", () => {
@@ -374,6 +377,29 @@ describe("resolveTsdownBuildInvocation", () => {
     expect(result.options.env.NODE_OPTIONS).toBe("--max-old-space-size=3072");
   });
 
+  it("does not let a heap override exceed or bypass detected memory", () => {
+    const bounded = resolveTsdownBuildInvocation({
+      args: ["--config", "tsdown.config.ts", "--filter", "openclaw-unified"],
+      nodeExecPath: "/usr/bin/node",
+      npmExecPath: "/tmp/pnpm.cjs",
+      env: { OPENCLAW_TSDOWN_MAX_OLD_SPACE_MB: "12288" },
+      cgroupMemoryLimitBytes: 7 * 1024 * 1024 * 1024,
+      procMemTotalBytes: 32 * 1024 * 1024 * 1024,
+    });
+    expect(bounded.options.env.NODE_OPTIONS).toBe("--max-old-space-size=4778");
+
+    expect(() =>
+      resolveTsdownBuildInvocation({
+        args: ["--config", "tsdown.config.ts", "--filter", "openclaw-unified"],
+        nodeExecPath: "/usr/bin/node",
+        npmExecPath: "/tmp/pnpm.cjs",
+        env: { OPENCLAW_TSDOWN_MAX_OLD_SPACE_MB: "4096" },
+        cgroupMemoryLimitBytes: 5 * 1024 * 1024 * 1024,
+        procMemTotalBytes: 32 * 1024 * 1024 * 1024,
+      }),
+    ).toThrow("declaration builds require at least 6 GiB");
+  });
+
   it("keeps memory detection when OPENCLAW_TSDOWN_MAX_OLD_SPACE_MB is blank", () => {
     const result = resolveTsdownBuildInvocation({
       nodeExecPath: "/usr/bin/node",
@@ -382,7 +408,253 @@ describe("resolveTsdownBuildInvocation", () => {
       cgroupMemoryLimitBytes: 7 * 1024 * 1024 * 1024,
     });
 
-    expect(result.options.env.NODE_OPTIONS).toBe("--max-old-space-size=6400");
+    expect(result.options.env.NODE_OPTIONS).toBe("--max-old-space-size=4778");
+  });
+
+  it("uses the tighter of physical RAM and a finite cgroup limit", () => {
+    expect(() =>
+      resolveTsdownBuildInvocation({
+        args: ["--config", "tsdown.config.ts", "--filter", "openclaw-unified"],
+        nodeExecPath: "/usr/bin/node",
+        npmExecPath: "/tmp/pnpm.cjs",
+        env: {},
+        cgroupMemoryLimitBytes: 8 * 1024 * 1024 * 1024,
+        procMemTotalBytes: 5 * 1024 * 1024 * 1024,
+      }),
+    ).toThrow("detected 5120 MiB");
+
+    const runtimeOnly = resolveTsdownBuildInvocation({
+      args: ["--config", "tsdown.config.ts", "--filter", "openclaw-unified", "--no-dts"],
+      nodeExecPath: "/usr/bin/node",
+      npmExecPath: "/tmp/pnpm.cjs",
+      env: {},
+      cgroupMemoryLimitBytes: 8 * 1024 * 1024 * 1024,
+      procMemTotalBytes: 7 * 1024 * 1024 * 1024,
+    });
+    expect(runtimeOnly.options.env.NODE_OPTIONS).toBe("--max-old-space-size=4778");
+  });
+
+  it("falls back to portable host RAM when proc meminfo is unavailable", () => {
+    expect(() =>
+      resolveTsdownBuildInvocation({
+        args: ["--config", "tsdown.config.ts", "--filter", "openclaw-unified"],
+        nodeExecPath: "/usr/bin/node",
+        npmExecPath: "/tmp/pnpm.cjs",
+        env: {},
+        cgroupMemoryLimitPaths: [],
+        procMeminfoPath: "/test/missing-meminfo",
+        totalMemoryBytes: 5 * 1024 * 1024 * 1024,
+      }),
+    ).toThrow("detected 5120 MiB");
+  });
+
+  it("uses native declaration emission for the unified graph on bounded-memory hosts", () => {
+    const result = resolveTsdownBuildInvocation({
+      args: ["--config", "tsdown.config.ts", "--filter", "openclaw-unified"],
+      nodeExecPath: "/usr/bin/node",
+      npmExecPath: "/tmp/pnpm.cjs",
+      env: {},
+      cgroupMemoryLimitBytes: 12 * 1024 * 1024 * 1024,
+    });
+
+    expect(result.args).toEqual(
+      expect.arrayContaining(["--config", "tsdown.low-memory.config.ts"]),
+    );
+    expect(result.options.env.NODE_OPTIONS).toBe("--max-old-space-size=8192");
+    expect(result.options.env.GOMEMLIMIT).toBe("7168MiB");
+  });
+
+  it("preserves an operator-supplied Go memory limit in bounded-memory mode", () => {
+    const result = resolveTsdownBuildInvocation({
+      args: ["--config", "tsdown.config.ts", "--filter", "openclaw-unified"],
+      nodeExecPath: "/usr/bin/node",
+      npmExecPath: "/tmp/pnpm.cjs",
+      env: { GOMEMLIMIT: "6GiB" },
+      cgroupMemoryLimitBytes: 12 * 1024 * 1024 * 1024,
+    });
+
+    expect(result.options.env.GOMEMLIMIT).toBe("6GiB");
+
+    for (const requestedLimit of ["100GiB", "off", "invalid"]) {
+      const clamped = resolveTsdownBuildInvocation({
+        args: ["--config", "tsdown.config.ts", "--filter", "openclaw-unified"],
+        nodeExecPath: "/usr/bin/node",
+        npmExecPath: "/tmp/pnpm.cjs",
+        env: { GOMEMLIMIT: requestedLimit },
+        cgroupMemoryLimitBytes: 12 * 1024 * 1024 * 1024,
+        procMemTotalBytes: 32 * 1024 * 1024 * 1024,
+      });
+      expect(clamped.options.env.GOMEMLIMIT).toBe("7168MiB");
+    }
+  });
+
+  it("does not rewrite an explicitly selected custom config", () => {
+    const result = resolveTsdownBuildInvocation({
+      args: ["--config", "custom.tsdown.config.ts", "--filter", "openclaw-unified"],
+      nodeExecPath: "/usr/bin/node",
+      npmExecPath: "/tmp/pnpm.cjs",
+      env: {},
+      cgroupMemoryLimitBytes: 12 * 1024 * 1024 * 1024,
+    });
+
+    expect(result.args).toEqual(expect.arrayContaining(["--config", "custom.tsdown.config.ts"]));
+    expect(result.options.env.GOMEMLIMIT).toBeUndefined();
+  });
+
+  it("keeps the built-in low-memory config inside the same floor and Go budget", () => {
+    const result = resolveTsdownBuildInvocation({
+      args: ["--config", "tsdown.low-memory.config.ts", "--filter", "openclaw-unified"],
+      nodeExecPath: "/usr/bin/node",
+      npmExecPath: "/tmp/pnpm.cjs",
+      env: {},
+      cgroupMemoryLimitBytes: 12 * 1024 * 1024 * 1024,
+      procMemTotalBytes: 32 * 1024 * 1024 * 1024,
+    });
+
+    expect(result.args).toEqual(
+      expect.arrayContaining(["--config", "tsdown.low-memory.config.ts"]),
+    );
+    expect(result.options.env.GOMEMLIMIT).toBe("7168MiB");
+    expect(() =>
+      resolveTsdownBuildInvocation({
+        args: ["--config", "tsdown.low-memory.config.ts", "--filter", "openclaw-unified"],
+        nodeExecPath: "/usr/bin/node",
+        npmExecPath: "/tmp/pnpm.cjs",
+        env: {},
+        cgroupMemoryLimitBytes: 5 * 1024 * 1024 * 1024,
+        procMemTotalBytes: 32 * 1024 * 1024 * 1024,
+      }),
+    ).toThrow("declaration builds require at least 6 GiB");
+  });
+
+  it("keeps no-DTS unified builds on the canonical runtime config", () => {
+    const result = resolveTsdownBuildInvocation({
+      args: ["--config", "tsdown.config.ts", "--filter", "openclaw-unified", "--no-dts"],
+      nodeExecPath: "/usr/bin/node",
+      npmExecPath: "/tmp/pnpm.cjs",
+      env: {},
+      cgroupMemoryLimitBytes: 12 * 1024 * 1024 * 1024,
+    });
+
+    expect(result.args).toEqual(expect.arrayContaining(["--config", "tsdown.config.ts"]));
+    expect(result.options.env.GOMEMLIMIT).toBeUndefined();
+  });
+
+  it("fails clearly below the measured declaration-build memory floor", () => {
+    expect(() =>
+      resolveTsdownBuildInvocation({
+        args: ["--config", "tsdown.config.ts", "--filter", "openclaw-unified"],
+        nodeExecPath: "/usr/bin/node",
+        npmExecPath: "/tmp/pnpm.cjs",
+        env: {},
+        cgroupMemoryLimitBytes: 2 * 1024 * 1024 * 1024,
+      }),
+    ).toThrow("declaration builds require at least 6 GiB");
+  });
+
+  it("keeps runtime-only heaps inside tiny effective memory limits", () => {
+    const result = resolveTsdownBuildInvocation({
+      args: ["--config", "tsdown.config.ts", "--filter", "openclaw-unified", "--no-dts"],
+      nodeExecPath: "/usr/bin/node",
+      npmExecPath: "/tmp/pnpm.cjs",
+      env: {},
+      cgroupMemoryLimitBytes: 256 * 1024 * 1024,
+    });
+
+    expect(result.options.env.NODE_OPTIONS).toBe("--max-old-space-size=170");
+    expect(result.options.env.GOMEMLIMIT).toBeUndefined();
+
+    const twoGiB = resolveTsdownBuildInvocation({
+      args: ["--config", "tsdown.config.ts", "--filter", "openclaw-unified", "--no-dts"],
+      nodeExecPath: "/usr/bin/node",
+      npmExecPath: "/tmp/pnpm.cjs",
+      env: {},
+      cgroupMemoryLimitBytes: 2 * 1024 * 1024 * 1024,
+      procMemTotalBytes: 32 * 1024 * 1024 * 1024,
+    });
+    expect(twoGiB.options.env.NODE_OPTIONS).toBe("--max-old-space-size=1365");
+  });
+
+  it("keeps the standard declaration backend when enough heap is available", () => {
+    const result = resolveTsdownBuildInvocation({
+      args: ["--config", "tsdown.config.ts", "--filter", "openclaw-unified"],
+      nodeExecPath: "/usr/bin/node",
+      npmExecPath: "/tmp/pnpm.cjs",
+      env: {},
+      cgroupMemoryLimitBytes: 32 * 1024 * 1024 * 1024,
+    });
+
+    expect(result.args).toEqual(expect.arrayContaining(["--config", "tsdown.config.ts"]));
+    expect(result.options.env.GOMEMLIMIT).toBeUndefined();
+  });
+
+  it("uses an exact 11 GiB heap boundary for the standard declaration backend", () => {
+    const below = resolveTsdownBuildInvocation({
+      args: ["--config", "tsdown.config.ts", "--filter", "openclaw-unified"],
+      nodeExecPath: "/usr/bin/node",
+      npmExecPath: "/tmp/pnpm.cjs",
+      env: { OPENCLAW_TSDOWN_MAX_OLD_SPACE_MB: String(11 * 1024 - 1) },
+      ...NO_MEMORY_LIMIT,
+    });
+    const atBoundary = resolveTsdownBuildInvocation({
+      args: ["--config", "tsdown.config.ts", "--filter", "openclaw-unified"],
+      nodeExecPath: "/usr/bin/node",
+      npmExecPath: "/tmp/pnpm.cjs",
+      env: { OPENCLAW_TSDOWN_MAX_OLD_SPACE_MB: String(11 * 1024) },
+      ...NO_MEMORY_LIMIT,
+    });
+
+    expect(below.args).toEqual(expect.arrayContaining(["--config", "tsdown.low-memory.config.ts"]));
+    expect(atBoundary.args).toEqual(expect.arrayContaining(["--config", "tsdown.config.ts"]));
+  });
+
+  it("prepares one bounded-memory retry for unified declaration OOMs", () => {
+    const invocation = resolveTsdownBuildInvocation({
+      args: ["--config", "tsdown.config.ts", "--filter", "openclaw-unified"],
+      nodeExecPath: "/usr/bin/node",
+      npmExecPath: "/tmp/pnpm.cjs",
+      env: {},
+      cgroupMemoryLimitBytes: 32 * 1024 * 1024 * 1024,
+    });
+
+    const retry = resolveTsdownLowMemoryRetryInvocation(invocation);
+    expect(retry?.args).toEqual(
+      expect.arrayContaining(["--config", "tsdown.low-memory.config.ts"]),
+    );
+    expect(retry?.options.env.GOMEMLIMIT).toBe("11264MiB");
+    expect(resolveTsdownLowMemoryRetryInvocation(retry)).toBeNull();
+  });
+
+  it("recognizes memory failures without retrying ordinary errors or timeouts", () => {
+    expect(isTsdownMemoryFailure({ oomKilled: true, signal: "SIGKILL" })).toBe(true);
+    expect(isTsdownMemoryFailure({ oomKilled: true, signal: null, status: 0 })).toBe(false);
+    expect(
+      isTsdownMemoryFailure({
+        captured: "syntax error",
+        oomKilled: true,
+        signal: null,
+        status: 1,
+      }),
+    ).toBe(false);
+    expect(
+      isTsdownMemoryFailure({
+        captured: "FATAL ERROR: Reached heap limit Allocation failed",
+        signal: null,
+        timedOut: false,
+      }),
+    ).toBe(true);
+    expect(
+      isTsdownMemoryFailure({
+        captured: "memory allocation of 1048576 bytes failed",
+        signal: "SIGABRT",
+        status: null,
+      }),
+    ).toBe(true);
+    expect(isTsdownMemoryFailure({ signal: "SIGABRT", captured: "assertion failed" })).toBe(false);
+    expect(isTsdownMemoryFailure({ signal: "SIGKILL", status: null })).toBe(false);
+    expect(isTsdownMemoryFailure({ signal: null, status: 137 })).toBe(false);
+    expect(isTsdownMemoryFailure({ captured: "syntax error", signal: null })).toBe(false);
+    expect(isTsdownMemoryFailure({ signal: "SIGKILL", timedOut: true })).toBe(false);
   });
 
   it("uses OPENCLAW_TSDOWN_MAX_OLD_SPACE_MB to normalize inherited NODE_OPTIONS", () => {
@@ -434,7 +706,77 @@ describe("resolveTsdownBuildInvocation", () => {
       procMeminfoPath: "/test/meminfo",
     });
 
-    expect(result.options.env.NODE_OPTIONS).toBe("--max-old-space-size=6400");
+    expect(result.options.env.NODE_OPTIONS).toBe("--max-old-space-size=4778");
+  });
+
+  it("uses the tightest parent limit for a nested cgroup v2 build", () => {
+    const cgroupRoot = "/test/cgroup";
+    const fsMock = {
+      readFileSync: vi.fn((filePath: string) => {
+        const values = new Map([
+          ["/test/proc-self-cgroup", "0::/build.slice/worker.scope\n"],
+          [`${cgroupRoot}/build.slice/worker.scope/memory.max`, "max\n"],
+          [`${cgroupRoot}/build.slice/memory.max`, `${12 * 1024 * 1024 * 1024}\n`],
+          [`${cgroupRoot}/memory.max`, "max\n"],
+        ]);
+        const value = values.get(filePath);
+        if (value === undefined) {
+          throw new Error(`unexpected path ${filePath}`);
+        }
+        return value;
+      }),
+    };
+    const result = resolveTsdownBuildInvocation({
+      args: ["--config", "tsdown.config.ts", "--filter", "openclaw-unified"],
+      nodeExecPath: "/usr/bin/node",
+      npmExecPath: "/tmp/pnpm.cjs",
+      env: {},
+      fs: fsMock,
+      procSelfCgroupPath: "/test/proc-self-cgroup",
+      cgroupV2Root: cgroupRoot,
+      procMeminfoPath: "/test/missing-meminfo",
+    });
+
+    expect(result.options.env.NODE_OPTIONS).toBe("--max-old-space-size=8192");
+    expect(result.args).toEqual(
+      expect.arrayContaining(["--config", "tsdown.low-memory.config.ts"]),
+    );
+  });
+
+  it("uses the tightest parent limit for a nested cgroup v1 build", () => {
+    const cgroupRoot = "/test/cgroup/memory";
+    const fsMock = {
+      readFileSync: vi.fn((filePath: string) => {
+        const values = new Map([
+          [
+            "/test/proc-self-cgroup",
+            "8:cpu,cpuacct:/docker/worker\n7:memory:/build.slice/worker.scope\n",
+          ],
+          [`${cgroupRoot}/build.slice/worker.scope/memory.limit_in_bytes`, "max\n"],
+          [`${cgroupRoot}/build.slice/memory.limit_in_bytes`, `${5 * 1024 * 1024 * 1024}\n`],
+          [`${cgroupRoot}/memory.limit_in_bytes`, "9223372036854771712\n"],
+        ]);
+        const value = values.get(filePath);
+        if (value === undefined) {
+          throw new Error(`unexpected path ${filePath}`);
+        }
+        return value;
+      }),
+    };
+
+    expect(() =>
+      resolveTsdownBuildInvocation({
+        args: ["--config", "tsdown.config.ts", "--filter", "openclaw-unified"],
+        nodeExecPath: "/usr/bin/node",
+        npmExecPath: "/tmp/pnpm.cjs",
+        env: {},
+        fs: fsMock,
+        procSelfCgroupPath: "/test/proc-self-cgroup",
+        cgroupV1MemoryRoot: cgroupRoot,
+        procMeminfoPath: "/test/missing-meminfo",
+        totalMemoryBytes: 32 * 1024 * 1024 * 1024,
+      }),
+    ).toThrow("detected 5120 MiB");
   });
 
   it("can run tsdown without invoking pnpm", () => {
@@ -486,6 +828,14 @@ describe("resolveTsdownBuildInvocation", () => {
       "dist",
       "dist-runtime",
     ]);
+    expect(
+      resolveTsdownCleanOutputRoots([
+        "--config",
+        "tsdown.low-memory.config.ts",
+        "--filter",
+        "openclaw-unified",
+      ]),
+    ).toEqual(["dist", "dist-runtime"]);
     expect(
       resolveTsdownCleanOutputRoots([
         "--config",
@@ -802,6 +1152,38 @@ describe("runTsdownBuildInvocation", () => {
     expect(result.status).toBe(0);
     expect(result.hasIneffectiveDynamicImport).toBe(true);
     expect(output.chunks.join("")).toContain("stdout-ok");
+  });
+
+  it("records a positive kernel OOM counter change for retry classification", async () => {
+    const snapshots = [
+      new Map([
+        ["/sys/fs/cgroup/leaf/memory.events", 0],
+        ["/sys/fs/cgroup/parent/memory.events", 4],
+      ]),
+      new Map([
+        ["/sys/fs/cgroup/leaf/memory.events", 0],
+        ["/sys/fs/cgroup/parent/memory.events", 5],
+      ]),
+    ];
+    const result = await runTsdownBuildInvocation(
+      {
+        command: process.execPath,
+        args: ["-e", "process.exit(137)"],
+        options: {
+          stdio: ["ignore", "pipe", "pipe"],
+          shell: false,
+          env: process.env,
+        },
+      },
+      {
+        env: { ...process.env, OPENCLAW_TSDOWN_HEARTBEAT_MS: "0" },
+        readOomKillCounters: () => snapshots.shift() ?? new Map(),
+      },
+    );
+
+    expect(result.status).toBe(137);
+    expect(result.oomKilled).toBe(true);
+    expect(isTsdownMemoryFailure(result)).toBe(true);
   });
 
   it("rejects malformed OPENCLAW_TSDOWN_TIMEOUT_MS values", async () => {

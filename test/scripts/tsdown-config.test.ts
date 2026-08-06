@@ -6,6 +6,7 @@ import {
   TSDOWN_UNIFIED_CONFIG_GROUP,
 } from "../../scripts/lib/tsdown-config-groups.mjs";
 import config from "../../tsdown.config.ts";
+import lowMemoryConfig from "../../tsdown.low-memory.config.ts";
 
 const configs = Array.isArray(config) ? config : [config];
 
@@ -31,6 +32,18 @@ describe("tsdown config", () => {
       configs.slice(0, -1).map(() => TSDOWN_PACKAGE_CONFIG_GROUP),
     );
     expect(configs.at(-1)?.name).toBe(TSDOWN_UNIFIED_CONFIG_GROUP);
+  });
+
+  it("keeps runtime grouping while moving only unified declaration emission to tsgo", () => {
+    const lowMemoryConfigs = Array.isArray(lowMemoryConfig) ? lowMemoryConfig : [lowMemoryConfig];
+    expect(lowMemoryConfigs.slice(0, -1).map((entry) => entry.dts)).toEqual(
+      lowMemoryConfigs.slice(0, -1).map(() => true),
+    );
+    expect(lowMemoryConfigs.at(-1)?.name).toBe(TSDOWN_UNIFIED_CONFIG_GROUP);
+    expect(lowMemoryConfigs.at(-1)?.dts).toEqual({
+      tsconfig: "tsconfig.tsdown.dts.json",
+      tsgo: true,
+    });
   });
 
   it("keeps node package artifacts on the declared js and dts extensions", () => {

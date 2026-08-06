@@ -44,6 +44,8 @@ const TSDOWN_DECLARATION_TOOL_INPUTS = [
   "package.json",
   "pnpm-lock.yaml",
   "tsconfig.json",
+  "tsconfig.tsdown.dts.json",
+  "tsdown.low-memory.config.ts",
   "scripts/tsdown-build.mjs",
   "scripts/lib/bundled-plugin-build-entries.mjs",
   "scripts/lib/bundled-plugin-paths.mjs",

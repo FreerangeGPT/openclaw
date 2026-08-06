@@ -4,6 +4,7 @@
 // child-process diagnostics.
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { BUNDLED_PLUGIN_PATH_PREFIX } from "./lib/bundled-plugin-paths.mjs";
@@ -34,13 +35,25 @@ const DEFAULT_HEARTBEAT_MS = 30_000;
 const DEFAULT_TSDOWN_MAX_OLD_SPACE_MB = 12288;
 const DEFAULT_WINDOWS_TSDOWN_MAX_OLD_SPACE_MB = 8192;
 const TSDOWN_MAX_OLD_SPACE_MB_ENV = "OPENCLAW_TSDOWN_MAX_OLD_SPACE_MB";
-const MIN_TSDOWN_MAX_OLD_SPACE_MB = 2048;
-const TSDOWN_CGROUP_MEMORY_HEADROOM_MB = 768;
+// The full declaration pipeline passes at 6 GiB without swap; the package and
+// unified graphs both fail under the next-lower 5 GiB tier.
+const MIN_DECLARATION_BUILD_MEMORY_MB = 6 * 1024;
+const MIN_TSDOWN_MEMORY_HEADROOM_MB = 2048;
+const TSDOWN_MEMORY_HEADROOM_DIVISOR = 3;
+const TSGO_RESIDENT_NODE_HEADROOM_MB = 1024;
+// The standard TypeScript declaration graph currently peaks just below 11 GiB.
+// Below this heap budget, skip directly to tsgo so the OS can keep the build alive.
+const STANDARD_DTS_MIN_HEAP_MB = 11 * 1024;
+const LOW_MEMORY_TSDOWN_CONFIG_PATH = "tsdown.low-memory.config.ts";
 const CGROUP_MEMORY_LIMIT_PATHS = [
   "/sys/fs/cgroup/memory.max",
   "/sys/fs/cgroup/memory/memory.limit_in_bytes",
 ];
+const CGROUP_V2_ROOT = "/sys/fs/cgroup";
+const CGROUP_V1_MEMORY_ROOT = "/sys/fs/cgroup/memory";
+const PROC_SELF_CGROUP_PATH = "/proc/self/cgroup";
 const PROC_MEMINFO_PATH = "/proc/meminfo";
+const PROC_VMSTAT_PATH = "/proc/vmstat";
 // Build descendants get a short cleanup window; a timed-out build must not hold CI for seconds.
 const TERMINATION_GRACE_MS = 250;
 const PROCESS_GROUP_EXIT_POLL_MS = 25;
@@ -52,6 +65,18 @@ const GENERATED_SOURCE_DECLARATION_PATHSPEC = ":(glob)extensions/**/*.d.ts";
 const DECLARATION_EXTENSIONS = [".d.ts", ".d.mts", ".d.cts"];
 const SOURCE_DECLARATION_SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs"];
 const RUN_NODE_SKIP_DTS_BUILD_ENV = "OPENCLAW_RUN_NODE_SKIP_DTS_BUILD";
+
+function declarationsEnabled(args, env) {
+  let enabled = env[RUN_NODE_SKIP_DTS_BUILD_ENV] !== "1";
+  for (const arg of args) {
+    if (arg === "--dts") {
+      enabled = true;
+    } else if (arg === "--no-dts") {
+      enabled = false;
+    }
+  }
+  return enabled;
+}
 
 function removeDistPluginNodeModulesSymlinks(rootDir) {
   const extensionsDir = path.join(rootDir, "extensions");
@@ -252,13 +277,14 @@ export function resolveTsdownCleanOutputRoots(args = []) {
   const configPath = config ? path.resolve(config) : undefined;
   const aiConfigPath = path.resolve("tsdown.ai.config.ts");
   const mainConfigPath = path.resolve("tsdown.config.ts");
+  const lowMemoryConfigPath = path.resolve(LOW_MEMORY_TSDOWN_CONFIG_PATH);
   const aiRoot = tsdownPackageOutputRoot("ai");
   const packageRoots = TSDOWN_PACKAGE_OUTPUT_ROOTS.filter((root) => root !== aiRoot);
 
   if (configPath === aiConfigPath) {
     return [aiRoot];
   }
-  if (configPath === mainConfigPath) {
+  if (configPath === mainConfigPath || configPath === lowMemoryConfigPath) {
     if (filter === TSDOWN_PACKAGE_CONFIG_GROUP) {
       return packageRoots;
     }
@@ -401,19 +427,137 @@ function readCgroupMemoryLimitBytes(params = {}) {
   }
 
   const fsImpl = params.fs ?? fs;
-  const paths = params.cgroupMemoryLimitPaths ?? CGROUP_MEMORY_LIMIT_PATHS;
+  const paths = params.cgroupMemoryLimitPaths ?? [
+    ...listCurrentCgroupV2MemoryLimitPaths({ ...params, fs: fsImpl }),
+    ...listCurrentCgroupV1MemoryLimitPaths({ ...params, fs: fsImpl }),
+    ...CGROUP_MEMORY_LIMIT_PATHS,
+  ];
+  let smallestLimitBytes = null;
   for (const limitPath of paths) {
     try {
       const limitBytes = parseCgroupMemoryLimitBytes(fsImpl.readFileSync(limitPath, "utf8"));
       if (limitBytes !== null) {
-        return limitBytes;
+        smallestLimitBytes =
+          smallestLimitBytes === null ? limitBytes : Math.min(smallestLimitBytes, limitBytes);
       }
     } catch {
       // Missing cgroup files are expected outside Linux containers.
     }
   }
 
-  return null;
+  return smallestLimitBytes;
+}
+
+function listCgroupAncestorFilePaths(rootPath, cgroupPath, fileName) {
+  if (!cgroupPath?.startsWith("/")) {
+    return [];
+  }
+  const root = path.resolve(rootPath);
+  let current = path.resolve(root, `.${cgroupPath}`);
+  if (current !== root && !current.startsWith(`${root}${path.sep}`)) {
+    return [];
+  }
+
+  const paths = [];
+  while (true) {
+    paths.push(path.join(current, fileName));
+    if (current === root) {
+      return paths;
+    }
+    current = path.dirname(current);
+  }
+}
+
+function readSelfCgroupText(params = {}) {
+  try {
+    return (params.fs ?? fs).readFileSync(
+      params.procSelfCgroupPath ?? PROC_SELF_CGROUP_PATH,
+      "utf8",
+    );
+  } catch {
+    return null;
+  }
+}
+
+function listCurrentCgroupV2MemoryLimitPaths(params = {}) {
+  const cgroupPath = readSelfCgroupText(params)
+    ?.split(/\r?\n/u)
+    .find((line) => line.startsWith("0::"))
+    ?.slice("0::".length);
+  return listCgroupAncestorFilePaths(
+    params.cgroupV2Root ?? CGROUP_V2_ROOT,
+    cgroupPath,
+    "memory.max",
+  );
+}
+
+function listCurrentCgroupV1MemoryLimitPaths(params = {}) {
+  const cgroupLine = readSelfCgroupText(params)
+    ?.split(/\r?\n/u)
+    .find((line) => line.split(":", 3)[1]?.split(",").includes("memory"));
+  const cgroupPath = cgroupLine?.split(":", 3)[2];
+  return listCgroupAncestorFilePaths(
+    params.cgroupV1MemoryRoot ?? CGROUP_V1_MEMORY_ROOT,
+    cgroupPath,
+    "memory.limit_in_bytes",
+  );
+}
+
+function parseOomKillCount(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const match = value.match(/^oom_kill\s+(\d+)$/imu);
+  if (!match) {
+    return null;
+  }
+  const count = Number(match[1]);
+  return Number.isSafeInteger(count) ? count : null;
+}
+
+function readOomKillCounters(params = {}) {
+  const fsImpl = params.fs ?? fs;
+  const cgroupPaths = params.oomKillCounterPaths ?? [
+    ...listCurrentCgroupV2MemoryLimitPaths({ ...params, fs: fsImpl }).map((limitPath) =>
+      path.join(path.dirname(limitPath), "memory.events"),
+    ),
+    ...listCurrentCgroupV1MemoryLimitPaths({ ...params, fs: fsImpl }).map((limitPath) =>
+      path.join(path.dirname(limitPath), "memory.oom_control"),
+    ),
+  ];
+  const counters = new Map();
+  for (const counterPath of cgroupPaths) {
+    try {
+      const count = parseOomKillCount(fsImpl.readFileSync(counterPath, "utf8"));
+      if (count !== null) {
+        // A parent can own the effective limit even when the leaf is readable.
+        // Keep the full path; retry classification also requires SIGKILL evidence.
+        counters.set(counterPath, count);
+      }
+    } catch {
+      // OOM counters are optional outside Linux and restricted containers.
+    }
+  }
+  if (counters.size > 0) {
+    return counters;
+  }
+  const procVmstatPath = params.procVmstatPath ?? PROC_VMSTAT_PATH;
+  try {
+    const count = parseOomKillCount(fsImpl.readFileSync(procVmstatPath, "utf8"));
+    return count === null ? new Map() : new Map([[procVmstatPath, count]]);
+  } catch {
+    return new Map();
+  }
+}
+
+function didOomKillCounterIncrease(before, after) {
+  for (const [counterPath, previousCount] of before) {
+    const currentCount = after.get(counterPath);
+    if (currentCount !== undefined && currentCount > previousCount) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function parseProcMemTotalBytes(value) {
@@ -446,6 +590,22 @@ function readProcMemTotalBytes(params = {}) {
   }
 }
 
+function readPortableHostTotalBytes(params = {}) {
+  if (Object.hasOwn(params, "totalMemoryBytes")) {
+    return Number.isFinite(params.totalMemoryBytes) && params.totalMemoryBytes > 0
+      ? Math.trunc(params.totalMemoryBytes)
+      : null;
+  }
+  const totalBytes = os.totalmem();
+  return Number.isFinite(totalBytes) && totalBytes > 0 ? Math.trunc(totalBytes) : null;
+}
+
+function readEffectiveMemoryLimitBytes(params = {}) {
+  const hostLimit = readProcMemTotalBytes(params) ?? readPortableHostTotalBytes(params);
+  const limits = [readCgroupMemoryLimitBytes(params), hostLimit].filter((limit) => limit !== null);
+  return limits.length === 0 ? null : Math.min(...limits);
+}
+
 function resolveTsdownMaxOldSpaceMb(params = {}) {
   const defaultMaxOldSpaceMb =
     (params.platform ?? process.platform) === "win32"
@@ -455,13 +615,9 @@ function resolveTsdownMaxOldSpaceMb(params = {}) {
     (params.env ?? process.env)[TSDOWN_MAX_OLD_SPACE_MB_ENV],
     TSDOWN_MAX_OLD_SPACE_MB_ENV,
   );
-  if (envOverride !== null) {
-    return envOverride;
-  }
-
-  const limitBytes = readCgroupMemoryLimitBytes(params) ?? readProcMemTotalBytes(params);
+  const limitBytes = readEffectiveMemoryLimitBytes(params);
   if (limitBytes === null) {
-    return defaultMaxOldSpaceMb;
+    return envOverride ?? defaultMaxOldSpaceMb;
   }
 
   const limitMb = Math.floor(limitBytes / 1024 / 1024);
@@ -469,11 +625,130 @@ function resolveTsdownMaxOldSpaceMb(params = {}) {
     return defaultMaxOldSpaceMb;
   }
 
-  const cgroupCap = Math.max(
-    MIN_TSDOWN_MAX_OLD_SPACE_MB,
-    limitMb - TSDOWN_CGROUP_MEMORY_HEADROOM_MB,
+  // V8's old-space limit excludes Rolldown's native allocations, page tables,
+  // and the rest of the host. Keep proportional headroom so a failed fast DTS
+  // attempt reaches its bounded fallback instead of invoking the kernel OOM killer.
+  const proportionalHeadroomMb = Math.ceil(limitMb / TSDOWN_MEMORY_HEADROOM_DIVISOR);
+  const headroomMb =
+    limitMb < MIN_DECLARATION_BUILD_MEMORY_MB
+      ? proportionalHeadroomMb
+      : Math.max(MIN_TSDOWN_MEMORY_HEADROOM_MB, proportionalHeadroomMb);
+  const cgroupCap = Math.max(1, limitMb - Math.min(headroomMb, limitMb - 1));
+  return Math.min(envOverride ?? defaultMaxOldSpaceMb, cgroupCap);
+}
+
+function validateDeclarationBuildMemory(args, env, params = {}) {
+  parsePositiveIntegerEnv(env[TSDOWN_MAX_OLD_SPACE_MB_ENV], TSDOWN_MAX_OLD_SPACE_MB_ENV);
+  if (!declarationsEnabled(args, env) || hasForwardedFlag(args, ["--no-config"])) {
+    return;
+  }
+  const config = readForwardedOption(args, ["--config", "-c"]);
+  if (
+    config &&
+    path.resolve(config) !== path.resolve("tsdown.config.ts") &&
+    path.resolve(config) !== path.resolve(LOW_MEMORY_TSDOWN_CONFIG_PATH)
+  ) {
+    return;
+  }
+  const limitBytes = readEffectiveMemoryLimitBytes(params);
+  if (limitBytes === null) {
+    return;
+  }
+  const limitMb = Math.floor(limitBytes / 1024 / 1024);
+  if (limitMb < MIN_DECLARATION_BUILD_MEMORY_MB) {
+    throw new Error(
+      `OpenClaw declaration builds require at least 6 GiB of effective memory; detected ${limitMb} MiB. Use a larger build host/cgroup or run a runtime-only --no-dts build.`,
+    );
+  }
+}
+
+function readMaxOldSpaceSizeMb(nodeOptions) {
+  const inlineMatch = nodeOptions.match(/(?:^|\s)--max-old-space-size=(\d+)(?:\s|$)/u);
+  if (inlineMatch) {
+    return Number(inlineMatch[1]);
+  }
+  const splitMatch = nodeOptions.match(/(?:^|\s)--max-old-space-size\s+(\d+)(?:\s|$)/u);
+  return splitMatch ? Number(splitMatch[1]) : null;
+}
+
+function hasForwardedFlag(args, names) {
+  return args.some(
+    (arg) => names.includes(arg) || names.some((name) => arg.startsWith(`${name}=`)),
   );
-  return Math.min(defaultMaxOldSpaceMb, cgroupCap);
+}
+
+function isUnifiedMainConfigInvocation(args, env) {
+  if (!declarationsEnabled(args, env)) {
+    return false;
+  }
+  if (readForwardedOption(args, ["--filter", "-F"]) !== TSDOWN_UNIFIED_CONFIG_GROUP) {
+    return false;
+  }
+  if (hasForwardedFlag(args, ["--no-config"])) {
+    return false;
+  }
+  const config = readForwardedOption(args, ["--config", "-c"]);
+  return !config || path.resolve(config) === path.resolve("tsdown.config.ts");
+}
+
+function isExplicitLowMemoryDtsInvocation(args, env) {
+  if (!declarationsEnabled(args, env) || hasForwardedFlag(args, ["--no-config"])) {
+    return false;
+  }
+  const config = readForwardedOption(args, ["--config", "-c"]);
+  return Boolean(config && path.resolve(config) === path.resolve(LOW_MEMORY_TSDOWN_CONFIG_PATH));
+}
+
+function replaceTsdownConfigArg(args, configPath) {
+  const next = [...args];
+  for (let index = 0; index < next.length; index += 1) {
+    const arg = next[index];
+    if (arg === "--config" || arg === "-c") {
+      next[index + 1] = configPath;
+      return next;
+    }
+    if (arg.startsWith("--config=") || arg.startsWith("-c=")) {
+      const name = arg.slice(0, arg.indexOf("="));
+      next[index] = `${name}=${configPath}`;
+      return next;
+    }
+  }
+  next.push("--config", configPath);
+  return next;
+}
+
+function parseGoMemoryLimitBytes(value) {
+  const match = value.trim().match(/^(\d+)(B|KiB|MiB|GiB|TiB)?$/u);
+  if (!match) {
+    return null;
+  }
+  const shifts = { B: 0n, KiB: 10n, MiB: 20n, GiB: 30n, TiB: 40n };
+  return BigInt(match[1]) << shifts[match[2] ?? "B"];
+}
+
+function withLowMemoryDtsEnv(env) {
+  const maxOldSpaceMb = readMaxOldSpaceSizeMb(env.NODE_OPTIONS ?? "");
+  if (!maxOldSpaceMb) {
+    return env;
+  }
+  // rolldown-plugin-dts awaits tsgo before declaration bundling. Keep a further
+  // GiB below V8's ceiling for the resident Node wrapper and native allocations.
+  const goMemoryLimitMb = Math.max(1, maxOldSpaceMb - TSGO_RESIDENT_NODE_HEADROOM_MB);
+  const requestedLimit = env.GOMEMLIMIT?.trim();
+  const requestedLimitBytes = requestedLimit ? parseGoMemoryLimitBytes(requestedLimit) : null;
+  const derivedLimitBytes = BigInt(goMemoryLimitMb) << 20n;
+  if (requestedLimit && requestedLimitBytes !== null && requestedLimitBytes <= derivedLimitBytes) {
+    return { ...env, GOMEMLIMIT: requestedLimit };
+  }
+  return { ...env, GOMEMLIMIT: `${goMemoryLimitMb}MiB` };
+}
+
+function shouldUseLowMemoryDts(args, env) {
+  if (!isUnifiedMainConfigInvocation(args, env)) {
+    return false;
+  }
+  const maxOldSpaceMb = readMaxOldSpaceSizeMb(env.NODE_OPTIONS ?? "");
+  return maxOldSpaceMb !== null && maxOldSpaceMb < STANDARD_DTS_MIN_HEAP_MB;
 }
 
 function parseMaxOldSpaceSizeMb(value, fallbackMb) {
@@ -608,8 +883,16 @@ export function createTsdownOutputScanner(params = {}) {
 }
 
 export function resolveTsdownBuildInvocation(params = {}) {
-  const env = resolveTsdownEnv(params.env ?? process.env, params);
-  const forwardedArgs = params.args ?? [];
+  let forwardedArgs = params.args ?? [];
+  const sourceEnv = params.env ?? process.env;
+  validateDeclarationBuildMemory(forwardedArgs, sourceEnv, params);
+  let env = resolveTsdownEnv(sourceEnv, params);
+  if (shouldUseLowMemoryDts(forwardedArgs, env)) {
+    forwardedArgs = replaceTsdownConfigArg(forwardedArgs, LOW_MEMORY_TSDOWN_CONFIG_PATH);
+    env = withLowMemoryDtsEnv(env);
+  } else if (isExplicitLowMemoryDtsInvocation(forwardedArgs, env)) {
+    env = withLowMemoryDtsEnv(env);
+  }
   const tsdownArgs = [
     "--config-loader",
     "unrun",
@@ -650,11 +933,47 @@ export function resolveTsdownBuildInvocation(params = {}) {
   };
 }
 
+export function isTsdownMemoryFailure(result) {
+  if (result.timedOut) {
+    return false;
+  }
+  if (result.status === 0 && !result.signal) {
+    return false;
+  }
+  const captured = result.captured ?? "";
+  const hasKillOutcome =
+    result.signal === "SIGKILL" ||
+    result.status === 137 ||
+    /(?:SIGKILL|exit (?:code )?137)/iu.test(captured);
+  if (result.oomKilled && hasKillOutcome) {
+    return true;
+  }
+  return /(?:heap out of memory|reached heap limit|allocation failed|memory allocation of \d+ bytes failed)/iu.test(
+    captured,
+  );
+}
+
+export function resolveTsdownLowMemoryRetryInvocation(invocation) {
+  const args = invocation.args ?? [];
+  const env = invocation.options?.env ?? {};
+  if (!isUnifiedMainConfigInvocation(args, env)) {
+    return null;
+  }
+  return {
+    ...invocation,
+    args: replaceTsdownConfigArg(args, LOW_MEMORY_TSDOWN_CONFIG_PATH),
+    options: {
+      ...invocation.options,
+      env: withLowMemoryDtsEnv(env),
+    },
+  };
+}
+
 /** Builds declarations in dependency order without overlapping the largest graphs. */
 export function resolveTsdownBuildInvocations(params = {}) {
   const forwardedArgs = params.args ?? [];
   const env = params.env ?? process.env;
-  let declarationsEnabled = env[RUN_NODE_SKIP_DTS_BUILD_ENV] !== "1";
+  let emitDeclarations = env[RUN_NODE_SKIP_DTS_BUILD_ENV] !== "1";
   let hasForwardedFilter = false;
   let hasForwardedConfig = false;
   const aiArgs = [];
@@ -670,9 +989,9 @@ export function resolveTsdownBuildInvocations(params = {}) {
       continue;
     }
     if (arg === "--dts") {
-      declarationsEnabled = true;
+      emitDeclarations = true;
     } else if (arg === "--no-dts") {
-      declarationsEnabled = false;
+      emitDeclarations = false;
     }
     hasForwardedConfig ||=
       arg === "--config" ||
@@ -694,7 +1013,7 @@ export function resolveTsdownBuildInvocations(params = {}) {
     }),
   ];
 
-  if (!declarationsEnabled || hasForwardedFilter) {
+  if (!emitDeclarations || hasForwardedFilter) {
     invocations.push(resolveTsdownBuildInvocation(params));
     return invocations;
   }
@@ -767,6 +1086,8 @@ export async function runTsdownBuildInvocation(invocation, params = {}) {
   let settled = false;
   let lastOutputAt = Date.now();
   let forceKillAt = null;
+  const readOomCounters = params.readOomKillCounters ?? (() => readOomKillCounters(params));
+  const oomKillCountersBefore = readOomCounters();
 
   const platform = params.platform ?? process.platform;
   const runTaskkill = params.runTaskkill ?? spawnSync;
@@ -911,12 +1232,14 @@ export async function runTsdownBuildInvocation(invocation, params = {}) {
         status: 1,
         signal: null,
         timedOut,
+        oomKilled: false,
         error,
         ...scanner.finish(),
       });
     });
     child.once("close", (status, signal) => {
       function finish() {
+        const oomKilled = didOomKillCounterIncrease(oomKillCountersBefore, readOomCounters());
         settled = true;
         cleanupParentSignalHandlers();
         clearInterval(heartbeat);
@@ -925,6 +1248,7 @@ export async function runTsdownBuildInvocation(invocation, params = {}) {
           status,
           signal,
           timedOut,
+          oomKilled,
           error: null,
           ...scanner.finish(),
         });
@@ -954,15 +1278,41 @@ if (isMainModule()) {
     console.log(tsdownBuildUsage());
     process.exit(0);
   }
+  let invocations;
+  try {
+    invocations = resolveTsdownBuildInvocations({ args: args.forwardedArgs });
+  } catch (error) {
+    console.error(`[tsdown-build] ${error instanceof Error ? error.message : String(error)}`);
+    console.error("[tsdown-build] FAILED (exit 1)");
+    process.exit(1);
+  }
   pruneSourceCheckoutBundledPluginNodeModules();
   pruneUntrackedGeneratedSourceDeclarations();
   pruneStaleRuntimeSymlinks();
   cleanTsdownOutputRoots({ roots: resolveTsdownCleanOutputRoots(args.forwardedArgs) });
-  const invocations = resolveTsdownBuildInvocations({ args: args.forwardedArgs });
   let result;
   for (const [index, invocation] of invocations.entries()) {
     const startedAt = performance.now();
+    if (
+      path.resolve(readForwardedOption(invocation.args, ["--config", "-c"]) ?? "") ===
+      path.resolve(LOW_MEMORY_TSDOWN_CONFIG_PATH)
+    ) {
+      console.error(
+        `[tsdown-build] using bounded-memory declaration backend (${invocation.options.env.GOMEMLIMIT ?? "automatic Go limit"})`,
+      );
+    }
     result = await runTsdownBuildInvocation(invocation);
+    if (isTsdownMemoryFailure(result)) {
+      const retryInvocation = resolveTsdownLowMemoryRetryInvocation(invocation);
+      if (retryInvocation) {
+        console.error(
+          "[tsdown-build] standard declaration build exhausted memory; retrying with the bounded-memory tsgo backend",
+        );
+        pruneStaleRuntimeSymlinks();
+        cleanTsdownOutputRoots({ roots: resolveTsdownCleanOutputRoots(retryInvocation.args) });
+        result = await runTsdownBuildInvocation(retryInvocation);
+      }
+    }
     // Per-invocation timing separates the AI-declarations pass from the main
     // graph in CI logs; the combined step is otherwise a single opaque cost.
     console.log(

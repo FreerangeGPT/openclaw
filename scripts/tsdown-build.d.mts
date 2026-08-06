@@ -1,4 +1,13 @@
 #!/usr/bin/env node
+export type TsdownBuildInvocation = {
+  command: unknown;
+  args: string[];
+  options: {
+    env: NodeJS.ProcessEnv;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+};
 /**
  * Removes build output roots while preserving explicitly protected artifacts.
  */
@@ -46,7 +55,17 @@ export function resolveTsdownBuildInvocation(params?: Record<string, unknown>):
         env: NodeJS.ProcessEnv;
       };
     };
-/** Builds AI package declarations first, then consumes them from the main graph. */
+export function isTsdownMemoryFailure(result: {
+  captured?: string;
+  oomKilled?: boolean;
+  signal?: NodeJS.Signals | null;
+  status?: number | null;
+  timedOut?: boolean;
+}): boolean;
+export function resolveTsdownLowMemoryRetryInvocation(
+  invocation: TsdownBuildInvocation,
+): TsdownBuildInvocation | null;
+/** Builds declarations in dependency order without overlapping the largest graphs. */
 export function resolveTsdownBuildInvocations(params?: Record<string, unknown>): (
   | {
       command: unknown;
@@ -94,6 +113,7 @@ export function runTsdownBuildInvocation(
 ): Promise<{
   captured: string;
   hasIneffectiveDynamicImport: boolean;
+  oomKilled: boolean;
   signal: NodeJS.Signals | null;
   status: number | null;
   timedOut: boolean;
