@@ -36,11 +36,12 @@ Only `toolResult` messages are eligible; normal conversation text is left alone.
 
 OpenClaw also builds a separate idempotent replay view for sessions that persist raw image blocks or prompt-hydration media markers in history.
 
-- It preserves the **3 most recent completed turns** byte-for-byte so prompt cache prefixes for recent follow-ups stay stable. This count includes all completed turns, not just image-bearing ones, so text-only turns consume the window too.
-- In the replay view, older already-processed image blocks from `user` or `toolResult` history are replaced with `[image data removed - already processed by model]`.
+- It preserves image blocks from the **active user turn** through every assistant/tool-result round trip in that turn.
+- After a terminal assistant proves earlier queued input reached the model, the next user turn replaces already-processed image blocks from older `user` or `toolResult` history with `[image data removed - already processed by model]`. Consecutive queued user messages remain intact until that proof exists.
 - Older textual media references such as `[media attached: ...]`, `[Image: source: ...]`, and `media://inbound/...` are replaced with `[media reference removed - already processed by model]`. Current-turn attachment markers stay intact so vision models can still hydrate fresh images.
 - The raw session transcript is not rewritten, so history viewers can still render the original message entries and their images.
-- This is separate from normal cache-TTL pruning above. It exists to stop repeated image payloads or stale media refs from busting prompt caches on later turns.
+- Anthropic-family requests keep a separate cache breakpoint immediately before the first raw image-bearing block. Cache maintenance refreshes that prefix alongside the latest dialogue prefix, so replacing processed image bytes after a long idle can reuse the earlier cached prefix instead of rewriting the full prompt.
+- This is separate from normal cache-TTL pruning above. It stops repeated image payloads and stale media refs from bloating later turns while preserving cache reuse across the cleanup boundary.
 
 ## Smart defaults
 

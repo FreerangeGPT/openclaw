@@ -77,19 +77,10 @@ function expectImageMessagePreserved(messages: AgentMessage[], errorMessage: str
 }
 
 function oldEnoughTail(): AgentMessage[] {
-  // Four assistant turns makes the first message old enough to prune while
-  // keeping each test focused on content rewriting instead of turn counting.
+  // A following user turn proves the earlier media was already available to a
+  // completed model turn, keeping these tests focused on content rewriting.
   const assistantTurn = () => castAgentMessage({ role: "assistant", content: "ack" });
-  const userText = () => castAgentMessage({ role: "user", content: "more" });
-  return [
-    assistantTurn(),
-    userText(),
-    assistantTurn(),
-    userText(),
-    assistantTurn(),
-    userText(),
-    assistantTurn(),
-  ];
+  return [assistantTurn(), castAgentMessage({ role: "user", content: "next turn" })];
 }
 
 describe("pruneProcessedHistoryImages", () => {
@@ -97,7 +88,7 @@ describe("pruneProcessedHistoryImages", () => {
   const assistantTurn = () => castAgentMessage({ role: "assistant", content: "ack" });
   const userText = () => castAgentMessage({ role: "user", content: "more" });
 
-  it("prunes image blocks from user messages older than 3 assistant turns", () => {
+  it("prunes image blocks from user messages before the latest user turn", () => {
     const messages: AgentMessage[] = [
       castAgentMessage({
         role: "user",
@@ -431,7 +422,7 @@ describe("pruneProcessedHistoryImages", () => {
     expect(toolResult?.content).toBe(`previous ${PRUNED_HISTORY_MEDIA_REFERENCE_MARKER} result`);
   });
 
-  it("keeps image blocks that belong to the third-most-recent assistant turn", () => {
+  it("prunes image blocks as soon as the following user turn starts", () => {
     const messages: AgentMessage[] = [
       castAgentMessage({
         role: "user",
@@ -444,10 +435,10 @@ describe("pruneProcessedHistoryImages", () => {
       assistantTurn(),
     ];
 
-    expectImageMessagePreserved(messages, "expected user array content");
+    expectPrunedImageMessage(messages, "expected user array content");
   });
 
-  it("preserves recent media attachment markers", () => {
+  it("preserves media attachment markers until a following user turn starts", () => {
     const messages: AgentMessage[] = [
       castAgentMessage({
         role: "user",
@@ -460,10 +451,6 @@ describe("pruneProcessedHistoryImages", () => {
         ],
       }),
       assistantTurn(),
-      userText(),
-      assistantTurn(),
-      userText(),
-      assistantTurn(),
     ];
 
     const pruned = pruneProcessedHistoryImages(messages);
@@ -474,9 +461,9 @@ describe("pruneProcessedHistoryImages", () => {
     expectContentBlock(content[1], { type: "image", data: "abc" });
   });
 
-  it("does not count multiple assistant messages from one tool loop as separate turns", () => {
-    // Tool-call assistant messages belong to one model turn; counting each
-    // message separately would prune images too aggressively inside tool loops.
+  it("preserves current-turn images across multiple assistant tool calls", () => {
+    // No newer user turn exists, so every tool round trip still belongs to the
+    // image-bearing turn and must retain the raw image for the provider.
     const messages: AgentMessage[] = [
       castAgentMessage({
         role: "user",
@@ -492,11 +479,16 @@ describe("pruneProcessedHistoryImages", () => {
         toolName: "read",
         content: [{ type: "text", text: "bytes" }],
       }),
-      assistantTurn(),
-      userText(),
-      assistantTurn(),
-      userText(),
-      assistantTurn(),
+      castAgentMessage({
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call_2", name: "read", arguments: {} }],
+      } as AgentMessage),
+      castAgentMessage({
+        role: "toolResult",
+        toolCallId: "call_2",
+        toolName: "read",
+        content: [{ type: "text", text: "more bytes" }],
+      }),
     ];
 
     expectImageMessagePreserved(messages, "expected user array content");
@@ -518,7 +510,42 @@ describe("pruneProcessedHistoryImages", () => {
     expectContentBlock(content[1], { type: "image", data: "abc" });
   });
 
-  it("prunes image blocks from toolResult messages older than 3 assistant turns", () => {
+  it("preserves queued user images until a terminal assistant proves they were processed", () => {
+    const messages: AgentMessage[] = [
+      castAgentMessage({
+        role: "user",
+        content: [{ type: "text", text: "queued image" }, { ...image }],
+      }),
+      castAgentMessage({ role: "user", content: "queued follow-up" }),
+    ];
+
+    expectImageMessagePreserved(messages, "expected queued user image content");
+  });
+
+  it("does not treat a tool-use assistant as terminal when another user message is queued", () => {
+    const messages: AgentMessage[] = [
+      castAgentMessage({
+        role: "user",
+        content: [{ type: "text", text: "active image" }, { ...image }],
+      }),
+      castAgentMessage({
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call_1", name: "read", arguments: {} }],
+        stopReason: "toolUse",
+      }),
+      castAgentMessage({
+        role: "toolResult",
+        toolCallId: "call_1",
+        toolName: "read",
+        content: [{ type: "text", text: "bytes" }],
+      }),
+      castAgentMessage({ role: "user", content: "queued follow-up" }),
+    ];
+
+    expectImageMessagePreserved(messages, "expected active tool-loop image content");
+  });
+
+  it("prunes image blocks from toolResult messages before the latest user turn", () => {
     const messages: AgentMessage[] = [
       castAgentMessage({
         role: "toolResult",

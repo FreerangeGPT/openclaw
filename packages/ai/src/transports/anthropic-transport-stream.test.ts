@@ -2022,6 +2022,65 @@ describe("anthropic transport stream", () => {
     );
   });
 
+  it("allocates OAuth cache slots to the stable system tail and both sides of an image", async () => {
+    configureTestAnthropicImageNormalizer();
+    guardedFetchMock.mockResolvedValueOnce(
+      createSseResponse([
+        {
+          type: "message_start",
+          message: { id: "msg_image", usage: { input_tokens: 10, output_tokens: 0 } },
+        },
+        {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "text", text: "A diagram." },
+        },
+        { type: "content_block_stop", index: 0 },
+        {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn" },
+          usage: { input_tokens: 10, output_tokens: 3 },
+        },
+      ]),
+    );
+
+    await runTransportStream(
+      makeAnthropicTransportModel({ input: ["text", "image"] }),
+      {
+        systemPrompt: "Follow policy.",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Describe this image." },
+              { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+            ],
+          },
+        ],
+      } as AnthropicStreamContext,
+      { apiKey: "sk-ant-oat-example", cacheRetention: "long" } as AnthropicStreamOptions,
+    );
+
+    const payload = latestAnthropicRequest().payload;
+    const system = requireArray(payload.system, "system").map((block) =>
+      requireRecord(block, "system block"),
+    );
+    expect(system.map((block) => block.cache_control)).toEqual([
+      undefined,
+      undefined,
+      { type: "ephemeral", ttl: "1h" },
+    ]);
+    const messages = requireArray(payload.messages, "messages");
+    const user = requireRecord(messages[0], "user message");
+    const content = requireArray(user.content, "user content").map((block) =>
+      requireRecord(block, "user block"),
+    );
+    expect(content.map((block) => block.cache_control)).toEqual([
+      { type: "ephemeral", ttl: "1h" },
+      { type: "ephemeral", ttl: "1h" },
+    ]);
+  });
+
   it("preserves text seeded on a text block after a thinking block", async () => {
     guardedFetchMock.mockResolvedValueOnce(
       createSseResponse([

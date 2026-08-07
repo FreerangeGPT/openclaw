@@ -87,7 +87,7 @@ describe("anthropic payload policy", () => {
 
     expect(payload.service_tier).toBe("standard_only");
     expect(payload.system).toEqual([
-      textBlock("Follow policy.", { type: "ephemeral", ttl: "1h" }),
+      textBlock("Follow policy."),
       textBlock("Use tools carefully.", { type: "ephemeral", ttl: "1h" }),
     ]);
     expect(payload.messages[0]).toEqual({
@@ -260,7 +260,10 @@ describe("anthropic payload policy", () => {
         { type: "text", text: "Claude Code identity." },
         { type: "text", text: "Follow policy." },
       ],
-      tools: [{ name: "Read", cache_control: { type: "ephemeral" } }],
+      tools: [
+        { name: "Read", cache_control: { type: "ephemeral" } },
+        { name: "Write", cache_control: { type: "ephemeral" } },
+      ],
       messages: [
         {
           role: "user",
@@ -374,6 +377,138 @@ describe("anthropic payload policy", () => {
     ]);
   });
 
+  it("uses one system slot and preserves the prefix before a historical image", () => {
+    const policy = resolveAnthropicPayloadPolicy({
+      provider: "anthropic",
+      api: "anthropic-messages",
+      baseUrl: "https://api.anthropic.com/v1",
+      cacheRetention: "long",
+      enableCacheControl: true,
+    });
+    const payload: TestPayload = {
+      system: [
+        { type: "text", text: "Billing identity." },
+        { type: "text", text: "Claude Code identity." },
+        {
+          type: "text",
+          text: `Stable OpenClaw prompt${SYSTEM_PROMPT_CACHE_BOUNDARY}Dynamic suffix`,
+        },
+      ],
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Describe this image." },
+            { type: "image", source: { type: "base64", media_type: "image/png", data: "abc" } },
+          ],
+        },
+        { role: "assistant", content: [{ type: "text", text: "It is a diagram." }] },
+        { role: "user", content: [{ type: "text", text: "Continue the analysis." }] },
+      ],
+    };
+
+    applyAnthropicPayloadPolicyToParams(payload, policy, new Set());
+
+    expect(payload.system).toEqual([
+      textBlock("Billing identity."),
+      textBlock("Claude Code identity."),
+      textBlock("Stable OpenClaw prompt", { type: "ephemeral", ttl: "1h" }),
+      textBlock("Dynamic suffix"),
+    ]);
+    expect(payload.messages[0]).toEqual({
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: "Describe this image.",
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        },
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "abc" } },
+      ],
+    });
+    expect(payload.messages[2]).toEqual({
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: "Continue the analysis.",
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        },
+      ],
+    });
+  });
+
+  it("anchors before image-bearing tool results while retaining deep tool-loop markers", () => {
+    const policy = resolveAnthropicPayloadPolicy({
+      provider: "anthropic",
+      api: "anthropic-messages",
+      baseUrl: "https://api.anthropic.com/v1",
+      cacheRetention: "short",
+      enableCacheControl: true,
+    });
+    const payload: TestPayload = {
+      system: [{ type: "text", text: "Follow policy." }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "Inspect the screenshot." }] },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "tool_1", name: "screenshot", input: {} }],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tool_1",
+              content: [
+                { type: "text", text: "captured" },
+                {
+                  type: "image",
+                  source: { type: "base64", media_type: "image/png", data: "abc" },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    applyAnthropicPayloadPolicyToParams(payload, policy, new Set());
+
+    expect(payload.messages[0]).toEqual({
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: "Inspect the screenshot.",
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+    });
+    expect(payload.messages[1]).toEqual({
+      role: "assistant",
+      content: [
+        {
+          type: "tool_use",
+          id: "tool_1",
+          name: "screenshot",
+          input: {},
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+    });
+    expect(payload.messages[2]).toEqual({
+      role: "user",
+      content: [
+        expect.objectContaining({
+          type: "tool_result",
+          tool_use_id: "tool_1",
+          cache_control: { type: "ephemeral" },
+        }),
+      ],
+    });
+  });
+
   it("applies 1h TTL for Vertex AI endpoints with long cache retention", () => {
     const policy = resolveAnthropicPayloadPolicy({
       provider: "anthropic-vertex",
@@ -393,7 +528,7 @@ describe("anthropic payload policy", () => {
     applyAnthropicPayloadPolicyToParams(payload, policy, new Set());
 
     expect(payload.system).toEqual([
-      textBlock("Follow policy.", { type: "ephemeral", ttl: "1h" }),
+      textBlock("Follow policy."),
       textBlock("Use tools carefully.", { type: "ephemeral", ttl: "1h" }),
     ]);
     expect(payload.messages[0]).toEqual({

@@ -10,6 +10,7 @@ import {
  */
 import { buildLateMediaAttachedProjection } from "../../../sessions/user-turn-transcript.js";
 import type { AgentMessage } from "../../runtime/index.js";
+import { isRunnerToolCallBlockType } from "./attempt.tool-call-block-type.js";
 import { hasNonBlankUserText } from "./attempt.user-message-boundary.js";
 import { hydratePromptMediaMessages } from "./images.js";
 
@@ -33,46 +34,42 @@ type PrunableContextAgent = {
   ) => AgentMessage[] | Promise<AgentMessage[]>;
 };
 
-/**
- * Number of most-recent completed turns whose preceding user/toolResult image
- * blocks are kept intact. Counts all completed turns, not just image-bearing
- * ones, so text-only turns consume the window.
- */
-const PRESERVE_RECENT_COMPLETED_TURNS = 3;
 function resolvePruneBeforeIndex(messages: AgentMessage[]): number {
-  const completedTurnStarts: number[] = [];
-  let currentTurnStart = -1;
-  let currentTurnHasAssistantReply = false;
-
-  for (let i = 0; i < messages.length; i++) {
-    const role = messages[i]?.role;
-    if (role === "user") {
-      if (currentTurnStart >= 0 && currentTurnHasAssistantReply) {
-        completedTurnStarts.push(currentTurnStart);
-      }
-      currentTurnStart = i;
-      currentTurnHasAssistantReply = false;
-      continue;
-    }
-    if (role === "toolResult") {
-      if (currentTurnStart < 0) {
-        currentTurnStart = i;
-      }
-      continue;
-    }
-    if (role === "assistant" && currentTurnStart >= 0) {
-      currentTurnHasAssistantReply = true;
-    }
-  }
-
-  if (currentTurnStart >= 0 && currentTurnHasAssistantReply) {
-    completedTurnStarts.push(currentTurnStart);
-  }
-
-  if (completedTurnStarts.length <= PRESERVE_RECENT_COMPLETED_TURNS) {
+  const latestUserIndex = messages.findLastIndex((message) => message.role === "user");
+  if (latestUserIndex < 0) {
     return -1;
   }
-  return completedTurnStarts.at(-PRESERVE_RECENT_COMPLETED_TURNS) ?? -1;
+
+  let priorTerminalAssistantIndex = -1;
+  for (let i = 0; i < latestUserIndex; i++) {
+    const message = messages[i];
+    if (!message || message.role !== "assistant") {
+      continue;
+    }
+    const hasToolCall = Array.isArray(message.content)
+      ? message.content.some((block) =>
+          isRunnerToolCallBlockType((block as { type?: unknown } | null)?.type),
+        )
+      : false;
+    if (
+      !hasToolCall &&
+      message.stopReason !== "toolUse" &&
+      message.stopReason !== "error" &&
+      message.stopReason !== "aborted"
+    ) {
+      priorTerminalAssistantIndex = i;
+    }
+  }
+
+  // A terminal assistant proves every preceding queued user message reached the
+  // model. Preserve from the first user after that proof through the active
+  // assistant/tool-result loop; a tool-use or failed assistant is not terminal.
+  for (let i = priorTerminalAssistantIndex + 1; i <= latestUserIndex; i++) {
+    if (messages[i]?.role === "user") {
+      return i;
+    }
+  }
+  return -1;
 }
 
 function resolveMessageMediaFacts(message: AgentMessage): MediaFact[] {

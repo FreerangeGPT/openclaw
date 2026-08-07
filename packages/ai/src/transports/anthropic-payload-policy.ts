@@ -87,6 +87,8 @@ function applyAnthropicCacheControlToSystem(
   }
 
   const normalizedBlocks: Array<unknown> = [];
+  let lastStableTextBlock: Record<string, unknown> | undefined;
+  let reachedDynamicSuffix = false;
   for (const block of system) {
     if (!block || typeof block !== "object") {
       normalizedBlocks.push(block);
@@ -99,20 +101,23 @@ function applyAnthropicCacheControlToSystem(
     }
     const split = splitSystemPromptCacheBoundary(record.text);
     if (!split) {
-      if (record.cache_control === undefined) {
-        record.cache_control = cacheControl;
+      if (!reachedDynamicSuffix) {
+        lastStableTextBlock = record;
       }
       normalizedBlocks.push(record);
       continue;
     }
 
+    reachedDynamicSuffix = true;
     const { cache_control: existingCacheControl, ...rest } = record;
     if (split.stablePrefix) {
-      normalizedBlocks.push({
+      const stableBlock = {
         ...rest,
         text: split.stablePrefix,
-        cache_control: existingCacheControl ?? cacheControl,
-      });
+        ...(existingCacheControl ? { cache_control: existingCacheControl } : {}),
+      };
+      normalizedBlocks.push(stableBlock);
+      lastStableTextBlock = stableBlock;
     }
     if (split.dynamicSuffix) {
       normalizedBlocks.push({
@@ -122,6 +127,12 @@ function applyAnthropicCacheControlToSystem(
     }
   }
 
+  // One breakpoint at the end of the stable system prefix covers all preceding
+  // tool and system blocks. Extra consecutive markers consume Anthropic's four
+  // cache slots without preserving any additional prefix.
+  if (lastStableTextBlock && lastStableTextBlock.cache_control === undefined) {
+    lastStableTextBlock.cache_control = cacheControl;
+  }
   system.splice(0, system.length, ...normalizedBlocks);
 }
 
@@ -216,6 +227,89 @@ function applyAnthropicCacheControlToMessages(
   }
 }
 
+type AnthropicCacheMarkerTarget =
+  | { block: Record<string, unknown>; message?: never; text?: never }
+  | { block?: never; message: Record<string, unknown>; text: string };
+
+function markAnthropicCacheTarget(
+  target: AnthropicCacheMarkerTarget,
+  cacheControl: AnthropicEphemeralCacheControl,
+): void {
+  if (target.block) {
+    target.block.cache_control = cacheControl;
+    return;
+  }
+  target.message.content = [
+    {
+      type: "text",
+      text: target.text,
+      cache_control: cacheControl,
+    },
+  ];
+}
+
+function containsAnthropicImageBlock(content: unknown): boolean {
+  return (
+    Array.isArray(content) &&
+    content.some((block) => {
+      if (!block || typeof block !== "object") {
+        return false;
+      }
+      return (block as Record<string, unknown>).type === "image";
+    })
+  );
+}
+
+function resolveAnthropicPreImageCacheTarget(
+  messages: unknown,
+  cacheBreakpointOptOutMessageIndexes: ReadonlySet<number>,
+): AnthropicCacheMarkerTarget | undefined {
+  if (!Array.isArray(messages)) {
+    return undefined;
+  }
+
+  let previousCacheable: AnthropicCacheMarkerTarget | undefined;
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    if (!message || typeof message !== "object") {
+      continue;
+    }
+    const messageRecord = message as Record<string, unknown>;
+    const content = messageRecord.content;
+    if (typeof content === "string") {
+      if (!cacheBreakpointOptOutMessageIndexes.has(i) && content.length > 0) {
+        previousCacheable = { message: messageRecord, text: content };
+      }
+      continue;
+    }
+    if (!Array.isArray(content)) {
+      continue;
+    }
+
+    for (const block of content) {
+      if (!block || typeof block !== "object") {
+        continue;
+      }
+      const blockRecord = block as Record<string, unknown>;
+      const isImageBoundary =
+        blockRecord.type === "image" ||
+        (blockRecord.type === "tool_result" && containsAnthropicImageBlock(blockRecord.content));
+      if (isImageBoundary) {
+        return previousCacheable;
+      }
+      if (
+        !cacheBreakpointOptOutMessageIndexes.has(i) &&
+        (blockRecord.type === "text" ||
+          blockRecord.type === "tool_use" ||
+          blockRecord.type === "tool_result")
+      ) {
+        previousCacheable = { block: blockRecord };
+      }
+    }
+  }
+  return undefined;
+}
+
 function countAnthropicCacheControlMarkers(blocks: unknown): number {
   if (!Array.isArray(blocks)) {
     return 0;
@@ -279,10 +373,24 @@ export function applyAnthropicPayloadPolicyToParams(
   const usedMarkers =
     countAnthropicCacheControlMarkers(payloadObj.system) +
     countAnthropicCacheControlMarkers(payloadObj.tools);
+  let remainingMarkers = ANTHROPIC_CACHE_CONTROL_LIMIT - usedMarkers;
+  // Historical image bytes are replaced after their turn. Keep the exact prefix
+  // before the first raw image as a separately refreshed cache entry so that
+  // later replacement can fall back there even after a long idle period.
+  if (remainingMarkers >= 2) {
+    const preImageTarget = resolveAnthropicPreImageCacheTarget(
+      payloadObj.messages,
+      cacheBreakpointOptOutMessageIndexes,
+    );
+    if (preImageTarget) {
+      markAnthropicCacheTarget(preImageTarget, policy.cacheControl);
+      remainingMarkers -= 1;
+    }
+  }
   applyAnthropicCacheControlToMessages(
     payloadObj.messages,
     policy.cacheControl,
-    ANTHROPIC_CACHE_CONTROL_LIMIT - usedMarkers,
+    remainingMarkers,
     cacheBreakpointOptOutMessageIndexes,
   );
 }

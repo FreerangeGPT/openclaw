@@ -181,7 +181,8 @@ If you see unexpected `cacheWrite` spikes after a config or workspace change, ch
 ## OpenClaw cache-stability guards
 
 - Bundled MCP tool catalogs are sorted deterministically (by server name, then tool name) before tool registration, so `listTools()` order changes do not churn the tools block and bust prompt-cache prefixes.
-- Legacy sessions with persisted image blocks keep the **3 most recent completed turns** intact (counting all completed turns, not just image-bearing ones). Older already-processed image blocks are replaced with a text marker so image-heavy follow-ups do not keep re-sending large stale payloads.
+- Legacy sessions with persisted image blocks keep the active image-bearing user/tool loop and unprocessed queued user messages intact. After a terminal assistant proves the queued input reached the model, the next user turn replaces already-processed image blocks with a text marker so follow-ups do not keep re-sending large stale payloads.
+- Anthropic-family requests reserve one cache breakpoint immediately before the first raw image-bearing block. Keeping that prefix warm lets the later image-to-marker transition fall back to a live cache entry even after a long idle, instead of rewriting the full prompt.
 
 ## Tuning patterns
 
