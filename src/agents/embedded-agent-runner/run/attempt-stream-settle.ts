@@ -362,25 +362,28 @@ export async function settleEmbeddedAttemptStream(input: {
             prePromptMessageCount: input.prePromptMessageCount,
           });
     attemptUsage = subscription.getUsageTotals();
-    cacheBreak = input.cache.observabilityEnabled
-      ? completePromptCacheObservation({
-          sessionId: attempt.sessionId,
-          promptCacheKey: attempt.promptCacheKey,
-          sessionKey: attempt.sessionKey,
-          usage: attemptUsage,
-        })
-      : null;
     const transcriptUsageSnapshot = findLatestUncompactedAttemptUsageSnapshot({
       messagesSnapshot,
       prePromptMessageCount: input.prePromptMessageCount,
       compactionOccurred: compactionOccurredThisAttempt,
     });
     const completedAssistantUsage = normalizeUsage(currentAttemptCompletedAssistant?.usage);
-    lastCallUsage =
-      subscription.getLastAssistantUsage() ??
-      (hasNonzeroUsage(completedAssistantUsage)
+    const subscriptionLastCallUsage = subscription.getLastAssistantUsage();
+    lastCallUsage = hasNonzeroUsage(subscriptionLastCallUsage)
+      ? subscriptionLastCallUsage
+      : hasNonzeroUsage(completedAssistantUsage)
         ? completedAssistantUsage
-        : transcriptUsageSnapshot?.usage);
+        : transcriptUsageSnapshot?.usage;
+    cacheBreak = input.cache.observabilityEnabled
+      ? completePromptCacheObservation({
+          sessionId: attempt.sessionId,
+          promptCacheKey: attempt.promptCacheKey,
+          sessionKey: attempt.sessionKey,
+          // Cache reads are provider-call measurements. Comparing an accumulated
+          // tool-loop total with one later call manufactures false cache drops.
+          usage: lastCallUsage,
+        })
+      : null;
     // Keep cache timing bound to the assistant that supplied the exact usage.
     // A terminal zero-usage abort must not advance TTL for the previous call.
     const usageAssistant = hasNonzeroUsage(completedAssistantUsage)
@@ -392,7 +395,7 @@ export async function settleEmbeddedAttemptStream(input: {
         : undefined;
     const promptCacheObservation =
       input.cache.observabilityEnabled &&
-      (cacheBreak || input.cache.changesForTurn || typeof attemptUsage?.cacheRead === "number")
+      (cacheBreak || input.cache.changesForTurn || typeof lastCallUsage?.cacheRead === "number")
         ? {
             broke: Boolean(cacheBreak),
             ...(typeof cacheBreak?.previousCacheRead === "number"
@@ -400,8 +403,8 @@ export async function settleEmbeddedAttemptStream(input: {
               : {}),
             ...(typeof cacheBreak?.cacheRead === "number"
               ? { cacheRead: cacheBreak.cacheRead }
-              : typeof attemptUsage?.cacheRead === "number"
-                ? { cacheRead: attemptUsage.cacheRead }
+              : typeof lastCallUsage?.cacheRead === "number"
+                ? { cacheRead: lastCallUsage.cacheRead }
                 : {}),
             changes: cacheBreak?.changes ?? input.cache.changesForTurn,
           }

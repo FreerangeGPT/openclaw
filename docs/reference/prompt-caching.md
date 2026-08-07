@@ -286,6 +286,24 @@ Defaults:
 | `OPENCLAW_CACHE_TRACE_PROMPT=0\|1`   | Toggles prompt text capture          |
 | `OPENCLAW_CACHE_TRACE_SYSTEM=0\|1`   | Toggles system prompt capture        |
 
+### Exact model-input replay for model A/B tests
+
+Set `OPENCLAW_ANTHROPIC_PAYLOAD_LOG=raw` only on a trusted, single-user gateway when you
+need to replay the exact model-visible input against another model. (`=1` retains the existing
+redacted Anthropic-only diagnostic mode.) Raw mode writes paired `request` and `response`
+records for any provider only to `$OPENCLAW_STATE_DIR/logs/provider-replay.jsonl`; it never
+inherits the redacted logger's destination override. Each pair has a stable per-run
+`requestId`; the request contains the final payload after provider wrappers, non-secret
+model routing metadata, and the response contains that individual API call's assistant message
+and usage. Transport headers are deliberately omitted; the A/B target runtime supplies its own
+provider-specific version, feature, routing, and authentication headers.
+
+This log is deliberately unredacted and untruncated. It can contain the complete system
+prompt, conversation, tool schemas, tool results, pasted credentials, and model output. It is
+disabled by default. Keep the state directory private, transfer the file only over a trusted
+channel, and disable the variable when the capture window ends. Normal trajectory and cache
+diagnostics remain bounded and redacted; their large-field sentinels are not replay artifacts.
+
 ### What to inspect
 
 - Cache trace events are JSONL with staged snapshots like `session:loaded`, `prompt:before`, `stream:context`, and `session:after`.

@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MainSessionCacheKeeperIdentityMismatchError } from "../prompt-cache-evidence.js";
+import {
+  beginPromptCacheObservation,
+  completePromptCacheObservation,
+} from "../prompt-cache-observability.js";
 import { clearProviderPromptState, getProviderPromptState } from "../provider-prompt-state.js";
 
 const hoisted = vi.hoisted(() => ({
@@ -178,6 +182,135 @@ describe("embedded attempt phase lifecycle state", () => {
     expect(result.promptError).toMatchObject({ replaySafe: true });
   });
 
+  it("compares cache reads from individual provider calls instead of tool-loop totals", async () => {
+    const sessionId = "session-per-call-cache-usage";
+    const observation = {
+      sessionId,
+      sessionKey: "agent:main:per-call-cache-usage",
+      provider: "anthropic",
+      modelId: "claude-opus-4-8",
+      modelApi: "anthropic-messages",
+      cacheRetention: "long" as const,
+      streamStrategy: "boundary-aware:anthropic-messages",
+      systemPrompt: "stable system",
+      tools: [{ name: "read" }],
+    };
+    beginPromptCacheObservation(observation);
+    completePromptCacheObservation({
+      sessionId,
+      sessionKey: observation.sessionKey,
+      usage: { cacheRead: 51_352 },
+    });
+    beginPromptCacheObservation(observation);
+
+    const lastCallUsage = {
+      input: 1_000,
+      output: 10,
+      cacheRead: 51_352,
+      cacheWrite: 31_498,
+      total: 83_860,
+    };
+    const aggregateUsage = {
+      input: 3_000,
+      output: 30,
+      cacheRead: 77_751,
+      cacheWrite: 60_000,
+      total: 140_781,
+    };
+    const assistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "done" }],
+      api: "anthropic-messages",
+      provider: "anthropic",
+      model: "claude-opus-4-8",
+      usage: lastCallUsage,
+      stopReason: "stop",
+      timestamp: Date.now(),
+    };
+    const zeroUsageAssistant = {
+      ...assistant,
+      content: [{ type: "text", text: "terminal abort" }],
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 0,
+      },
+      stopReason: "error",
+      errorMessage: "terminal call failed before reporting usage",
+    };
+    const messages = [assistant, zeroUsageAssistant];
+    const sessionManager = {
+      appendCustomEntry: vi.fn(),
+      buildSessionContext: () => ({ messages }),
+      getEntries: () => [],
+      getLeafId: () => "assistant-1",
+      removeTrailingEntries: vi.fn(() => 0),
+    };
+    const result = await settleEmbeddedAttemptStream({
+      attempt: {
+        config: {},
+        runId: "run-per-call-cache-usage",
+        sessionId,
+        sessionKey: observation.sessionKey,
+        sessionFile: "/tmp/session.jsonl",
+        provider: "anthropic",
+        modelId: "claude-opus-4-8",
+        model: { api: "anthropic-messages" },
+      } as never,
+      activeSession: {
+        agent: { state: { messages } },
+        isCompacting: false,
+        isStreaming: false,
+        messages,
+        sessionId,
+      } as never,
+      sessionManager: sessionManager as never,
+      sessionLockController: { waitForSessionEvents: async () => {} } as never,
+      withOwnedSessionWriteLock: async (operation) => await operation(),
+      subscription: {
+        toolMetas: [],
+        waitForCompactionRetry: async () => undefined,
+        isCompactionInFlight: () => false,
+        getCompactionCount: () => 0,
+        getCurrentAttemptAssistant: () => zeroUsageAssistant,
+        getUsageTotals: () => aggregateUsage,
+        getLastAssistantUsage: () => zeroUsageAssistant.usage,
+      } as never,
+      state: {
+        promptError: null,
+        promptErrorSource: null,
+        yieldAborted: false,
+        sessionIdUsed: sessionId,
+      },
+      readLifecycleState: () => ({
+        aborted: false,
+        timedOut: false,
+        timedOutDuringCompaction: false,
+      }),
+      markTimedOutDuringCompaction: () => {},
+      runAbortDeadlineAtMs: Date.now() + 60_000,
+      runAbortSignal: new AbortController().signal,
+      isProbeSession: true,
+      sessionAgentId: "main",
+      abortable: async (promise) => await promise,
+      prePromptMessageCount: 0,
+      toolSearchTargetTranscriptProjections: [],
+      cache: {
+        observabilityEnabled: true,
+        changesForTurn: null,
+        retention: "long",
+      },
+      shouldFlushForContextEngine: false,
+    });
+
+    expect(result.attemptUsage?.cacheRead).toBe(77_751);
+    expect(result.cacheBreak).toBeNull();
+    expect(result.promptCache?.lastCallUsage?.cacheRead).toBe(51_352);
+    expect(result.promptCache?.observation?.cacheRead).toBe(51_352);
+  });
+
   it("records the effective cache retention after a cache-bearing main-session turn", async () => {
     const runId = "run-cache-evidence";
     const providerCallStartedAt = 1_699_999_955_000;
@@ -187,7 +320,15 @@ describe("embedded attempt phase lifecycle state", () => {
       byteWeight: 1,
       cachePrefixIdentity: "provider-cache-prefix-identity-main",
       cacheRequestOptionsIdentity: "request-options-identity-main",
+      cacheTree: {
+        version: 1,
+        tools: { blockCount: 0, identity: "tools" },
+        system: { blockCount: 0, identity: "system" },
+        messages: { blockCount: 0, messageCount: 0, identity: "messages" },
+        breakpoints: [],
+      },
       providerMessageIdentity: "provider-message-identity-main",
+      providerCallSequence: 1,
       providerCallStartedAt,
     };
     const usage = {

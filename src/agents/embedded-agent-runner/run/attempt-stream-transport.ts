@@ -1,3 +1,4 @@
+import { formatErrorMessage } from "../../../infra/errors.js";
 /**
  * Selects and configures the provider transport for one embedded attempt.
  */
@@ -10,6 +11,7 @@ import type { AssistantMessageEventStreamLike } from "../../../llm/types.js";
 import type { ProviderRuntimePluginHandle } from "../../../plugins/provider-hook-runtime.js";
 import { resolveProviderTextTransforms } from "../../../plugins/provider-runtime.js";
 import { wrapStreamFnTextTransforms } from "../../plugin-text-transforms.js";
+import type { ProviderReplayRecorder } from "../../provider-replay-log.js";
 import { registerProviderStreamForModel } from "../../provider-stream.js";
 import type { SandboxContext } from "../../sandbox/types.js";
 import type { AgentSession, SettingsManager } from "../../sessions/index.js";
@@ -33,6 +35,7 @@ import {
 } from "../prompt-cache-retention.js";
 import {
   type ProviderPromptState,
+  type ProviderPromptSnapshot,
   wrapStreamFnWithProviderPromptState,
 } from "../provider-prompt-state.js";
 import {
@@ -47,6 +50,88 @@ import {
   resolveAttemptToolPolicyMessageProvider,
 } from "./attempt.run-decisions.js";
 import type { EmbeddedRunAttemptParams } from "./types.js";
+import type { EmbeddedRunAttemptTrajectoryRecorder } from "./types.js";
+
+function recordProviderPromptCompletion(params: {
+  snapshot: ProviderPromptSnapshot;
+  trajectoryRecorder?: EmbeddedRunAttemptTrajectoryRecorder | null;
+  replayRecorder?: ProviderReplayRecorder | null;
+  message?: unknown;
+  error?: unknown;
+}): void {
+  const messageRecord =
+    params.message && typeof params.message === "object" && !Array.isArray(params.message)
+      ? (params.message as Record<string, unknown>)
+      : undefined;
+  params.trajectoryRecorder?.recordEvent("provider.call.completed", {
+    providerCallSequence: params.snapshot.providerCallSequence,
+    providerCallStartedAt: params.snapshot.providerCallStartedAt,
+    durationMs: Math.max(0, Date.now() - params.snapshot.providerCallStartedAt),
+    ...(messageRecord?.usage ? { usage: messageRecord.usage } : {}),
+    ...(typeof messageRecord?.stopReason === "string"
+      ? { stopReason: messageRecord.stopReason }
+      : {}),
+    ...(params.error === undefined ? {} : { error: formatErrorMessage(params.error) }),
+  });
+  params.replayRecorder?.recordResponse({
+    snapshot: params.snapshot,
+    ...(params.message === undefined ? {} : { message: params.message }),
+    ...(params.error === undefined ? {} : { error: params.error }),
+  });
+}
+
+export function observeProviderPromptStream(params: {
+  stream: AssistantMessageEventStreamLike;
+  snapshot: ProviderPromptSnapshot;
+  trajectoryRecorder?: EmbeddedRunAttemptTrajectoryRecorder | null;
+  replayRecorder?: ProviderReplayRecorder | null;
+}): AssistantMessageEventStreamLike {
+  let settled = false;
+  const settle = (message?: unknown, error?: unknown) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    recordProviderPromptCompletion({
+      snapshot: params.snapshot,
+      trajectoryRecorder: params.trajectoryRecorder,
+      replayRecorder: params.replayRecorder,
+      ...(message === undefined ? {} : { message }),
+      ...(error === undefined ? {} : { error }),
+    });
+  };
+  return {
+    result: async () => {
+      try {
+        const message = await params.stream.result();
+        settle(message);
+        return message;
+      } catch (error) {
+        settle(undefined, error);
+        throw error;
+      }
+    },
+    async *[Symbol.asyncIterator]() {
+      try {
+        for await (const event of params.stream) {
+          if (event.type === "done") {
+            settle(event.message);
+          } else if (event.type === "error") {
+            settle(event.error, event.error.errorMessage ?? event.reason);
+          }
+          yield event;
+        }
+      } catch (error) {
+        settle(undefined, error);
+        throw error;
+      } finally {
+        if (!settled) {
+          settle(undefined, new Error("provider stream closed before a terminal event"));
+        }
+      }
+    },
+  };
+}
 
 export function observeCacheKeeperStream(params: {
   stream: AssistantMessageEventStreamLike;
@@ -101,6 +186,8 @@ export async function prepareEmbeddedAttemptTransport(input: {
     state: ProviderPromptState;
     effectiveContextTokenBudget: number;
   };
+  trajectoryRecorder?: EmbeddedRunAttemptTrajectoryRecorder | null;
+  providerReplayRecorder?: ProviderReplayRecorder | null;
 }) {
   const attempt = input.attempt;
   const session = input.session;
@@ -200,54 +287,87 @@ export async function prepareEmbeddedAttemptTransport(input: {
   const promptCacheKeeperEvidenceId = attempt.promptCacheKeeperEvidenceId;
   const mainSessionKey = attempt.sessionKey;
   let cacheKeeperProviderCalls = 0;
+  const shouldStageMainSessionCacheTouch =
+    mainSessionCacheRetention === "long" &&
+    attempt.trigger === "user" &&
+    Boolean(mainSessionKey) &&
+    streamStrategy === "boundary-aware:anthropic-messages" &&
+    !promptCacheKeeperEvidenceId;
   // Install inside provider/config wrappers so their full onPayload chain runs
   // before admission hashes the request body that the built-in transport sends.
   session.agent.streamFn = wrapStreamFnWithProviderPromptState({
     streamFn: session.agent.streamFn,
     ...input.providerPromptState,
-    ...(mainSessionCacheRetention === "long" &&
-    attempt.trigger === "user" &&
-    mainSessionKey &&
-    streamStrategy === "boundary-aware:anthropic-messages" &&
-    !promptCacheKeeperEvidenceId
-      ? {
-          observeProviderPayload: ({
-            headers,
-            model,
-            payload,
+    observeProviderPayload: ({ headers, model, payload, providerCallStartedAt, snapshot }) => {
+      input.trajectoryRecorder?.recordEvent("provider.call.started", {
+        providerCallSequence: snapshot.providerCallSequence,
+        providerCallStartedAt,
+        payloadIdentity: snapshot.digest,
+        payloadBytes: snapshot.byteWeight,
+        cachePrefixIdentity: snapshot.cachePrefixIdentity,
+        cacheRequestOptionsIdentity: snapshot.cacheRequestOptionsIdentity,
+        ...(snapshot.providerMessageIdentity
+          ? { providerMessageIdentity: snapshot.providerMessageIdentity }
+          : {}),
+        cacheTree: snapshot.cacheTree,
+      });
+      input.providerReplayRecorder?.recordRequest({
+        model,
+        payload,
+        snapshot,
+      });
+      if (
+        shouldStageMainSessionCacheTouch &&
+        mainSessionKey &&
+        payload &&
+        typeof payload === "object" &&
+        !Array.isArray(payload)
+      ) {
+        try {
+          stageMainSessionCacheTouch({
+            agentId: input.sessionAgentId,
+            apiKey: transportApiKey ?? "",
+            ...(headers ? { headers } : {}),
+            model: model as EmbeddedRunAttemptParams["model"] & {
+              api: "anthropic-messages";
+            },
+            payload: payload as Record<string, unknown>,
             providerCallStartedAt,
-          }: {
-            headers?: Record<string, string>;
-            model: EmbeddedRunAttemptParams["model"];
-            payload: unknown;
-            providerCallStartedAt: number;
-          }) => {
-            if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-              return;
-            }
-            try {
-              stageMainSessionCacheTouch({
-                agentId: input.sessionAgentId,
-                apiKey: transportApiKey ?? "",
-                ...(headers ? { headers } : {}),
-                model: model as EmbeddedRunAttemptParams["model"] & {
-                  api: "anthropic-messages";
-                },
-                payload: payload as Record<string, unknown>,
-                providerCallStartedAt,
-                runId: attempt.runId,
-                sessionFile: attempt.sessionFile,
-                sessionId: attempt.sessionId,
-                sessionKey: mainSessionKey,
-              });
-            } catch (error) {
-              // Cache maintenance is advisory; payload capture must never fail
-              // the foreground main request it is intended to protect.
-              log.warn(`failed to stage main cache-touch parent: ${String(error)}`);
-            }
-          },
+            runId: attempt.runId,
+            sessionFile: attempt.sessionFile,
+            sessionId: attempt.sessionId,
+            sessionKey: mainSessionKey,
+          });
+        } catch (error) {
+          // Cache maintenance is advisory; payload capture must never fail
+          // the foreground main request it is intended to protect.
+          log.warn(`failed to stage main cache-touch parent: ${String(error)}`);
         }
-      : {}),
+      }
+    },
+    observeProviderStream: (stream, providerCallStartedAt, snapshot) => {
+      const cacheObservedStream = promptCacheKeeperEvidenceId
+        ? observeCacheKeeperStream({
+            stream,
+            evidenceId: promptCacheKeeperEvidenceId,
+            providerCallStartedAt,
+          })
+        : stream;
+      return observeProviderPromptStream({
+        stream: cacheObservedStream,
+        snapshot,
+        trajectoryRecorder: input.trajectoryRecorder,
+        replayRecorder: input.providerReplayRecorder,
+      });
+    },
+    observeProviderError: (error, snapshot) => {
+      recordProviderPromptCompletion({
+        snapshot,
+        trajectoryRecorder: input.trajectoryRecorder,
+        replayRecorder: input.providerReplayRecorder,
+        error,
+      });
+    },
     ...(promptCacheKeeperEvidenceId
       ? {
           assertCacheIdentity: (
@@ -283,12 +403,6 @@ export async function prepareEmbeddedAttemptTransport(input: {
             });
             cacheKeeperProviderCalls += 1;
           },
-          observeProviderStream: (stream, providerCallStartedAt) =>
-            observeCacheKeeperStream({
-              stream,
-              evidenceId: promptCacheKeeperEvidenceId,
-              providerCallStartedAt,
-            }),
         }
       : {}),
   });

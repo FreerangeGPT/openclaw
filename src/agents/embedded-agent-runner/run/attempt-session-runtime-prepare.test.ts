@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   createAnthropicPayloadLogger: vi.fn(),
   createCacheTrace: vi.fn(),
+  createProviderReplayRecorder: vi.fn(),
   createSessionSettleTracker: vi.fn(),
   getSessionPromptState: vi.fn(),
   installContextGuards: vi.fn(),
@@ -17,6 +18,9 @@ vi.mock("../../anthropic-payload-log.js", () => ({
   createAnthropicPayloadLogger: mocks.createAnthropicPayloadLogger,
 }));
 vi.mock("../../cache-trace.js", () => ({ createCacheTrace: mocks.createCacheTrace }));
+vi.mock("../../provider-replay-log.js", () => ({
+  createProviderReplayRecorder: mocks.createProviderReplayRecorder,
+}));
 vi.mock("../session-prompt-state.js", () => ({
   getEmbeddedSessionPromptState: mocks.getSessionPromptState,
 }));
@@ -78,6 +82,7 @@ function createFixture() {
   };
   const cacheTrace = { kind: "cache-trace" };
   const anthropicPayloadLogger = { kind: "payload-logger" };
+  const providerReplayRecorder = { kind: "provider-replay" };
   const trajectoryRecorder = { kind: "trajectory" };
   const transport = {
     effectiveAgentTransport: "sse",
@@ -132,6 +137,10 @@ function createFixture() {
   mocks.createAnthropicPayloadLogger.mockImplementation(() => {
     order.push("payload-logger");
     return anthropicPayloadLogger;
+  });
+  mocks.createProviderReplayRecorder.mockImplementation(() => {
+    order.push("provider-replay");
+    return providerReplayRecorder;
   });
   mocks.prepareTrajectory.mockImplementation(async () => {
     order.push("trajectory");
@@ -208,6 +217,7 @@ function createFixture() {
     lifecycle,
     order,
     promptState,
+    providerReplayRecorder,
     sessionManager,
     settingsManager,
     trajectoryRecorder,
@@ -240,6 +250,7 @@ describe("prepareEmbeddedAttemptSessionRuntime", () => {
       "own-context-guards",
       "cache-trace",
       "payload-logger",
+      "provider-replay",
       "trajectory",
       "own-trajectory",
       "transport",
@@ -250,6 +261,7 @@ describe("prepareEmbeddedAttemptSessionRuntime", () => {
         boundary: fixture.boundary,
         cacheTrace: fixture.cacheTrace,
         contextGuards: fixture.contextGuards,
+        providerReplayRecorder: fixture.providerReplayRecorder,
         sessionManager: fixture.sessionManager,
         sessionPromptState: fixture.promptState,
         toolResultPromptProjectionState: fixture.promptState.toolResults,
@@ -278,6 +290,12 @@ describe("prepareEmbeddedAttemptSessionRuntime", () => {
       abortActiveSession: fixture.abortActiveSession,
       activeSession: fixture.activeSession,
     });
+    expect(mocks.prepareTransport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerReplayRecorder: fixture.providerReplayRecorder,
+        trajectoryRecorder: fixture.trajectoryRecorder,
+      }),
+    );
 
     result.state.prePromptMessageCount = 7;
     result.state.promptCache = { cacheRead: 3 } as never;

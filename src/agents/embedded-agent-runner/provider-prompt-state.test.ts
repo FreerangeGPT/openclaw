@@ -7,6 +7,7 @@ import {
 } from "openclaw/plugin-sdk/llm";
 import { describe, expect, it, vi } from "vitest";
 import {
+  type ProviderPromptSnapshot,
   clearProviderPromptState,
   getProviderPromptState,
   markLastProviderPromptContextRejected,
@@ -65,6 +66,40 @@ describe("provider prompt state", () => {
     for (const runId of [firstRunId, ...otherRunIds]) {
       clearProviderPromptState(runId);
     }
+  });
+
+  it("closes superseded payloads when a transport retries within one stream invocation", async () => {
+    const runId = "internal-provider-retry";
+    const state = getProviderPromptState(runId);
+    const payloadSnapshots: ProviderPromptSnapshot[] = [];
+    const errorSnapshots: Array<{ error: unknown; snapshot: ProviderPromptSnapshot }> = [];
+    let streamSnapshot: ProviderPromptSnapshot | undefined;
+    const wrapped = wrapStreamFnWithProviderPromptState({
+      streamFn: async (_model, _context, options) => {
+        await options?.onPayload?.({ input: "first" }, model);
+        await options?.onPayload?.({ input: "retry" }, model);
+        return createResultStream("stop");
+      },
+      state,
+      effectiveContextTokenBudget: 128_000,
+      observeProviderPayload: ({ snapshot }) => payloadSnapshots.push(snapshot),
+      observeProviderError: (error, snapshot) => errorSnapshots.push({ error, snapshot }),
+      observeProviderStream: (stream, _providerCallStartedAt, snapshot) => {
+        streamSnapshot = snapshot;
+        return stream;
+      },
+    });
+
+    await (await wrapped(model, { messages: [], tools: [] })).result();
+
+    expect(payloadSnapshots.map((snapshot) => snapshot.providerCallSequence)).toEqual([1, 2]);
+    expect(errorSnapshots).toHaveLength(1);
+    expect(errorSnapshots[0]?.snapshot).toBe(payloadSnapshots[0]);
+    expect(errorSnapshots[0]?.error).toMatchObject({
+      message: "provider payload superseded before stream returned",
+    });
+    expect(streamSnapshot).toBe(payloadSnapshots[1]);
+    clearProviderPromptState(runId);
   });
 
   it("observes the final replacement body and blocks its rejected replay before network send", async () => {
@@ -395,6 +430,33 @@ describe("provider prompt state", () => {
     clearProviderPromptState(runId);
   });
 
+  it("pairs a captured payload with errors thrown before a provider stream exists", async () => {
+    const runId = "provider-construction-error";
+    const state = getProviderPromptState(runId);
+    const failure = new Error("connection setup failed");
+    const observedErrors: Array<{
+      error: unknown;
+      snapshot: NonNullable<typeof state.lastAttempt>;
+    }> = [];
+    const wrapped = wrapStreamFnWithProviderPromptState({
+      streamFn: async (_model, _context, options) => {
+        await options?.onPayload?.({ messages: [{ role: "user", content: "hello" }] }, model);
+        throw failure;
+      },
+      state,
+      effectiveContextTokenBudget: 128_000,
+      observeProviderError: (error, snapshot) => observedErrors.push({ error, snapshot }),
+    });
+
+    await expect(wrapped(model, { messages: [], tools: [] })).rejects.toBe(failure);
+    expect(observedErrors).toHaveLength(1);
+    expect(observedErrors[0]).toMatchObject({
+      error: failure,
+      snapshot: { providerCallSequence: 1 },
+    });
+    clearProviderPromptState(runId);
+  });
+
   it("checks the final boundary and proves prior provider messages before bounding the suffix", async () => {
     const runId = "provider-message-continuity";
     const state = getProviderPromptState(runId);
@@ -499,6 +561,123 @@ describe("provider prompt state", () => {
     expect(observed[2]?.providerMessageIdentity).toBeUndefined();
     expect(observed[1]?.tokenUpperBounds[1]).toBeGreaterThanOrEqual(Buffer.byteLength(denseSuffix));
     dateNow.mockRestore();
+    clearProviderPromptState(runId);
+  });
+
+  it("records content-free cache breakpoint trees with exact lookup windows", async () => {
+    const runId = "cache-breakpoint-tree";
+    const state = getProviderPromptState(runId);
+    const payloads = [
+      {
+        tools: [
+          { name: "read", input_schema: { type: "object" } },
+          {
+            name: "write",
+            input_schema: { type: "object" },
+            cache_control: { type: "ephemeral", ttl: "1h" },
+          },
+        ],
+        system: [
+          {
+            type: "text",
+            text: "private-system-prefix",
+            cache_control: { type: "ephemeral", ttl: "1h" },
+          },
+        ],
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "private-first-turn",
+                cache_control: { type: "ephemeral", ttl: "1h" },
+              },
+            ],
+          },
+        ],
+      },
+      {
+        tools: [
+          { name: "read", input_schema: { type: "object" } },
+          {
+            name: "write",
+            input_schema: { type: "object" },
+            cache_control: { type: "ephemeral", ttl: "1h" },
+          },
+        ],
+        system: [
+          {
+            type: "text",
+            text: "private-system-prefix",
+            cache_control: { type: "ephemeral", ttl: "1h" },
+          },
+        ],
+        messages: [
+          { role: "user", content: [{ type: "text", text: "private-first-turn" }] },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "text",
+                text: "private-second-turn",
+                cache_control: { type: "ephemeral", ttl: "1h" },
+              },
+            ],
+          },
+        ],
+      },
+      {
+        cache_control: { type: "ephemeral", ttl: "1h" },
+        messages: [
+          {
+            role: "user",
+            content: Array.from({ length: 21 }, (_, index) => ({
+              type: "text",
+              text: `private-lookback-block-${index}`,
+              ...(index === 0 ? { cache_control: { type: "ephemeral" } } : {}),
+            })),
+          },
+        ],
+      },
+    ];
+    const snapshots: Array<NonNullable<typeof state.lastAttempt>> = [];
+    const anthropicModel = {
+      ...model,
+      api: "anthropic-messages",
+      provider: "anthropic",
+    } as Model;
+    const wrapped = wrapStreamFnWithProviderPromptState({
+      streamFn: async (_model, _context, options) => {
+        await options?.onPayload?.(payloads.shift(), anthropicModel);
+        return createResultStream("stop");
+      },
+      state,
+      effectiveContextTokenBudget: 128_000,
+      observeProviderPayload: ({ snapshot }) => snapshots.push(snapshot),
+    });
+
+    for (let index = 0; index < 3; index += 1) {
+      await (await wrapped(anthropicModel, { messages: [], tools: [] })).result();
+    }
+
+    expect(snapshots.map((snapshot) => snapshot.providerCallSequence)).toEqual([1, 2, 3]);
+    expect(snapshots[0]?.cacheTree.breakpoints).toMatchObject([
+      { layer: "tools", blockIndex: 1, ttl: "1h" },
+      { layer: "system", blockIndex: 0, ttl: "1h" },
+      { layer: "messages", blockIndex: 0, messageIndex: 0, contentIndex: 0, ttl: "1h" },
+    ]);
+    const firstMessageBreakpoint = snapshots[0]?.cacheTree.breakpoints.at(-1);
+    const nextMessageBreakpoint = snapshots[1]?.cacheTree.breakpoints.at(-1);
+    expect(nextMessageBreakpoint?.lookbackPrefixIdentities).toContain(
+      firstMessageBreakpoint?.prefixIdentity,
+    );
+    expect(snapshots[2]?.cacheTree.breakpoints.map((breakpoint) => breakpoint.ttl)).toEqual([
+      "5m",
+      "1h",
+    ]);
+    expect(snapshots[2]?.cacheTree.breakpoints[1]?.lookbackPrefixIdentities).toHaveLength(20);
+    expect(JSON.stringify(snapshots)).not.toContain("private-");
     clearProviderPromptState(runId);
   });
 });

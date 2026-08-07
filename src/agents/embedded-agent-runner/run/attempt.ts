@@ -325,6 +325,9 @@ export async function runEmbeddedAttempt(
     let trajectoryRecorder: Awaited<
       ReturnType<typeof prepareEmbeddedAttemptSessionRuntime>
     >["trajectoryRecorder"] = null;
+    let providerReplayRecorder: Awaited<
+      ReturnType<typeof prepareEmbeddedAttemptSessionRuntime>
+    >["providerReplayRecorder"] = null;
     let buildAbortSettlePromise: () => Promise<void> | null = () => null;
     try {
       const preparedSessionRuntime = await prepareEmbeddedAttemptSessionRuntime({
@@ -406,6 +409,7 @@ export async function runEmbeddedAttempt(
           },
         },
       });
+      providerReplayRecorder = preparedSessionRuntime.providerReplayRecorder;
       return await runEmbeddedAttemptExecutionPhase({
         attempt: params,
         ...(activeContextEngine ? { activeContextEngine } : {}),
@@ -462,6 +466,7 @@ export async function runEmbeddedAttempt(
         sessionAgentId,
         buildAbortSettlePromise,
         trajectoryRecorder,
+        providerReplayRecorder,
         trajectoryEndRecorded: executionState.trajectoryEndRecorded,
         cleanupYieldAborted: terminal.cleanupYieldAborted,
         emitDiagnosticRunCompleted,

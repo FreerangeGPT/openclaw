@@ -3,6 +3,7 @@
  */
 import { formatErrorMessage, toErrorObject } from "../../../infra/errors.js";
 import type { createTrajectoryRuntimeRecorder } from "../../../trajectory/runtime.js";
+import type { ProviderReplayRecorder } from "../../provider-replay-log.js";
 import type { guardSessionManager } from "../../session-tool-result-guard-wrapper.js";
 import type { AgentSession } from "../../sessions/index.js";
 import { clearToolSearchCatalog, type ToolSearchCatalogRef } from "../../tool-search.js";
@@ -36,6 +37,7 @@ type CleanupEmbeddedAttemptSessionInput = {
   sessionAgentId: string;
   buildAbortSettlePromise: () => Promise<void> | null;
   trajectoryRecorder: TrajectoryRecorder | null;
+  providerReplayRecorder?: ProviderReplayRecorder | null;
   trajectoryEndRecorded: boolean;
   cleanupYieldAborted: boolean;
   emitDiagnosticRunCompleted?: EmitDiagnosticRunCompleted;
@@ -105,6 +107,14 @@ export async function cleanupEmbeddedAttemptSessionPhase(
     log,
     trajectoryRecorder: input.trajectoryRecorder,
   });
+  try {
+    await input.providerReplayRecorder?.flush();
+  } catch (error) {
+    log.warn(
+      `provider replay flush failed: runId=${attempt.runId} sessionId=${attempt.sessionId} ` +
+        `error=${formatErrorMessage(error)}`,
+    );
+  }
 
   // Agent retries can report idle before retried tools finish; waiting before
   // the flush prevents synthetic missing-tool results (#8643). Teardown keeps

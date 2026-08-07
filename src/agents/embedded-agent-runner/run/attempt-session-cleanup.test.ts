@@ -39,6 +39,12 @@ function createInput(overrides: Record<string, unknown> = {}) {
     describeFlushState: vi.fn(),
     flush: vi.fn(),
   };
+  const providerReplayRecorder = {
+    enabled: true as const,
+    recordRequest: vi.fn(),
+    recordResponse: vi.fn(),
+    flush: vi.fn(async () => undefined),
+  };
   const state = {
     aborted: false,
     externalAbort: false,
@@ -56,6 +62,7 @@ function createInput(overrides: Record<string, unknown> = {}) {
     sessionAgentId: "main",
     buildAbortSettlePromise: () => null,
     trajectoryRecorder,
+    providerReplayRecorder,
     trajectoryEndRecorded: false,
     cleanupYieldAborted: false,
     emitDiagnosticRunCompleted,
@@ -87,6 +94,7 @@ describe("cleanupEmbeddedAttemptSessionPhase", () => {
         trajectoryRecorder: input.trajectoryRecorder,
       }),
     );
+    expect(input.providerReplayRecorder.flush).toHaveBeenCalledOnce();
     expect(hoisted.clearToolSearchCatalog).toHaveBeenCalledWith(
       expect.objectContaining({ runId: "run-1", sessionId: "session-1", agentId: "main" }),
     );

@@ -1,6 +1,7 @@
 /** Prepares the session-owned runtime used by one embedded attempt. */
 import { createAnthropicPayloadLogger } from "../../anthropic-payload-log.js";
 import { createCacheTrace } from "../../cache-trace.js";
+import { createProviderReplayRecorder } from "../../provider-replay-log.js";
 import type { guardSessionManager } from "../../session-tool-result-guard-wrapper.js";
 import type { AgentSession } from "../../sessions/index.js";
 import { getProviderPromptState } from "../provider-prompt-state.js";
@@ -204,6 +205,13 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
     modelApi: attempt.model.api,
     workspaceDir: attempt.workspaceDir,
   });
+  const providerReplayRecorder = createProviderReplayRecorder({
+    env: process.env,
+    runId: attempt.runId,
+    sessionId: activeSession.sessionId,
+    sessionKey: attempt.sessionKey,
+    workspaceDir: attempt.workspaceDir,
+  });
   const trajectoryRecorder = await prepareEmbeddedAttemptTrajectory({
     activeSession,
     attempt,
@@ -238,6 +246,8 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
         Math.floor(attempt.contextTokenBudget ?? attempt.model.contextWindow),
       ),
     },
+    trajectoryRecorder,
+    providerReplayRecorder,
   });
   promptCacheRetentionRef.current = transport.effectivePromptCacheRetention;
 
@@ -249,6 +259,7 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
     contextGuards,
     isOpenAIResponsesApi,
     preparedUserTurnMessage,
+    providerReplayRecorder,
     sessionManager,
     sessionPromptState,
     settleTracker,
