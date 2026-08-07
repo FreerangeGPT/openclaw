@@ -482,8 +482,7 @@ export function wrapStreamFnWithProviderPromptState(params: {
   ) => void;
   observeProviderStream?: (
     stream: AssistantMessageEventStreamLike,
-    providerCallStartedAt: number,
-    snapshot: ProviderPromptSnapshot,
+    readSnapshot: () => ProviderPromptSnapshot | undefined,
   ) => AssistantMessageEventStreamLike;
   observeProviderError?: (error: unknown, snapshot: ProviderPromptSnapshot) => void;
   observeProviderPayload?: (params: {
@@ -561,12 +560,11 @@ export function wrapStreamFnWithProviderPromptState(params: {
       }
       throw error;
     }
-    return !providerPromptSnapshot || !params.observeProviderStream
-      ? stream
-      : params.observeProviderStream(
-          stream,
-          providerPromptSnapshot.providerCallStartedAt,
-          providerPromptSnapshot,
-        );
+    // Some transports return their stream before asynchronously invoking
+    // onPayload. Resolve the request snapshot at terminal consumption time or
+    // those calls retain a request record but never receive a paired response.
+    return params.observeProviderStream
+      ? params.observeProviderStream(stream, () => providerPromptSnapshot)
+      : stream;
   };
 }

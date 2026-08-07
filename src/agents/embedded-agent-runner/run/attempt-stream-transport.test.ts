@@ -1,9 +1,14 @@
-import { type AssistantMessage, createAssistantMessageEventStream } from "openclaw/plugin-sdk/llm";
+import {
+  type AssistantMessage,
+  createAssistantMessageEventStream,
+  type Model,
+} from "openclaw/plugin-sdk/llm";
 import { describe, expect, it, vi } from "vitest";
 import {
   appendMainSessionPromptCacheEvidence,
   assertMainSessionCacheKeeperEvidenceFresh,
 } from "../prompt-cache-evidence.js";
+import { wrapStreamFnWithProviderPromptState } from "../provider-prompt-state.js";
 import {
   observeCacheKeeperStream,
   observeProviderPromptStream,
@@ -64,7 +69,7 @@ describe("cache keeper stream observation", () => {
     const result = await observeCacheKeeperStream({
       stream,
       evidenceId,
-      providerCallStartedAt,
+      readProviderCallStartedAt: () => providerCallStartedAt,
     }).result();
 
     expect(result.stopReason).toBe("stop");
@@ -79,6 +84,69 @@ describe("cache keeper stream observation", () => {
 });
 
 describe("provider prompt stream observation", () => {
+  it("pairs a response when onPayload runs after the transport returns its stream", async () => {
+    const model = {
+      id: "claude-opus-4-8",
+      api: "anthropic-messages",
+      provider: "anthropic",
+      baseUrl: "https://api.anthropic.com",
+    } as Model;
+    const stream = createAssistantMessageEventStream();
+    const recordResponse = vi.fn();
+    let emitResponse: (() => Promise<void>) | undefined;
+    const wrapped = wrapStreamFnWithProviderPromptState({
+      streamFn: async (_model, _context, options) => {
+        emitResponse = async () => {
+          await options?.onPayload?.({ model: model.id, messages: [] }, model);
+          stream.end({
+            role: "assistant",
+            content: [{ type: "text", text: "done" }],
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            usage: {
+              input: 1,
+              output: 1,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 2,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: "stop",
+            timestamp: Date.now(),
+          });
+        };
+        return stream;
+      },
+      state: { providerCallCount: 0 },
+      effectiveContextTokenBudget: 128_000,
+      observeProviderStream: (providerStream, readSnapshot) =>
+        observeProviderPromptStream({
+          stream: providerStream,
+          readSnapshot,
+          replayRecorder: {
+            enabled: true,
+            recordRequest: vi.fn(),
+            recordResponse,
+            flush: async () => undefined,
+          },
+        }),
+    });
+
+    const observed = await wrapped(model, { messages: [], tools: [] });
+    expect(emitResponse).toBeDefined();
+    await emitResponse?.();
+    await observed.result();
+
+    expect(recordResponse).toHaveBeenCalledOnce();
+    expect(recordResponse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.objectContaining({ stopReason: "stop" }),
+        snapshot: expect.objectContaining({ providerCallSequence: 1 }),
+      }),
+    );
+  });
+
   it("records one completion with that provider call's usage", async () => {
     const recordEvent = vi.fn();
     const recordResponse = vi.fn();
@@ -119,7 +187,7 @@ describe("provider prompt stream observation", () => {
 
     const observed = observeProviderPromptStream({
       stream,
-      snapshot,
+      readSnapshot: () => snapshot,
       trajectoryRecorder: { recordEvent, flush: async () => undefined },
       replayRecorder: {
         enabled: true,
@@ -184,7 +252,7 @@ describe("provider prompt stream observation", () => {
     } as const;
     const observed = observeProviderPromptStream({
       stream,
-      snapshot,
+      readSnapshot: () => snapshot,
       trajectoryRecorder: { recordEvent, flush: async () => undefined },
       replayRecorder: {
         enabled: true,
@@ -257,7 +325,7 @@ describe("provider prompt stream observation", () => {
     } as const;
     const observed = observeProviderPromptStream({
       stream,
-      snapshot,
+      readSnapshot: () => snapshot,
       trajectoryRecorder: { recordEvent, flush: async () => undefined },
       replayRecorder: {
         enabled: true,

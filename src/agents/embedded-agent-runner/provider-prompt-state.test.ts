@@ -84,9 +84,15 @@ describe("provider prompt state", () => {
       effectiveContextTokenBudget: 128_000,
       observeProviderPayload: ({ snapshot }) => payloadSnapshots.push(snapshot),
       observeProviderError: (error, snapshot) => errorSnapshots.push({ error, snapshot }),
-      observeProviderStream: (stream, _providerCallStartedAt, snapshot) => {
-        streamSnapshot = snapshot;
-        return stream;
+      observeProviderStream: (stream, readSnapshot) => {
+        return {
+          result: async () => {
+            const result = await stream.result();
+            streamSnapshot = readSnapshot();
+            return result;
+          },
+          [Symbol.asyncIterator]: () => stream[Symbol.asyncIterator](),
+        };
       },
     });
 
@@ -534,9 +540,15 @@ describe("provider prompt state", () => {
           tokenUpperBounds: identity.messageContinuity.tokenUpperBounds,
         });
       },
-      observeProviderStream: (stream, boundaryAt) => {
-        expect(boundaryAt).toBe(nowMs);
-        return stream;
+      observeProviderStream: (stream, readSnapshot) => {
+        return {
+          result: async () => {
+            const result = await stream.result();
+            expect(readSnapshot()?.providerCallStartedAt).toBe(nowMs);
+            return result;
+          },
+          [Symbol.asyncIterator]: () => stream[Symbol.asyncIterator](),
+        };
       },
     });
 

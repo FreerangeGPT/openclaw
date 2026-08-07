@@ -82,7 +82,7 @@ function recordProviderPromptCompletion(params: {
 
 export function observeProviderPromptStream(params: {
   stream: AssistantMessageEventStreamLike;
-  snapshot: ProviderPromptSnapshot;
+  readSnapshot: () => ProviderPromptSnapshot | undefined;
   trajectoryRecorder?: EmbeddedRunAttemptTrajectoryRecorder | null;
   replayRecorder?: ProviderReplayRecorder | null;
 }): AssistantMessageEventStreamLike {
@@ -91,9 +91,13 @@ export function observeProviderPromptStream(params: {
     if (settled) {
       return;
     }
+    const snapshot = params.readSnapshot();
+    if (!snapshot) {
+      return;
+    }
     settled = true;
     recordProviderPromptCompletion({
-      snapshot: params.snapshot,
+      snapshot,
       trajectoryRecorder: params.trajectoryRecorder,
       replayRecorder: params.replayRecorder,
       ...(message === undefined ? {} : { message }),
@@ -136,7 +140,7 @@ export function observeProviderPromptStream(params: {
 export function observeCacheKeeperStream(params: {
   stream: AssistantMessageEventStreamLike;
   evidenceId: string;
-  providerCallStartedAt: number;
+  readProviderCallStartedAt: () => number | undefined;
 }): AssistantMessageEventStreamLike {
   let refreshAttempted = false;
   const refreshEvidence = (
@@ -145,10 +149,14 @@ export function observeCacheKeeperStream(params: {
     if (refreshAttempted) {
       return;
     }
+    const providerCallStartedAt = params.readProviderCallStartedAt();
+    if (providerCallStartedAt === undefined) {
+      return;
+    }
     refreshAttempted = true;
     refreshLivePromptCacheEvidence({
       evidenceId: params.evidenceId,
-      timestamp: params.providerCallStartedAt,
+      timestamp: providerCallStartedAt,
       usage,
     });
   };
@@ -345,17 +353,17 @@ export async function prepareEmbeddedAttemptTransport(input: {
         }
       }
     },
-    observeProviderStream: (stream, providerCallStartedAt, snapshot) => {
+    observeProviderStream: (stream, readSnapshot) => {
       const cacheObservedStream = promptCacheKeeperEvidenceId
         ? observeCacheKeeperStream({
             stream,
             evidenceId: promptCacheKeeperEvidenceId,
-            providerCallStartedAt,
+            readProviderCallStartedAt: () => readSnapshot()?.providerCallStartedAt,
           })
         : stream;
       return observeProviderPromptStream({
         stream: cacheObservedStream,
-        snapshot,
+        readSnapshot,
         trajectoryRecorder: input.trajectoryRecorder,
         replayRecorder: input.providerReplayRecorder,
       });
