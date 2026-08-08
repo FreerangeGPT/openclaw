@@ -1,5 +1,6 @@
 import os from "node:os";
 import { isAcpRuntimeSpawnAvailable } from "../../../acp/runtime/availability.js";
+import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
 import { resolveRuntimeOsLabel } from "../../../infra/os-summary.js";
 import { listRegisteredPluginAgentPromptGuidance } from "../../../plugins/command-registry-state.js";
@@ -34,7 +35,9 @@ import { buildSystemPromptParams } from "../../system-prompt-params.js";
 import { buildSystemPromptReport } from "../../system-prompt-report.js";
 import type { ToolSearchCatalogRef } from "../../tool-search.js";
 import { buildToolSchemaDirectoryPrompt } from "../../tool-search.js";
+import { log } from "../logger.js";
 import { buildEmbeddedMessageActionDiscoveryInput } from "../message-action-discovery-input.js";
+import { isCanonicalAgentMainSession } from "../prompt-cache-evidence.js";
 import { buildEmbeddedSandboxInfo, resolveEmbeddedSandboxInfoExecPolicy } from "../sandbox-info.js";
 import { buildEmbeddedSystemPrompt } from "../system-prompt.js";
 import type { prepareEmbeddedAttemptBootstrap } from "./attempt-bootstrap-prepare.js";
@@ -47,6 +50,59 @@ import type { EmbeddedRunAttemptParams } from "./types.js";
 
 type PreparedBootstrap = Awaited<ReturnType<typeof prepareEmbeddedAttemptBootstrap>>;
 type PromptTools = Parameters<typeof buildEmbeddedSystemPrompt>[0]["tools"];
+
+// Record the sink side of the heartbeat keeper handoff and the prompt decision it controls.
+// Partial state means the provider request can lose cache identity or gain heartbeat-only text.
+export function logHeartbeatPromptCacheAssembly(params: {
+  agentId: string;
+  config: OpenClawConfig;
+  heartbeatSystemPromptInjected: boolean;
+  modelId: string;
+  modelSelectionLocked?: boolean;
+  promptCacheKeeperEvidenceId?: string;
+  promptCacheKeeperTranscriptAnchorId?: string;
+  provider: string;
+  runId: string;
+  sessionKey?: string;
+  trigger?: EmbeddedRunAttemptParams["trigger"];
+}): void {
+  if (
+    params.trigger !== "heartbeat" ||
+    !isCanonicalAgentMainSession({
+      cfg: params.config,
+      agentId: params.agentId,
+      sessionKey: params.sessionKey,
+    })
+  ) {
+    return;
+  }
+  const evidencePresent = Boolean(params.promptCacheKeeperEvidenceId);
+  const transcriptAnchorPresent = Boolean(params.promptCacheKeeperTranscriptAnchorId);
+  const modelSelectionLocked = params.modelSelectionLocked === true;
+  const keeperHandoffRequested = evidencePresent || transcriptAnchorPresent || modelSelectionLocked;
+  const keeperHandoffComplete = evidencePresent && transcriptAnchorPresent && modelSelectionLocked;
+  const meta = {
+    runId: params.runId,
+    agentId: params.agentId,
+    sessionKey: params.sessionKey,
+    provider: params.provider,
+    model: params.modelId,
+    cacheEvidenceId: params.promptCacheKeeperEvidenceId ?? null,
+    transcriptAnchorId: params.promptCacheKeeperTranscriptAnchorId ?? null,
+    modelSelectionLocked,
+    keeperHandoffRequested,
+    keeperHandoffComplete,
+    heartbeatSystemPromptInjected: params.heartbeatSystemPromptInjected,
+  };
+  if (keeperHandoffRequested && (!keeperHandoffComplete || params.heartbeatSystemPromptInjected)) {
+    log.warn(
+      "[prompt-cache] canonical heartbeat prompt assembly received inconsistent keeper state",
+      meta,
+    );
+    return;
+  }
+  log.info("[prompt-cache] canonical heartbeat prompt assembly", meta);
+}
 
 export async function prepareEmbeddedAttemptSystemPrompt(params: {
   activeContextEngine: EmbeddedRunAttemptParams["contextEngine"];
@@ -201,7 +257,7 @@ export async function prepareEmbeddedAttemptSystemPrompt(params: {
     cwd: params.effectiveCwd,
     moduleUrl: import.meta.url,
   });
-  const heartbeatPrompt = shouldInjectHeartbeatPrompt({
+  const shouldInjectHeartbeatSystemPrompt = shouldInjectHeartbeatPrompt({
     config: attempt.config,
     agentId: params.sessionAgentId,
     defaultAgentId: params.defaultAgentId,
@@ -211,7 +267,21 @@ export async function prepareEmbeddedAttemptSystemPrompt(params: {
     preservePromptCacheIdentity: Boolean(attempt.promptCacheKeeperEvidenceId),
     trigger: attempt.trigger,
     bootstrapContextRunKind: attempt.bootstrapContextRunKind,
-  })
+  });
+  logHeartbeatPromptCacheAssembly({
+    agentId: params.sessionAgentId,
+    config: attempt.config ?? {},
+    heartbeatSystemPromptInjected: shouldInjectHeartbeatSystemPrompt,
+    modelId: attempt.modelId,
+    modelSelectionLocked: attempt.modelSelectionLocked,
+    promptCacheKeeperEvidenceId: attempt.promptCacheKeeperEvidenceId,
+    promptCacheKeeperTranscriptAnchorId: attempt.promptCacheKeeperTranscriptAnchorId,
+    provider: attempt.provider,
+    runId: attempt.runId,
+    sessionKey: attempt.sessionKey,
+    trigger: attempt.trigger,
+  });
+  const heartbeatPrompt = shouldInjectHeartbeatSystemPrompt
     ? resolveHeartbeatPromptForSystemPrompt({
         config: attempt.config,
         agentId: params.sessionAgentId,

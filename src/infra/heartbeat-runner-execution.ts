@@ -54,7 +54,7 @@ import { isWithinActiveHours } from "./heartbeat-active-hours.js";
 import {
   reportExpensiveMainSessionHeartbeatSkip,
   resolveExpensiveMainSessionHeartbeatSkip,
-  resolveHeartbeatCacheKeeperReplyOptions,
+  resolveLoggedHeartbeatCacheKeeperReplyOptions,
   resolveHeartbeatSessionIsolation,
   resolvePromptAwareHeartbeatCacheKeeperPolicy,
 } from "./heartbeat-cache-keeper.js";
@@ -629,7 +629,7 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
       hasCronEvents,
     }),
     autoIsolatedMainSession: Boolean(autoIsolatedMainSession),
-    cacheKeeperReplyOptions: resolveHeartbeatCacheKeeperReplyOptions({
+    cacheKeeperReplyOptions: resolveLoggedHeartbeatCacheKeeperReplyOptions({
       autoIsolatedMainSession: Boolean(autoIsolatedMainSession),
       heartbeat,
       mainSessionCacheKeeper,

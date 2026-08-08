@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   appendMainSessionPromptCacheEvidence,
   MainSessionCacheKeeperIdentityMismatchError,
@@ -9,6 +9,7 @@ import {
   appendExactAssistantMessageToSessionTranscript,
   type SessionTranscriptAssistantMessage,
 } from "../config/sessions/transcript.js";
+import { heartbeatLog } from "./heartbeat-runner-config.js";
 import { runHeartbeatOnce } from "./heartbeat-runner.js";
 import {
   seedMainSessionStore,
@@ -18,6 +19,10 @@ import {
 
 beforeEach(() => {
   setupTelegramHeartbeatPluginRuntimeForTests();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 function createConfig(params: {
@@ -213,6 +218,7 @@ describe("runHeartbeatOnce large-session cost guard", () => {
 
   it("keeps a scheduled 15-minute long-retention cache keeper on the main session", async () => {
     await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
+      const infoSpy = vi.spyOn(heartbeatLog, "info").mockImplementation(() => {});
       const cfg = createConfig({
         workspace: tmpDir,
         storePath,
@@ -244,6 +250,17 @@ describe("runHeartbeatOnce large-session cost guard", () => {
       expect(replySpy.mock.calls[0]?.[1]).not.toHaveProperty("heartbeatCacheRetentionOverride");
       expect(replySpy.mock.calls[0]?.[1]).not.toHaveProperty("enableHeartbeatTool");
       expect(replySpy.mock.calls[0]?.[1]?.bootstrapContextMode).toBeUndefined();
+      expect(infoSpy).toHaveBeenCalledWith(
+        "heartbeat: cache keeper prepared",
+        expect.objectContaining({
+          agentId: "main",
+          sessionKey,
+          cacheEvidenceId: expect.any(String),
+          transcriptAnchorId,
+          authProfilePinned: false,
+          modelFallbacksDisabled: true,
+        }),
+      );
     });
   });
 

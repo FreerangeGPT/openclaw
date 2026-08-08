@@ -1,12 +1,19 @@
 // Coverage for assembling provider-transformed embedded attempt system prompts.
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { log } from "../logger.js";
 
 let buildAttemptSystemPrompt: typeof import("./attempt-system-prompt.js").buildAttemptSystemPrompt;
 let prepareEmbeddedAttemptSystemPrompt: typeof import("./attempt-system-prompt-prepare.js").prepareEmbeddedAttemptSystemPrompt;
+let logHeartbeatPromptCacheAssembly: typeof import("./attempt-system-prompt-prepare.js").logHeartbeatPromptCacheAssembly;
 
 beforeAll(async () => {
   ({ buildAttemptSystemPrompt } = await import("./attempt-system-prompt.js"));
-  ({ prepareEmbeddedAttemptSystemPrompt } = await import("./attempt-system-prompt-prepare.js"));
+  ({ prepareEmbeddedAttemptSystemPrompt, logHeartbeatPromptCacheAssembly } =
+    await import("./attempt-system-prompt-prepare.js"));
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 const baseProviderTransform = {
@@ -24,6 +31,53 @@ const transformProviderSystemPrompt: Parameters<
 >[0]["transformProviderSystemPrompt"] = ({ context }) => context.systemPrompt;
 
 describe("buildAttemptSystemPrompt", () => {
+  it("logs complete and partial canonical heartbeat keeper handoffs", () => {
+    const infoSpy = vi.spyOn(log, "info").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(log, "warn").mockImplementation(() => {});
+    const base = {
+      agentId: "main",
+      config: {},
+      heartbeatSystemPromptInjected: false,
+      modelId: "claude-opus-4-8",
+      provider: "anthropic",
+      runId: "run-heartbeat",
+      sessionKey: "agent:main:main",
+      trigger: "heartbeat" as const,
+    };
+
+    logHeartbeatPromptCacheAssembly({
+      ...base,
+      modelSelectionLocked: true,
+      promptCacheKeeperEvidenceId: "cache-evidence-1",
+      promptCacheKeeperTranscriptAnchorId: "transcript-anchor-1",
+    });
+    logHeartbeatPromptCacheAssembly({
+      ...base,
+      heartbeatSystemPromptInjected: true,
+      modelSelectionLocked: true,
+    });
+
+    expect(infoSpy).toHaveBeenCalledWith(
+      "[prompt-cache] canonical heartbeat prompt assembly",
+      expect.objectContaining({
+        cacheEvidenceId: "cache-evidence-1",
+        transcriptAnchorId: "transcript-anchor-1",
+        keeperHandoffComplete: true,
+        heartbeatSystemPromptInjected: false,
+      }),
+    );
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[prompt-cache] canonical heartbeat prompt assembly received inconsistent keeper state",
+      expect.objectContaining({
+        cacheEvidenceId: null,
+        transcriptAnchorId: null,
+        modelSelectionLocked: true,
+        keeperHandoffComplete: false,
+        heartbeatSystemPromptInjected: true,
+      }),
+    );
+  });
+
   it("does not invoke ambient contributors during settled finalization", async () => {
     const getProviderRuntimeHandle = vi.fn();
     const markStage = vi.fn();

@@ -246,6 +246,7 @@ function resolveLastCacheTouch(params: {
 export async function resolveHeartbeatCacheKeeperPolicy(params: {
   cfg: OpenClawConfig;
   agentId: string;
+  sessionKey: string;
   heartbeat?: HeartbeatConfig;
   entry?: SessionEntry;
   storePath: string;
@@ -286,6 +287,8 @@ export async function resolveHeartbeatCacheKeeperPolicy(params: {
       })
     : undefined;
   return {
+    agentId: params.agentId,
+    sessionKey: params.sessionKey,
     preserveMainSessionCache,
     heartbeatIntervalMs,
     heartbeatCacheRetention,
@@ -384,6 +387,31 @@ export function resolveHeartbeatCacheKeeperReplyOptions(params: {
         }
       : {}),
   };
+}
+
+export function resolveLoggedHeartbeatCacheKeeperReplyOptions(
+  params: Parameters<typeof resolveHeartbeatCacheKeeperReplyOptions>[0],
+) {
+  const replyOptions = resolveHeartbeatCacheKeeperReplyOptions(params);
+  if (params.mainSessionCacheKeeper) {
+    // Pair admission-time proof with the embedded prompt-assembly log. Without
+    // both IDs, an optional-field handoff loss looks like an unexplained cache rewrite.
+    heartbeatLog.info("heartbeat: cache keeper prepared", {
+      agentId: params.policy.agentId,
+      sessionKey: params.policy.sessionKey,
+      cacheRetention: params.policy.heartbeatCacheRetention,
+      heartbeatIntervalMs: params.policy.heartbeatIntervalMs,
+      cacheEvidenceAgeMs: params.policy.lastCacheTouch
+        ? Math.max(0, params.policy.nowMs - params.policy.lastCacheTouch.timestamp)
+        : null,
+      cacheEvidenceId: replyOptions.heartbeatPromptCacheEvidenceId ?? null,
+      transcriptAnchorId: replyOptions.heartbeatPromptCacheTranscriptAnchorId ?? null,
+      authProfilePinned: Boolean(replyOptions.heartbeatAuthProfileOverride),
+      model: replyOptions.heartbeatModelOverride ?? null,
+      modelFallbacksDisabled: replyOptions.heartbeatModelFallbacksDisabled === true,
+    });
+  }
+  return replyOptions;
 }
 
 type HeartbeatCostGuardPreflight = {
