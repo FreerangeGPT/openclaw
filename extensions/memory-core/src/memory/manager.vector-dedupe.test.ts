@@ -13,12 +13,16 @@ describe("memory vector dedupe", () => {
 
   it("deletes existing vector rows before inserting replacements", () => {
     db = new DatabaseSync(":memory:");
-    db.exec("CREATE TABLE memory_index_chunks_vec (id TEXT PRIMARY KEY, embedding BLOB)");
+    db.exec(
+      "CREATE TABLE memory_index_chunks_vec (id TEXT PRIMARY KEY, embedding BLOB, source TEXT, model TEXT)",
+    );
 
     replaceMemoryVectorRow({
       db,
       id: "chunk-1",
       embedding: [1, 0, 0],
+      source: "memory",
+      model: "test-model",
     });
 
     db.exec(`
@@ -35,6 +39,8 @@ describe("memory vector dedupe", () => {
         db,
         id: "chunk-1",
         embedding: [2, 0, 0],
+        source: "memory",
+        model: "test-model",
       }),
     ).toBeUndefined();
 

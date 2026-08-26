@@ -826,6 +826,7 @@ export const MemorySearchSchema = z
         vector: z
           .object({
             enabled: z.boolean().optional(),
+            execution: z.union([z.literal("in-process"), z.literal("child-process")]).optional(),
             extensionPath: z.string().optional(),
           })
           .strict()

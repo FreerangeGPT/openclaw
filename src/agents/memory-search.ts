@@ -74,6 +74,7 @@ export type ResolvedMemorySearchConfig = {
     };
     vector: {
       enabled: boolean;
+      execution: "in-process" | "child-process";
       extensionPath?: string;
     };
   };
@@ -304,6 +305,10 @@ function mergeConfig(
   });
   const vector = {
     enabled: overrides?.store?.vector?.enabled ?? defaults?.store?.vector?.enabled ?? true,
+    execution:
+      overrides?.store?.vector?.execution ??
+      defaults?.store?.vector?.execution ??
+      ("in-process" as const),
     extensionPath:
       overrides?.store?.vector?.extensionPath ?? defaults?.store?.vector?.extensionPath,
   };

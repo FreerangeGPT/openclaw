@@ -159,5 +159,7 @@ export interface MemorySearchManager {
   probeEmbeddingAvailability(): Promise<MemoryEmbeddingProbeResult>;
   probeVectorStoreAvailability?(): Promise<boolean>;
   probeVectorAvailability(): Promise<boolean>;
+  /** Eagerly open and page in an isolated vector-search runtime when supported. */
+  warmVectorSearch?(signal?: AbortSignal): Promise<void>;
   close?(): Promise<void>;
 }

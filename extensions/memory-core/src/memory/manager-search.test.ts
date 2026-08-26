@@ -1678,7 +1678,52 @@ describe("searchVector sqlite-vec KNN", () => {
     }
   });
 
-  it("falls back when filters hide matches beyond sqlite-vec's KNN cap", async () => {
+  it("uses cosine distance for native top-k selection", async () => {
+    const db = new DatabaseSync(":memory:", { allowExtension: true });
+    try {
+      const loaded = await loadSqliteVecExtension({ db });
+      expect(loaded.ok, loaded.error).toBe(true);
+      ensureMemoryIndexSchema({ db, cacheEnabled: false, ftsEnabled: false });
+      db.exec(`
+        CREATE VIRTUAL TABLE memory_index_chunks_vec USING vec0(
+          id TEXT PRIMARY KEY,
+          embedding FLOAT[2] distance_metric=cosine,
+          source TEXT,
+          model TEXT
+        );
+      `);
+      const insertChunk = db.prepare(
+        "INSERT INTO memory_index_chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at) VALUES (?, ?, 'memory', 1, 1, ?, 'target-model', ?, ?, 1)",
+      );
+      const insertVector = db.prepare(
+        "INSERT INTO memory_index_chunks_vec (id, embedding, source, model) VALUES (?, ?, 'memory', 'target-model')",
+      );
+      const add = (id: string, embedding: [number, number]) => {
+        insertChunk.run(id, `memory/${id}.md`, id, id, JSON.stringify(embedding));
+        insertVector.run(id, vectorToBlob(embedding));
+      };
+      add("cosine-best", [100, 1]);
+      add("l2-best", [1, 1]);
+
+      const results = await searchVector({
+        db,
+        vectorTable: "memory_index_chunks_vec",
+        providerModel: "target-model",
+        queryVec: [1, 0],
+        limit: 1,
+        snippetMaxChars: 200,
+        ensureVectorReady: async () => true,
+        sourceFilterVec: { sql: "", params: [] },
+        sourceFilterChunks: { sql: "", params: [] },
+      });
+
+      expect(results.map((row) => row.id)).toEqual(["cosine-best"]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("filters model and source metadata before top-k selection", async () => {
     const db = new DatabaseSync(":memory:", { allowExtension: true });
     try {
       const loaded = await loadSqliteVecExtension({ db });
@@ -1691,7 +1736,9 @@ describe("searchVector sqlite-vec KNN", () => {
       db.exec(`
         CREATE VIRTUAL TABLE memory_index_chunks_vec USING vec0(
           id TEXT PRIMARY KEY,
-          embedding FLOAT[2]
+          embedding FLOAT[2] distance_metric=cosine,
+          source TEXT,
+          model TEXT
         );
       `);
 
@@ -1699,7 +1746,7 @@ describe("searchVector sqlite-vec KNN", () => {
         "INSERT INTO memory_index_chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       );
       const insertVector = db.prepare(
-        "INSERT INTO memory_index_chunks_vec (id, embedding) VALUES (?, ?)",
+        "INSERT INTO memory_index_chunks_vec (id, embedding, source, model) VALUES (?, ?, ?, ?)",
       );
       const addChunk = (params: {
         id: string;
@@ -1719,7 +1766,7 @@ describe("searchVector sqlite-vec KNN", () => {
           JSON.stringify(params.vector),
           1,
         );
-        insertVector.run(params.id, vectorToBlob(params.vector));
+        insertVector.run(params.id, vectorToBlob(params.vector), params.source, params.model);
       };
 
       for (let i = 0; i < 20; i += 1) {
@@ -1774,13 +1821,6 @@ describe("searchVector sqlite-vec KNN", () => {
       });
       db.exec("COMMIT");
 
-      const overLimitQuery = db.prepare(
-        "SELECT id FROM memory_index_chunks_vec WHERE embedding MATCH ? AND k = ?",
-      );
-      expect(() => overLimitQuery.all(vectorToBlob([1, 0]), 4097)).toThrow(
-        "k value in knn query too large, provided 4097 and the limit is 4096",
-      );
-
       const results = await searchVector({
         db,
         vectorTable: "memory_index_chunks_vec",
@@ -1790,7 +1830,7 @@ describe("searchVector sqlite-vec KNN", () => {
         limit: 2,
         snippetMaxChars: 200,
         ensureVectorReady: async () => true,
-        sourceFilterVec: { sql: " AND c.source IN (?)", params: ["memory"] },
+        sourceFilterVec: { sql: " AND v.source IN (?)", params: ["memory"] },
         sourceFilterChunks: { sql: " AND source IN (?)", params: ["memory"] },
       });
 

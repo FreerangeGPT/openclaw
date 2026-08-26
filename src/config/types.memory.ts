@@ -108,6 +108,8 @@ export type MemorySearchConfig = {
     vector?: {
       /** Enable the sqlite-vec semantic index (default: true). */
       enabled?: boolean;
+      /** Execute vector scans in the Gateway or an isolated child process. */
+      execution?: "in-process" | "child-process";
       /** Optional override path to sqlite-vec extension (.dylib/.so/.dll). */
       extensionPath?: string;
     };

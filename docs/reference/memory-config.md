@@ -526,12 +526,23 @@ exported transcripts part of the ordinary memory corpus.
 
 ## SQLite vector acceleration (sqlite-vec)
 
-| Key                          | Type      | Default | Description                       |
-| ---------------------------- | --------- | ------- | --------------------------------- |
-| `store.vector.enabled`       | `boolean` | `true`  | Use sqlite-vec for vector queries |
-| `store.vector.extensionPath` | `string`  | bundled | Override sqlite-vec path          |
+| Key                          | Type      | Default        | Description                                       |
+| ---------------------------- | --------- | -------------- | ------------------------------------------------- |
+| `store.vector.enabled`       | `boolean` | `true`         | Use sqlite-vec for vector queries                 |
+| `store.vector.execution`     | `string`  | `"in-process"` | Run vector scans in-process or in a child process |
+| `store.vector.extensionPath` | `string`  | bundled        | Override sqlite-vec path                          |
 
-When sqlite-vec is unavailable, OpenClaw falls back to in-process cosine similarity automatically.
+When sqlite-vec is unavailable, OpenClaw falls back to exact cosine similarity automatically. The
+default mode runs that fallback in the Gateway; child-process mode keeps it inside the worker.
+
+Set `store.vector.execution: "child-process"` for a large builtin index when
+cold sqlite-vec scans or exact cosine fallback would put material pressure on
+the Gateway heap. OpenClaw keeps embeddings, indexing, hybrid ranking, and
+transcript authorization in the Gateway, while a private per-agent worker owns
+only vector reads and scoring. The worker is warmed during Gateway startup,
+inherits no credential environment variables, and is terminated on a canceled
+or timed-out search. This mode never falls back to vector scoring in the
+Gateway process; worker failure makes that memory search fail explicitly.
 
 ---
 

@@ -119,7 +119,18 @@ function shouldSkipStartupModelPrewarm(env: NodeJS.ProcessEnv = process.env): bo
 }
 
 function resolveGatewayMemoryStartupPolicy(cfg: OpenClawConfig): GatewayMemoryStartupPolicy {
-  void cfg;
+  if (cfg.memory?.backend === "qmd") {
+    return { mode: "off" };
+  }
+  const usesChildProcess = (search: { store?: { vector?: { execution?: string } } }): boolean =>
+    search.store?.vector?.execution === "child-process";
+  if (cfg.memory?.search && usesChildProcess(cfg.memory.search)) {
+    return { mode: "immediate" };
+  }
+  const agentEntries = [...(cfg.agents?.list ?? []), ...Object.values(cfg.agents?.entries ?? {})];
+  if (agentEntries.some((entry) => entry.memory?.search && usesChildProcess(entry.memory.search))) {
+    return { mode: "immediate" };
+  }
   return { mode: "off" };
 }
 
@@ -136,7 +147,7 @@ function scheduleGatewayMemoryBackend(params: {
       const { startGatewayMemoryBackend } = await import("./server-startup-memory.js");
       await startGatewayMemoryBackend({ cfg: params.cfg, log: params.log });
     }).catch((err: unknown) => {
-      params.log.warn(`qmd memory startup initialization failed: ${String(err)}`);
+      params.log.warn(`memory startup initialization failed: ${String(err)}`);
     });
   };
   if (params.policy.mode === "immediate") {

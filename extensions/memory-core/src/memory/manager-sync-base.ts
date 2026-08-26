@@ -44,6 +44,7 @@ import {
   type MemoryIndexProviderIdentity,
 } from "./manager-reindex-state.js";
 import {
+  hasMemoryVectorFilterColumns,
   markMemoryVectorRebuildRequired,
   requiresMemoryVectorRebuild,
 } from "./manager-vector-rebuild-state.js";
@@ -584,7 +585,7 @@ export abstract class MemoryManagerSyncBase {
   }
 
   private ensureVectorTable(dimensions: number): void {
-    if (this.vector.dims === dimensions && memoryTableExists(this.db, VECTOR_TABLE)) {
+    if (this.vector.dims === dimensions && hasMemoryVectorFilterColumns(this.db, VECTOR_TABLE)) {
       return;
     }
     if (!this.dropVectorTable()) {
@@ -593,7 +594,7 @@ export abstract class MemoryManagerSyncBase {
     this.db.exec(
       `CREATE VIRTUAL TABLE IF NOT EXISTS ${VECTOR_TABLE} USING vec0(\n` +
         `  id TEXT PRIMARY KEY,\n` +
-        `  embedding FLOAT[${dimensions}]\n` +
+        `  embedding FLOAT[${dimensions}] distance_metric=cosine, source TEXT, model TEXT\n` +
         `)`,
     );
     this.vector.dims = dimensions;

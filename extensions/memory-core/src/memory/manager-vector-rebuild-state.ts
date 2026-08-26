@@ -10,6 +10,19 @@ function vectorTableExists(db: DatabaseSync, tableName: string): boolean {
   );
 }
 
+/** True when the derived vec0 table can filter before KNN candidate selection. */
+export function hasMemoryVectorFilterColumns(db: DatabaseSync, tableName: string): boolean {
+  if (!vectorTableExists(db, tableName)) {
+    return false;
+  }
+  const columns = new Set(
+    (db.prepare(`PRAGMA table_xinfo(${tableName})`).all() as Array<{ name?: unknown }>).flatMap(
+      (row) => (typeof row.name === "string" ? [row.name] : []),
+    ),
+  );
+  return columns.has("source") && columns.has("model");
+}
+
 export function markMemoryVectorIndexClean(db: DatabaseSync): void {
   db.prepare(
     `INSERT INTO ${MEMORY_INDEX_META_TABLE} (key, value) VALUES (?, 'clean')
@@ -38,6 +51,9 @@ export function requiresMemoryVectorRebuild(params: {
   }
   if (!vectorTableExists(params.db, params.vectorTable)) {
     return Boolean(params.metaVectorDims && params.hasSemanticChunks);
+  }
+  if (!hasMemoryVectorFilterColumns(params.db, params.vectorTable)) {
+    return true;
   }
   // Existing releases had no completeness marker. Rebuild their vector table
   // once rather than assuming it has neither missing nor orphaned rows.

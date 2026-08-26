@@ -12,6 +12,8 @@ export function replaceMemoryVectorRow(params: {
   db: VectorWriteDb;
   id: string;
   embedding: number[];
+  source: "memory" | "sessions";
+  model: string;
   tableName?: string;
 }): void {
   const tableName = params.tableName ?? "memory_index_chunks_vec";
@@ -19,6 +21,6 @@ export function replaceMemoryVectorRow(params: {
     params.db.prepare(`DELETE FROM ${tableName} WHERE id = ?`).run(params.id);
   } catch {}
   params.db
-    .prepare(`INSERT INTO ${tableName} (id, embedding) VALUES (?, ?)`)
-    .run(params.id, vectorToBlob(params.embedding));
+    .prepare(`INSERT INTO ${tableName} (id, embedding, source, model) VALUES (?, ?, ?, ?)`)
+    .run(params.id, vectorToBlob(params.embedding), params.source, params.model);
 }

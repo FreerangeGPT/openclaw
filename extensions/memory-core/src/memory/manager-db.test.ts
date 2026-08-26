@@ -226,12 +226,16 @@ describe("memory manager database publication", () => {
       sourceDb.exec(`
         CREATE VIRTUAL TABLE memory_index_chunks_vec USING vec0(
           id TEXT PRIMARY KEY,
-          embedding FLOAT[3]
+          embedding FLOAT[3] distance_metric=cosine,
+          source TEXT,
+          model TEXT
         )
       `);
       sourceDb
-        .prepare("INSERT INTO memory_index_chunks_vec (id, embedding) VALUES (?, ?)")
-        .run("vector", JSON.stringify([0, 1, 0]));
+        .prepare(
+          "INSERT INTO memory_index_chunks_vec (id, embedding, source, model) VALUES (?, ?, ?, ?)",
+        )
+        .run("vector", JSON.stringify([0, 1, 0]), "memory", "test-model");
       sourceDb.close();
 
       await publishMemoryDatabaseTables({
@@ -242,9 +246,9 @@ describe("memory manager database publication", () => {
         vectorExtensionPath: sourceVector.extensionPath,
       });
 
-      expect(targetDb.prepare("SELECT id FROM memory_index_chunks_vec").all()).toEqual([
-        { id: "vector" },
-      ]);
+      expect(
+        targetDb.prepare("SELECT id, source, model FROM memory_index_chunks_vec").all(),
+      ).toEqual([{ id: "vector", source: "memory", model: "test-model" }]);
     } finally {
       try {
         sourceDb.close();
