@@ -1,5 +1,5 @@
 // Gateway memory startup helper.
-// Starts qmd memory boot sync for eligible agents without loading every agent.
+// Starts configured memory backend work for eligible agents without loading every agent.
 import { listAgentEntries, listAgentIds, resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { resolveMemorySearchConfig } from "../agents/memory-search.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -10,6 +10,8 @@ import {
 import { getActiveMemorySearchManager } from "../plugins/memory-runtime.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 import { SecretSurfaceUnavailableError } from "../secrets/runtime-degraded-state.js";
+
+const BUILTIN_VECTOR_WARM_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** True when qmd memory config opts into Gateway startup manager work. */
 function shouldRunQmdStartupManager(qmd: ResolvedQmdConfig): boolean {
@@ -48,7 +50,7 @@ function shouldEagerlyStartAgentMemory(params: {
   return hasExplicitAgentMemorySearchConfig(params.cfg, params.agentId);
 }
 
-/** Start qmd memory boot sync for eligible agents without eagerly loading every agent. */
+/** Start configured memory backend work for eligible agents without eagerly loading every agent. */
 export async function startGatewayMemoryBackend(params: {
   cfg: OpenClawConfig;
   log: { info?: (msg: string) => void; warn: (msg: string) => void };
@@ -56,10 +58,13 @@ export async function startGatewayMemoryBackend(params: {
   const agentIds = listAgentIds(params.cfg);
   const bootSyncAgentIds: string[] = [];
   const initializedAgentIds: string[] = [];
+  const warmedBuiltinAgentIds: string[] = [];
   const deferredAgentIds: string[] = [];
   for (const agentId of agentIds) {
+    let searchConfig: ReturnType<typeof resolveMemorySearchConfig>;
     try {
-      if (!resolveMemorySearchConfig(params.cfg, agentId)) {
+      searchConfig = resolveMemorySearchConfig(params.cfg, agentId);
+      if (!searchConfig) {
         continue;
       }
     } catch (error) {
@@ -73,6 +78,44 @@ export async function startGatewayMemoryBackend(params: {
     }
     const resolved = resolveMemoryBackendConfig({ cfg: params.cfg, agentId });
     if (!resolved) {
+      continue;
+    }
+    if (
+      resolved.backend === "builtin" &&
+      searchConfig.store.vector.enabled &&
+      searchConfig.store.vector.execution === "child-process"
+    ) {
+      if (
+        !shouldEagerlyStartAgentMemory({
+          cfg: params.cfg,
+          agentId,
+          agentCount: agentIds.length,
+        })
+      ) {
+        deferredAgentIds.push(agentId);
+        continue;
+      }
+      const { manager, error } = await getActiveMemorySearchManager({
+        cfg: params.cfg,
+        agentId,
+        purpose: "default",
+      });
+      if (!manager?.warmVectorSearch) {
+        params.log.warn(
+          `builtin memory vector worker initialization failed for agent "${agentId}": ${error ?? "manager does not support vector warmup"}`,
+        );
+        continue;
+      }
+      try {
+        await manager.warmVectorSearch(AbortSignal.timeout(BUILTIN_VECTOR_WARM_TIMEOUT_MS));
+        warmedBuiltinAgentIds.push(agentId);
+      } catch (err) {
+        // Keep the Gateway available; child mode remains fail-closed on search,
+        // and a later request can respawn the disposable worker.
+        params.log.warn(
+          `builtin memory vector worker warmup failed for agent "${agentId}": ${String(err)}`,
+        );
+      }
       continue;
     }
     if (resolved.backend !== "qmd" || !resolved.qmd) {
@@ -138,9 +181,16 @@ export async function startGatewayMemoryBackend(params: {
         .join(", ")}`,
     );
   }
+  if (warmedBuiltinAgentIds.length > 0) {
+    params.log.info?.(
+      `builtin memory vector worker warmed for ${formatAgentCount(warmedBuiltinAgentIds.length)}: ${warmedBuiltinAgentIds
+        .map((agentId) => `"${agentId}"`)
+        .join(", ")}`,
+    );
+  }
   if (deferredAgentIds.length > 0) {
     params.log.info?.(
-      `qmd memory startup initialization deferred for ${formatAgentCount(deferredAgentIds.length)}: ${deferredAgentIds
+      `memory startup initialization deferred for ${formatAgentCount(deferredAgentIds.length)}: ${deferredAgentIds
         .map((agentId) => `"${agentId}"`)
         .join(", ")}`,
     );

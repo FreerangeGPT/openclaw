@@ -80,6 +80,7 @@ export const TARGET_KEYS = [
   "memory.search.documentInputType",
   "memory.search.outputDimensionality",
   "memory.search.store.vector.extensionPath",
+  "memory.search.store.vector.execution",
   "memory.search.cache.enabled",
   "models.mode",
   "models.providers.*.auth",

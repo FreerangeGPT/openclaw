@@ -544,6 +544,7 @@ describe("memory search config", () => {
           model: "text-embedding-3-small",
           store: {
             vector: {
+              execution: "child-process",
               extensionPath: "/opt/sqlite-vec.dylib",
             },
           },
@@ -572,7 +573,17 @@ describe("memory search config", () => {
     expect(resolved?.query.maxResults).toBe(8);
     expect(resolved?.query.minScore).toBe(0.2);
     expect(resolved?.store.vector.enabled).toBe(true);
+    expect(resolved?.store.vector.execution).toBe("child-process");
     expect(resolved?.store.vector.extensionPath).toBe("/opt/sqlite-vec.dylib");
+  });
+
+  it("keeps vector execution in-process by default", () => {
+    const resolved = resolveMemorySearchConfig(
+      asConfig({ memory: { search: { provider: "openai" } }, agents: { defaults: {} } }),
+      "main",
+    );
+
+    expect(resolved?.store.vector.execution).toBe("in-process");
   });
 
   it("merges extra memory paths from defaults and overrides", () => {

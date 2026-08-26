@@ -520,6 +520,8 @@ function buildUnifiedDistEntries(): Record<string, string> {
       : {}),
     "memory-core-local-embedding-worker":
       "packages/memory-host-sdk/src/host/embeddings-worker-child.ts",
+    "memory-core-vector-search-worker":
+      "extensions/memory-core/src/memory/vector-search-worker-child.ts",
     ...listBundledPluginEntrySources(rootBundledPluginBuildEntries),
     ...bundledHookEntries,
   };

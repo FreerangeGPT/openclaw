@@ -457,6 +457,7 @@ export const FIELD_LABELS: Record<string, string> = {
   "memory.search.fallback": "Memory Search Fallback",
   "memory.search.local.modelPath": "Local Embedding Model Path",
   "memory.search.store.vector.enabled": "Memory Search Vector Index",
+  "memory.search.store.vector.execution": "Memory Search Vector Execution",
   "memory.search.store.vector.extensionPath": "Memory Search Vector Extension Path",
   "memory.search.query.maxResults": "Memory Search Max Results",
   "memory.search.query.minScore": "Memory Search Min Score",

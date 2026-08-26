@@ -31,7 +31,9 @@ function createGatewayLogMock() {
 describe("startGatewayMemoryBackend", () => {
   beforeEach(() => {
     getMemorySearchManagerMock.mockClear();
-    resolveMemorySearchConfigMock.mockReset().mockReturnValue({});
+    resolveMemorySearchConfigMock.mockReset().mockReturnValue({
+      store: { vector: { enabled: true, execution: "in-process" } },
+    });
   });
 
   it("skips initialization when memory backend is not qmd", async () => {
@@ -56,5 +58,57 @@ describe("startGatewayMemoryBackend", () => {
     expect(getMemorySearchManagerMock).not.toHaveBeenCalled();
     expect(log.info).not.toHaveBeenCalled();
     expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it("warms an opted-in builtin vector worker before Gateway readiness", async () => {
+    const warmVectorSearch = vi.fn(async () => {});
+    getMemorySearchManagerMock.mockResolvedValue({
+      manager: { warmVectorSearch },
+      error: undefined,
+    });
+    resolveMemorySearchConfigMock.mockReturnValue({
+      store: { vector: { enabled: true, execution: "child-process" } },
+    });
+    const log = createGatewayLogMock();
+
+    await startGatewayMemoryBackend({
+      cfg: { agents: { list: [{ id: "main", default: true }] }, memory: { backend: "builtin" } },
+      log,
+    });
+
+    expect(getMemorySearchManagerMock).toHaveBeenCalledWith({
+      cfg: expect.any(Object),
+      agentId: "main",
+      purpose: "default",
+    });
+    expect(warmVectorSearch).toHaveBeenCalledWith(expect.any(AbortSignal));
+    expect(log.info).toHaveBeenCalledWith(
+      'builtin memory vector worker warmed for 1 agent: "main"',
+    );
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it("keeps Gateway startup available when builtin vector warmup fails", async () => {
+    getMemorySearchManagerMock.mockResolvedValue({
+      manager: {
+        warmVectorSearch: vi.fn(async () => {
+          throw new Error("worker unavailable");
+        }),
+      },
+      error: undefined,
+    });
+    resolveMemorySearchConfigMock.mockReturnValue({
+      store: { vector: { enabled: true, execution: "child-process" } },
+    });
+    const log = createGatewayLogMock();
+
+    await startGatewayMemoryBackend({
+      cfg: { agents: { list: [{ id: "main", default: true }] }, memory: { backend: "builtin" } },
+      log,
+    });
+
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringContaining("builtin memory vector worker warmup failed"),
+    );
   });
 });

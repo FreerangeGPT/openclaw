@@ -222,7 +222,7 @@ export async function publishMemoryDatabaseTables(params: {
       replaceVirtualTable({
         db: params.targetDb,
         tableName: "memory_index_chunks_vec",
-        columns: "id, embedding",
+        columns: "id, embedding, source, model",
         // A vector-disabled connection may not have sqlite-vec loaded and cannot
         // drop an old virtual table. Missing vector metadata forces a strict
         // rebuild before that table can be queried again.

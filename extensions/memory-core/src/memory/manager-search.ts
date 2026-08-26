@@ -17,9 +17,6 @@ const FTS_QUERY_TOKEN_RE = /[\p{L}\p{N}_]+/gu;
 const SHORT_CJK_TRIGRAM_RE = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u3131-\u3163]/u;
 const EXACT_PATH_SPECIFICITY_SQL_FUNCTION = "openclaw_memory_exact_path_specificity";
 const NORMALIZED_PATH_CONTAINS_SQL_FUNCTION = "openclaw_memory_normalized_path_contains";
-const VECTOR_KNN_OVERSAMPLE_FACTOR = 8;
-// sqlite-vec v0.1.9 rejects KNN queries with k above 4096.
-const MAX_VECTOR_KNN_K = 4096;
 
 // Scan fallback vector rows in bounded batches so large chunk tables (no usable
 // vec0 index) cannot pin the main thread for multi-second windows and starve
@@ -35,7 +32,7 @@ function yieldToEventLoop(): Promise<void> {
 
 type SearchSource = MemorySource;
 
-type SearchRowResult = {
+export type SearchRowResult = {
   id: string;
   path: string;
   startLine: number;
@@ -282,16 +279,6 @@ function buildMatchQueryFromTerms(terms: string[]): string | null {
   return quoted.join(" AND ");
 }
 
-function readCount(row: Record<string, unknown> | undefined): number {
-  if (typeof row?.count === "bigint") {
-    return Number(row.count);
-  }
-  if (typeof row?.count === "number") {
-    return row.count;
-  }
-  return 0;
-}
-
 function resolveProviderModels(primary: string, aliases: string[] | undefined): string[] {
   return Array.from(new Set([primary, ...(aliases ?? []).filter(Boolean)]));
 }
@@ -400,7 +387,6 @@ export async function searchVector(params: {
     return [];
   }
   const providerModels = resolveProviderModels(params.providerModel, params.providerModelAliases);
-  const vectorModelFilter = buildModelFilter("c.model", providerModels);
   const searchFallback = () =>
     searchChunksByEmbedding({
       db: params.db,
@@ -412,69 +398,28 @@ export async function searchVector(params: {
       snippetMaxChars: params.snippetMaxChars,
     });
   if (await params.ensureVectorReady(params.queryVec.length)) {
-    // Use sqlite-vec's native KNN (MATCH ? AND k = ?) for candidate selection,
-    // which runs in ~O(log N + k) via the vec0 index, instead of the previous
-    // full-table scan over vec_distance_cosine(). Keep vec_distance_cosine() in
-    // the SELECT so `score = 1 - dist` stays in the cosine [0, 1] range the
-    // downstream merge/minScore pipeline expects. (memory_index_chunks_vec is created with
-    // sqlite-vec's default L2 distance, so v.distance cannot be used directly
-    // for scoring.)
+    // sqlite-vec v0.1.9 performs exact cosine KNN. Metadata constraints belong
+    // on the vec0 table so source/model filtering happens before top-k selection.
     const qBlob = vectorToBlob(params.queryVec);
-    const runVectorQuery = (candidateLimit: number) =>
-      params.db
-        .prepare(
-          `SELECT c.id, c.path, c.start_line, c.end_line, c.text,\n` +
-            `       c.source,\n` +
-            `       vec_distance_cosine(v.embedding, ?) AS dist\n` +
-            `  FROM ${params.vectorTable} v\n` +
-            `  JOIN memory_index_chunks c ON c.id = v.id\n` +
-            ` WHERE v.embedding MATCH ? AND k = ? AND ${vectorModelFilter}${params.sourceFilterVec.sql}\n` +
-            ` ORDER BY dist ASC\n` +
-            ` LIMIT ?`,
-        )
-        .all(
-          qBlob,
-          qBlob,
-          candidateLimit,
-          ...providerModels,
-          ...params.sourceFilterVec.params,
-          params.limit,
-        ) as Array<{
-        id: string;
-        path: string;
-        start_line: number;
-        end_line: number;
-        text: string;
-        source: SearchSource;
-        dist: number;
-      }>;
-
-    const candidateLimit = Math.min(params.limit * VECTOR_KNN_OVERSAMPLE_FACTOR, MAX_VECTOR_KNN_K);
-    let rows = runVectorQuery(candidateLimit);
-    if (rows.length < params.limit) {
-      const matchingChunkCount = readCount(
-        params.db
-          .prepare(
-            `SELECT COUNT(*) AS count FROM memory_index_chunks c WHERE ${vectorModelFilter}${params.sourceFilterVec.sql}`,
-          )
-          .get(...providerModels, ...params.sourceFilterVec.params),
-      );
-      if (matchingChunkCount > rows.length) {
-        const vectorCount = readCount(
-          params.db.prepare(`SELECT COUNT(*) AS count FROM ${params.vectorTable}`).get(),
-        );
-        const widenedLimit = Math.min(vectorCount, MAX_VECTOR_KNN_K);
-        if (widenedLimit > candidateLimit) {
-          rows = runVectorQuery(widenedLimit);
-        }
-        const requiredMatches = Math.min(params.limit, matchingChunkCount);
-        if (vectorCount > MAX_VECTOR_KNN_K && rows.length < requiredMatches) {
-          // Post-KNN model/source filters can hide every eligible row beyond
-          // sqlite-vec's ceiling; the bounded scan preserves filtered recall.
-          return await searchFallback();
-        }
-      }
-    }
+    const rows = params.db
+      .prepare(
+        `SELECT c.id, c.path, c.start_line, c.end_line, c.text,\n` +
+          `       c.source,\n` +
+          `       v.distance AS dist\n` +
+          `  FROM ${params.vectorTable} v\n` +
+          `  JOIN memory_index_chunks c ON c.id = v.id\n` +
+          ` WHERE v.embedding MATCH ? AND k = ? AND ${buildModelFilter("v.model", providerModels)}${params.sourceFilterVec.sql}\n` +
+          ` ORDER BY dist ASC`,
+      )
+      .all(qBlob, params.limit, ...providerModels, ...params.sourceFilterVec.params) as Array<{
+      id: string;
+      path: string;
+      start_line: number;
+      end_line: number;
+      text: string;
+      source: SearchSource;
+      dist: number;
+    }>;
 
     return rows.map((row) => ({
       id: row.id,

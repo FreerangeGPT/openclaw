@@ -920,6 +920,38 @@ describe("startGatewayPostAttachRuntime", () => {
     ).toEqual({ mode: "off" });
   });
 
+  it("schedules builtin child-process vector warmup immediately", async () => {
+    const log = { info: vi.fn(), warn: vi.fn() };
+    const cfg = {
+      memory: {
+        backend: "builtin",
+        search: { store: { vector: { execution: "child-process" } } },
+      },
+    } as never;
+
+    await startGatewayPostAttachRuntime({
+      ...createPostAttachParams(),
+      log,
+      gatewayPluginConfigAtStart: cfg,
+    });
+
+    await waitForGatewayTestState(() => {
+      expect(hoisted.startGatewayMemoryBackend).toHaveBeenCalledWith({ cfg, log });
+    });
+    expect(testing.resolveGatewayMemoryStartupPolicy(cfg)).toEqual({ mode: "immediate" });
+    expect(
+      testing.resolveGatewayMemoryStartupPolicy({
+        agents: {
+          entries: {
+            research: {
+              memory: { search: { store: { vector: { execution: "child-process" } } } },
+            },
+          },
+        },
+      } as never),
+    ).toEqual({ mode: "immediate" });
+  });
+
   it("cleans startup session locks with bounded concurrency", async () => {
     let active = 0;
     let maxActive = 0;

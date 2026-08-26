@@ -248,6 +248,8 @@ export const MODEL_FIELD_HELP: Record<string, string> = {
     "Specifies the local embedding model source for local memory search, such as a GGUF file path or `hf:` URI. Use this only when provider is `local`, and verify model compatibility before large index rebuilds.",
   "memory.search.store.vector.enabled":
     "Controls the sqlite-vec semantic index. Keep this advanced override when root and per-agent vector policies differ.",
+  "memory.search.store.vector.execution":
+    'Chooses where vector scans execute: "in-process" keeps the default Gateway path, while "child-process" isolates sqlite-vec and exact cosine fallback memory from the Gateway. Use child-process for very large builtin indexes; OpenClaw warms the worker during Gateway startup and never falls back to an in-process vector scan.',
   "memory.search.fallback":
     'Backup provider used when primary embeddings fail: "openai", "gemini", "voyage", "mistral", "bedrock", "lmstudio", "ollama", "local", or "none". Set a real fallback for production reliability; use "none" only if you prefer explicit failures.',
   "memory.search.store.vector.extensionPath":

@@ -11,12 +11,14 @@ import {
   resolveAgentDir,
   resolveAgentWorkspaceDir,
   resolveMemorySearchConfig,
+  resolveUserPath,
   type OpenClawConfig,
   type ResolvedMemorySearchConfig,
 } from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
 import { extractKeywords } from "openclaw/plugin-sdk/memory-core-host-engine-qmd";
 import {
   readMemoryFile,
+  parseEmbedding,
   MEMORY_EMBEDDING_CACHE_TABLE,
   MEMORY_INDEX_FTS_TABLE,
   MEMORY_INDEX_PATHS_FTS_TABLE,
@@ -84,6 +86,7 @@ import {
   type MemoryReadonlyRecoveryState,
 } from "./manager-sync-control.js";
 import { applyTemporalDecayToHybridResults } from "./temporal-decay.js";
+import { VectorSearchWorkerClient } from "./vector-search-worker-client.js";
 
 const LOCAL_EMBEDDING_RUNTIME_FACTS = Symbol.for("openclaw.localEmbeddingRuntimeFacts");
 
@@ -486,6 +489,7 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
   private readonlyRecoverySuccesses = 0;
   private readonlyRecoveryFailures = 0;
   private readonlyRecoveryLastError?: string;
+  private readonly vectorSearchWorker: VectorSearchWorkerClient | null;
   private indexIdentityState: MemoryIndexIdentityState = {
     status: "missing",
     reason: "index metadata is missing",
@@ -642,6 +646,15 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
         available: null,
         extensionPath: effectiveSettings.store.vector.extensionPath,
       };
+      this.vectorSearchWorker =
+        this.vector.enabled && effectiveSettings.store.vector.execution === "child-process"
+          ? new VectorSearchWorkerClient({
+              databasePath: effectiveSettings.store.databasePath,
+              extensionPath: effectiveSettings.store.vector.extensionPath?.trim()
+                ? resolveUserPath(effectiveSettings.store.vector.extensionPath)
+                : undefined,
+            })
+          : null;
       const meta = this.readMeta();
       if (meta?.vectorDims) {
         this.vector.dims = meta.vectorDims;
@@ -1189,17 +1202,25 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
         releaseSemanticProvider();
       }
       const hasVector = queryVec.some((v) => v !== 0);
-      const vectorResults = hasVector
-        ? await this.searchVector(
+      let vectorResults: Array<MemorySearchResult & { id: string }> = [];
+      if (hasVector) {
+        try {
+          vectorResults = await this.searchVector(
             queryVec,
             candidates,
             sourceFilterList,
             vectorProviderIdentity,
-          ).catch((err: unknown) => {
-            log.warn(`memory search: vector query failed: ${formatErrorMessage(err)}`);
-            return [];
-          })
-        : [];
+            opts?.signal,
+          );
+        } catch (err) {
+          log.warn(`memory search: vector query failed: ${formatErrorMessage(err)}`);
+          // Child mode must never hide a worker failure by scoring the same large
+          // index in the Gateway or silently changing a hybrid query to FTS-only.
+          if (this.vectorSearchWorker) {
+            throw err;
+          }
+        }
+      }
 
       if (!hybrid.enabled || !this.fts.enabled || !this.fts.available) {
         return vectorResults.filter((entry) => entry.score >= minScore).slice(0, maxResults);
@@ -1315,7 +1336,24 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
     limit: number,
     sourceFilterList: MemorySource[],
     providerIdentity: { model: string; aliases: string[] },
+    signal?: AbortSignal,
   ): Promise<Array<MemorySearchResult & { id: string }>> {
+    if (this.vectorSearchWorker) {
+      const nativeEligible = await this.ensureVectorReady(queryVec.length);
+      const results = await this.vectorSearchWorker.search(
+        {
+          providerModel: providerIdentity.model,
+          providerModelAliases: providerIdentity.aliases,
+          queryVec,
+          limit,
+          snippetMaxChars: SNIPPET_MAX_CHARS,
+          sources: sourceFilterList,
+          nativeEligible,
+        },
+        signal,
+      );
+      return results.map((entry) => entry as MemorySearchResult & { id: string });
+    }
     const results = await searchVector({
       db: this.db,
       vectorTable: VECTOR_TABLE,
@@ -1325,7 +1363,7 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       limit,
       snippetMaxChars: SNIPPET_MAX_CHARS,
       ensureVectorReady: async (dimensions) => await this.ensureVectorReady(dimensions),
-      sourceFilterVec: this.buildSourceFilter("c", sourceFilterList),
+      sourceFilterVec: this.buildSourceFilter("v", sourceFilterList),
       sourceFilterChunks: this.buildSourceFilter(undefined, sourceFilterList),
     });
     return results.map((entry) => entry as MemorySearchResult & { id: string });
@@ -1790,6 +1828,7 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
           failures: this.readonlyRecoveryFailures,
           lastError: this.readonlyRecoveryLastError,
         },
+        ...(this.vectorSearchWorker ? { vectorWorker: this.vectorSearchWorker.status() } : {}),
       },
     };
   }
@@ -1816,6 +1855,61 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
     return await this.withManagerOperation(
       async () => await this.probeVectorStoreAvailabilityAdmitted(),
     );
+  }
+
+  async warmVectorSearch(signal?: AbortSignal): Promise<void> {
+    const vectorSearchWorker = this.vectorSearchWorker;
+    if (!vectorSearchWorker) {
+      return;
+    }
+    await this.withManagerOperation(async () => {
+      signal?.throwIfAborted();
+      await this.ensureProviderInitialized();
+      this.assertRequiredProviderAvailable("search");
+      await vectorSearchWorker.initialize(signal);
+      if (!this.provider) {
+        return;
+      }
+      const providerIdentity = {
+        model: this.provider.model,
+        aliases: this.resolveProviderIndexIdentities()
+          .slice(1)
+          .map((identity) => identity.model),
+      };
+      const models = Array.from(new Set([providerIdentity.model, ...providerIdentity.aliases]));
+      const modelPlaceholders = models.map(() => "?").join(", ");
+      const warmSources = this.settings.searchSources;
+      const sourceFilter = this.buildSourceFilter(undefined, warmSources);
+      const sample = this.db
+        .prepare(
+          `SELECT embedding FROM memory_index_chunks
+           WHERE model IN (${modelPlaceholders})${sourceFilter.sql}
+             AND embedding <> '[]'
+           ORDER BY rowid
+           LIMIT 1`,
+        )
+        .get(...models, ...sourceFilter.params) as { embedding?: unknown } | undefined;
+      if (typeof sample?.embedding !== "string") {
+        return;
+      }
+      const queryVec = parseEmbedding(sample.embedding);
+      if (queryVec.length === 0) {
+        return;
+      }
+      const nativeEligible = await this.ensureVectorReady(queryVec.length);
+      await vectorSearchWorker.search(
+        {
+          providerModel: providerIdentity.model,
+          providerModelAliases: providerIdentity.aliases,
+          queryVec,
+          limit: 1,
+          snippetMaxChars: SNIPPET_MAX_CHARS,
+          sources: warmSources,
+          nativeEligible,
+        },
+        signal,
+      );
+    });
   }
 
   private async probeVectorStoreAvailabilityAdmitted(): Promise<boolean> {
@@ -1999,6 +2093,9 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       onError: reportPendingWorkError,
     });
     await awaitCurrentSync();
+    await this.vectorSearchWorker?.close().catch((err: unknown) => {
+      log.warn(`memory close: vector worker failed: ${formatErrorMessage(err)}`);
+    });
     const retirementErrors = await this.drainPendingProviderRetirements();
     rememberCurrentProvider();
     try {

@@ -939,6 +939,8 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
             tableName: VECTOR_TABLE,
             id,
             embedding,
+            source,
+            model,
           });
         }
         if (this.fts.enabled && this.fts.available) {
