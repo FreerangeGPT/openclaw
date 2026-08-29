@@ -73,6 +73,7 @@
   "memory-host-events",
   "memory-host-markdown",
   "memory-host-search",
+  "memory-prepend-runtime",
   "message-tool-delivery-hints",
   "migration",
   "migration-runtime",

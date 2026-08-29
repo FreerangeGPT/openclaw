@@ -12,23 +12,25 @@ Persistent agents on OpenClaw need unbidden memory recall — context surfaced w
 
 ## Proposed Solution
 
-A lightweight HTTP proxy ("memory prepend shim") sits between Telegram webhooks and the OpenClaw gateway. The heartbeat runner consumes the same queue directly. Producers enqueue fragments over the shim's loopback-only HTTP endpoint.
+Telegram polling and webhook ingestion both converge on OpenClaw's durable Telegram spool. The shared, authorized message processor claims recall immediately before dispatch and prepends it only to the model-facing message body. The heartbeat runner consumes the same queue directly. Producers enqueue fragments over the shim's loopback-only HTTP endpoint; webhook proxying remains compatible but is no longer required for recall delivery.
 
 1. Claim a bounded batch from the agent's `memory_prepend_queue` SQLite table
 2. If fragments exist, prepend them to the message body as `[Associative recall] ...` blocks
-3. Forward the augmented message to OpenClaw
-4. Delete the claimed rows only after success; release them after failure
+3. Adopt the augmented body into the existing agent turn
+4. Delete the claimed rows only after turn adoption; release them after failure or abandonment
 
 The agent receives a single message with memory context already embedded. This removes the sidecar's extra model turn and tool call. The prepend changes only the current inbound message; heartbeat drains use an isolated session so the main transcript is not rewritten for recall.
 
 ## Architecture
 
 ```
-Telegram ──► Shim (port 8100) ──► OpenClaw Gateway (port 18789)
-                 │
-                 ├── claims memory_prepend_queue rows
-                 ├── prepends fragments to message body
-                 └── acknowledges or releases the claim
+Telegram polling/webhook ──► durable ingress spool ──► authorized message processor
+                                                          │
+                                                          ├── claims memory_prepend_queue rows
+                                                          ├── prepends model-facing message body
+                                                          └── acknowledges or releases the claim
+
+Producer ──► Shim (loopback port 8100) ──► memory_prepend_queue
 
 Heartbeat runner ──► claims the same per-agent SQLite queue
                     ├── uses an isolated run
@@ -38,7 +40,7 @@ Sidecar:
   Session events ──► relevance scoring ──► POST /memory/enqueue
 ```
 
-The table lives in `agents/<agentId>/agent/openclaw-agent.sqlite`. Claims have renewable leases. Delivery is at least once: a crash may replay a fragment after lease expiry, but cannot silently discard it.
+The table lives in `agents/<agentId>/agent/openclaw-agent.sqlite`. Claims have renewable leases. Delivery is at least once: a crash may replay a fragment after lease expiry, but cannot silently discard it. Explicit Telegram commands and ambient room events do not claim recall, so they cannot consume a fragment without an agent turn. Set `agents.defaults.heartbeat.consumeMemoryPrepend` (or the per-agent equivalent) to `false` when queued recall must wait for a visible user turn.
 
 ### Experimental JSONL cutover
 

@@ -95,6 +95,50 @@ describe("runHeartbeatOnce memory prepend", () => {
     });
   });
 
+  it("leaves queued recall for a visible turn when heartbeat consumption is disabled", async () => {
+    await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
+      const cfg: OpenClawConfig = {
+        agents: {
+          defaults: {
+            workspace: tmpDir,
+            heartbeat: {
+              every: "5m",
+              target: "telegram",
+              consumeMemoryPrepend: false,
+            },
+          },
+        },
+        channels: { telegram: { allowFrom: ["*"] } },
+        session: { store: storePath },
+      };
+      await seedMainSessionStore(storePath, cfg, {
+        lastChannel: "telegram",
+        lastProvider: "telegram",
+        lastTo: "-100155462274",
+      });
+      enqueueMemoryPrepend({
+        agentId: "main",
+        text: "Keep this for the next visible turn.",
+      });
+      replySpy.mockResolvedValue({ text: "HEARTBEAT_OK" });
+
+      const result = await runHeartbeatOnce({
+        cfg,
+        agentId: "main",
+        deps: {
+          getReplyFromConfig: replySpy,
+          telegram: vi.fn(),
+        },
+      });
+
+      expect(result.status).toBe("ran");
+      expect((replySpy.mock.calls[0]?.[0] as { Body?: string } | undefined)?.Body).not.toContain(
+        "[Associative recall]",
+      );
+      expect(hasPendingMemoryPrepend({ agentId: "main" })).toBe(true);
+    });
+  });
+
   it("keeps the queue intact when the heartbeat run fails before completion", async () => {
     await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
       const cfg: OpenClawConfig = {

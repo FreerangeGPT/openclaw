@@ -1,0 +1,16 @@
+[Unit]
+Description=Aineko associative recall producer
+After=network.target openclaw-memory-prepend.service
+Requires=openclaw-memory-prepend.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.openclaw/scripts/memory-sidecar.py --model-url http://10.77.0.1:4001/v1/chat/completions --model aineko-recall
+Environment=HOME=%h
+Environment=PYTHONUNBUFFERED=1
+Environment=OPENCLAW_MEMORY_PREPEND_URL=http://127.0.0.1:8100/memory/enqueue
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

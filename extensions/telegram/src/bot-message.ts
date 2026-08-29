@@ -39,6 +39,75 @@ import { resolveSpooledUpdatePersistenceRetryDelayMs } from "./telegram-ingress-
 
 const telegramInboundLog = createSubsystemLogger("gateway/channels/telegram").child("inbound");
 
+type PreparedTelegramMemoryPrepend = Awaited<
+  ReturnType<NonNullable<TelegramBotDeps["prepareAgentTurnMemoryPrepend"]>>
+>;
+
+function isTelegramMemoryPrependEligible(
+  context: Awaited<ReturnType<typeof buildTelegramMessageContext>>,
+): context is NonNullable<typeof context> {
+  return Boolean(
+    context &&
+    context.ctxPayload.InboundEventKind !== "room_event" &&
+    context.ctxPayload.CommandSource !== "native" &&
+    context.ctxPayload.CommandSource !== "text" &&
+    context.ctxPayload.BodyForAgent?.trim(),
+  );
+}
+
+async function prepareTelegramMemoryPrepend(params: {
+  context: NonNullable<Awaited<ReturnType<typeof buildTelegramMessageContext>>>;
+  telegramDeps: TelegramBotDeps;
+}): Promise<PreparedTelegramMemoryPrepend | undefined> {
+  const prepare = params.telegramDeps.prepareAgentTurnMemoryPrepend;
+  if (!prepare || !isTelegramMemoryPrependEligible(params.context)) {
+    return undefined;
+  }
+  try {
+    const prepared = await prepare({
+      agentId: params.context.route.agentId,
+      body: params.context.ctxPayload.BodyForAgent,
+    });
+    if (prepared.includedFragments === 0) {
+      return undefined;
+    }
+    // This context is already finalized. Keep the canonical prompt text and its
+    // legacy projection aligned so downstream finalization cannot discard recall.
+    params.context.ctxPayload.agentText = prepared.body;
+    params.context.ctxPayload.BodyForAgent = prepared.body;
+    return prepared;
+  } catch (error) {
+    telegramInboundLog.warn("telegram memory prepend prepare failed", {
+      agentId: params.context.route.agentId,
+      error: String(error),
+    });
+    return undefined;
+  }
+}
+
+async function finalizeTelegramMemoryPrepend(params: {
+  prepared: PreparedTelegramMemoryPrepend | undefined;
+  outcome: "commit" | "release";
+}): Promise<void> {
+  if (!params.prepared) {
+    return;
+  }
+  try {
+    const result = await params.prepared[params.outcome]();
+    if (!result.applied && result.reason !== "noop" && result.reason !== "already_finalized") {
+      telegramInboundLog.warn(`telegram memory prepend ${params.outcome} skipped`, {
+        path: params.prepared.databasePath,
+        reason: result.reason,
+      });
+    }
+  } catch (error) {
+    telegramInboundLog.warn(`telegram memory prepend ${params.outcome} failed`, {
+      path: params.prepared.databasePath,
+      error: String(error),
+    });
+  }
+}
+
 function formatTelegramInboundLogLine(params: {
   from: string;
   to: string;
@@ -262,6 +331,15 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
     if (!spooledReplay) {
       await turnContext.onDispatchStart?.();
     }
+    const preparedMemoryPrepend = await prepareTelegramMemoryPrepend({ context, telegramDeps });
+    let memoryPrependFinalized = false;
+    const finalizeMemoryPrepend = async (outcome: "commit" | "release") => {
+      if (memoryPrependFinalized) {
+        return;
+      }
+      memoryPrependFinalized = true;
+      await finalizeTelegramMemoryPrepend({ prepared: preparedMemoryPrepend, outcome });
+    };
     const runTelegramDispatch = async (params: {
       turnAdoptionLifecycle?: {
         admission?: "exclusive" | "cancel-only";
@@ -368,6 +446,9 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
           } catch (error) {
             finalized = { kind: "failed-retryable", error };
           }
+          if (phase === "terminal") {
+            await finalizeMemoryPrepend("release");
+          }
           // A deferred queue item still owns the turn when its admission
           // callback fails. Leave the spool participant pending so the queue
           // can retry admission without creating a second ingress owner.
@@ -411,6 +492,10 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
                 return;
               }
               adoptionAttempted = true;
+              // Core fires this only after the user turn is transcript-backed.
+              // Memory consumption is therefore irrevocable even if durable
+              // Telegram spool finalization needs a later retry.
+              await finalizeMemoryPrepend("commit");
               const adoptedResult = await settle({ kind: "completed" }, "adopted");
               if (adoptedResult.kind !== "completed") {
                 adoptionFinalizationError =
@@ -501,6 +586,7 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
         if (deferred) {
           return await participant.task;
         }
+        await finalizeMemoryPrepend("release");
         return await settle(result, "terminal");
       };
       // The participant is the ingress ownership boundary. Direct and buffered
@@ -509,6 +595,8 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
       return await participant.task;
     }
 
-    return await runTelegramDispatch({});
+    const result = await runTelegramDispatch({});
+    await finalizeMemoryPrepend(result.kind === "completed" ? "commit" : "release");
+    return result;
   };
 };

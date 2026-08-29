@@ -636,7 +636,7 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
       policy: cacheKeeperPolicy,
       useIsolatedSession,
     }),
-    memoryPrependEnabled: useIsolatedSession,
+    memoryPrependEnabled: useIsolatedSession && heartbeat?.consumeMemoryPrepend !== false,
   } as const;
 }
 

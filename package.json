@@ -1175,6 +1175,9 @@
     "./plugin-sdk/memory-host-search": {
       "default": "./dist/plugin-sdk/memory-host-search.js"
     },
+    "./plugin-sdk/memory-prepend-runtime": {
+      "default": "./dist/plugin-sdk/memory-prepend-runtime.js"
+    },
     "./plugin-sdk/message-tool-delivery-hints": {
       "default": "./dist/plugin-sdk/message-tool-delivery-hints.js"
     },

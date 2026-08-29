@@ -148,7 +148,7 @@ describe("telegram bot message processor", () => {
         RawBody: "hello there",
       },
       primaryCtx: { me: { username: "openclaw_bot" } },
-      route: { sessionKey: "agent:main:main" },
+      route: { agentId: "main", sessionKey: "agent:main:main" },
       sendTyping: vi.fn().mockResolvedValue(undefined),
       ...context,
     };
@@ -173,6 +173,189 @@ describe("telegram bot message processor", () => {
     expect(telegramInboundInfo).toHaveBeenCalledWith(
       "Inbound message telegram:123 -> @openclaw_bot (direct, 11 chars)",
     );
+  });
+
+  it("prepends queued recall to the agent body and commits after classic polling dispatch", async () => {
+    const commit = vi.fn(async () => ({ applied: true as const, reason: "cleared" as const }));
+    const release = vi.fn(async () => ({ applied: true as const, reason: "released" as const }));
+    const prepareAgentTurnMemoryPrepend = vi.fn(async () => ({
+      body: "[Associative recall]\nremember this\n\nhello there",
+      databasePath: "/tmp/agent.sqlite",
+      includedFragments: 1,
+      truncated: false,
+      commit,
+      release,
+    }));
+    const ctxPayload = {
+      From: "telegram:123",
+      To: "telegram:123",
+      ChatType: "direct",
+      RawBody: "hello there",
+      agentText: "hello there",
+      BodyForAgent: "hello there",
+      CommandBody: "hello there",
+    };
+    buildTelegramMessageContext.mockResolvedValue(createMessageContext({ ctxPayload }));
+    dispatchTelegramMessage.mockResolvedValueOnce({ kind: "completed" });
+    const processMessage = createTelegramMessageProcessor({
+      ...baseDeps,
+      telegramDeps: {
+        ...telegramDepsForTest,
+        prepareAgentTurnMemoryPrepend,
+      },
+    } as unknown as Parameters<typeof createTelegramMessageProcessor>[0]);
+
+    await expect(processSampleMessage(processMessage)).resolves.toEqual({ kind: "completed" });
+
+    expect(prepareAgentTurnMemoryPrepend).toHaveBeenCalledWith({
+      agentId: "main",
+      body: "hello there",
+    });
+    expect(dispatchTelegramMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        context: expect.objectContaining({
+          ctxPayload: expect.objectContaining({
+            agentText: "[Associative recall]\nremember this\n\nhello there",
+            BodyForAgent: "[Associative recall]\nremember this\n\nhello there",
+            CommandBody: "hello there",
+            RawBody: "hello there",
+          }),
+        }),
+      }),
+    );
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it("commits queued recall when a spooled polling turn is adopted", async () => {
+    const commit = vi.fn(async () => ({ applied: true as const, reason: "cleared" as const }));
+    const release = vi.fn(async () => ({ applied: true as const, reason: "released" as const }));
+    const prepareAgentTurnMemoryPrepend = vi.fn(async () => ({
+      body: "[Associative recall]\nremember this\n\nhello there",
+      databasePath: "/tmp/agent.sqlite",
+      includedFragments: 1,
+      truncated: false,
+      commit,
+      release,
+    }));
+    buildTelegramMessageContext.mockResolvedValue(
+      createMessageContext({
+        ctxPayload: {
+          From: "telegram:123",
+          To: "telegram:123",
+          ChatType: "direct",
+          RawBody: "hello there",
+          agentText: "hello there",
+          BodyForAgent: "hello there",
+          CommandBody: "hello there",
+        },
+      }),
+    );
+    dispatchTelegramMessage.mockImplementationOnce(async ({ turnAdoptionLifecycle }) => {
+      await turnAdoptionLifecycle?.onAdopted();
+      return { kind: "completed" };
+    });
+    const processMessage = createTelegramMessageProcessor({
+      ...baseDeps,
+      telegramDeps: {
+        ...telegramDepsForTest,
+        prepareAgentTurnMemoryPrepend,
+      },
+    } as unknown as Parameters<typeof createTelegramMessageProcessor>[0]);
+    const update = { update_id: 734 };
+
+    const replay = await runWithTelegramSpooledReplayUpdate(update, async () =>
+      processSampleMessage(processMessage, undefined, { update }),
+    );
+
+    expect(replay.value).toEqual({ kind: "completed" });
+    expect(dispatchTelegramMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        context: expect.objectContaining({
+          ctxPayload: expect.objectContaining({
+            agentText: "[Associative recall]\nremember this\n\nhello there",
+            BodyForAgent: "[Associative recall]\nremember this\n\nhello there",
+          }),
+        }),
+      }),
+    );
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it("releases queued recall when spooled polling fails before adoption", async () => {
+    const commit = vi.fn(async () => ({ applied: true as const, reason: "cleared" as const }));
+    const release = vi.fn(async () => ({ applied: true as const, reason: "released" as const }));
+    const prepareAgentTurnMemoryPrepend = vi.fn(async () => ({
+      body: "[Associative recall]\nremember this\n\nhello there",
+      databasePath: "/tmp/agent.sqlite",
+      includedFragments: 1,
+      truncated: false,
+      commit,
+      release,
+    }));
+    const dispatchError = new Error("agent dispatch failed");
+    buildTelegramMessageContext.mockResolvedValue(
+      createMessageContext({
+        ctxPayload: {
+          From: "telegram:123",
+          To: "telegram:123",
+          ChatType: "direct",
+          RawBody: "hello there",
+          BodyForAgent: "hello there",
+          CommandBody: "hello there",
+        },
+      }),
+    );
+    dispatchTelegramMessage.mockResolvedValueOnce({
+      kind: "failed-retryable",
+      error: dispatchError,
+    });
+    const processMessage = createTelegramMessageProcessor({
+      ...baseDeps,
+      telegramDeps: {
+        ...telegramDepsForTest,
+        prepareAgentTurnMemoryPrepend,
+      },
+    } as unknown as Parameters<typeof createTelegramMessageProcessor>[0]);
+    const update = { update_id: 735 };
+
+    const replay = await runWithTelegramSpooledReplayUpdate(update, async () =>
+      processSampleMessage(processMessage, undefined, { update }),
+    );
+
+    expect(replay.value).toEqual({ kind: "failed-retryable", error: dispatchError });
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it("leaves queued recall pending for Telegram control commands", async () => {
+    const prepareAgentTurnMemoryPrepend = vi.fn();
+    buildTelegramMessageContext.mockResolvedValue(
+      createMessageContext({
+        ctxPayload: {
+          From: "telegram:123",
+          To: "telegram:123",
+          ChatType: "direct",
+          RawBody: "/status",
+          BodyForAgent: "/status",
+          CommandBody: "/status",
+          CommandSource: "text",
+        },
+      }),
+    );
+    dispatchTelegramMessage.mockResolvedValueOnce({ kind: "completed" });
+    const processMessage = createTelegramMessageProcessor({
+      ...baseDeps,
+      telegramDeps: {
+        ...telegramDepsForTest,
+        prepareAgentTurnMemoryPrepend,
+      },
+    } as unknown as Parameters<typeof createTelegramMessageProcessor>[0]);
+
+    await expect(processSampleMessage(processMessage)).resolves.toEqual({ kind: "completed" });
+
+    expect(prepareAgentTurnMemoryPrepend).not.toHaveBeenCalled();
   });
 
   it("uses one supplied config snapshot for context and dispatch", async () => {

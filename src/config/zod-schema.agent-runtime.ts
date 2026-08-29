@@ -87,6 +87,7 @@ export const HeartbeatSchema = z
     accountId: z.string().optional(),
     prompt: z.string().optional(),
     timeoutSeconds: z.number().int().positive().optional(),
+    consumeMemoryPrepend: z.boolean().optional(),
     lightContext: z.boolean().optional(),
     isolatedSession: z.boolean().optional(),
   })

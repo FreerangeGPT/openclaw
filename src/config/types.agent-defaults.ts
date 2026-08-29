@@ -315,6 +315,8 @@ export type AgentDefaultsConfig = {
     prompt?: string;
     /** Run timeout in seconds for heartbeat agent turns. Unset uses global timeout or heartbeat cadence capped at 600 seconds. */
     timeoutSeconds?: number;
+    /** Whether isolated heartbeat turns may consume queued associative recall. Default: true. */
+    consumeMemoryPrepend?: boolean;
     /**
      * If true, run heartbeat turns with lightweight bootstrap context.
      * Lightweight mode skips workspace bootstrap files; monitor scratch is

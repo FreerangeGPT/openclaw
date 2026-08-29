@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenClaw associative recall queue listener
+After=network.target
+Before=memory-sidecar.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/code/openclaw
+ExecStart=/usr/bin/node --import tsx scripts/memory-prepend-shim.ts
+Environment=HOME=%h
+Environment=OPENCLAW_MEMORY_PREPEND_BIND=127.0.0.1
+Environment=OPENCLAW_MEMORY_PREPEND_PORT=8100
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
