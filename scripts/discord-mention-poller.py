@@ -20,6 +20,7 @@ import atexit
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -71,6 +72,14 @@ def parse_args() -> argparse.Namespace:
         "--discord-account",
         default=os.environ.get("OPENCLAW_DISCORD_ACCOUNT", DEFAULT_DISCORD_ACCOUNT),
         help="Discord account id from channels.discord.accounts.<id> (default: default).",
+    )
+    parser.add_argument(
+        "--discord-token-file",
+        default=os.environ.get("OPENCLAW_DISCORD_TOKEN_FILE", ""),
+        help=(
+            "Path to a mode-0600 file containing the Discord bot token. "
+            "Required when `openclaw config get` returns a redacted stored token."
+        ),
     )
     parser.add_argument(
         "--channels",
@@ -219,13 +228,41 @@ def openclaw_config_get(openclaw_bin: str, path: str) -> Any:
 
 
 def normalize_discord_token(raw: Any) -> str:
+    if not isinstance(raw, str):
+        return ""
     value = str(raw or "").strip()
     if not value:
+        return ""
+    if "__OPENCLAW_REDACTED__" in value:
         return ""
     lower = value.lower()
     if lower.startswith("bot "):
         value = value[4:].strip()
     return value
+
+
+def read_discord_token_file(raw_path: str) -> str:
+    path = Path(os.path.abspath(Path(raw_path).expanduser()))
+    fd = -1
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        mode = os.fstat(fd).st_mode
+        if not stat.S_ISREG(mode):
+            raise RuntimeError(f"Discord token file must be a regular file: {path}")
+        if mode & 0o077:
+            raise RuntimeError(f"Discord token file must not be group/world accessible: {path}")
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = -1
+            token = normalize_discord_token(handle.read())
+    except OSError as ex:
+        raise RuntimeError(f"Discord token file is unavailable: {path}") from ex
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if not token:
+        raise RuntimeError(f"Discord token file is empty or redacted: {path}")
+    return token
 
 
 def merge_discord_account_config(discord_cfg: dict[str, Any], account_id: str) -> dict[str, Any]:
@@ -509,6 +546,7 @@ def call_openclaw_agent(
     expect_final: bool,
     timeout_seconds: float,
 ) -> bool:
+    gateway_timeout_seconds = max(1.0, timeout_seconds)
     params = json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
     cmd = [
         openclaw_bin,
@@ -518,11 +556,13 @@ def call_openclaw_agent(
         "--params",
         params,
         "--json",
+        "--timeout",
+        str(int(gateway_timeout_seconds * 1_000)),
     ]
     if expect_final:
         cmd.append("--expect-final")
     try:
-        code, out, stderr = run_cmd(cmd, timeout=max(1.0, timeout_seconds))
+        code, out, stderr = run_cmd(cmd, timeout=gateway_timeout_seconds + 5.0)
     except subprocess.TimeoutExpired:
         err("openclaw gateway call agent timed out")
         return False
@@ -1003,7 +1043,11 @@ def poll_one_channel(
         )
 
 
-def load_discord_config(openclaw_bin: str, discord_account: str) -> tuple[dict[str, Any], dict[str, Any], str, str]:
+def load_discord_config(
+    openclaw_bin: str,
+    discord_account: str,
+    discord_token_file: str = "",
+) -> tuple[dict[str, Any], dict[str, Any], str, str]:
     cfg_raw = openclaw_config_get(openclaw_bin, "channels.discord")
     if cfg_raw is None:
         cfg_raw = {}
@@ -1018,11 +1062,15 @@ def load_discord_config(openclaw_bin: str, discord_account: str) -> tuple[dict[s
             f"Discord account '{discord_account}' is disabled in config (enabled=false)",
         )
 
-    token, source = resolve_discord_token(cfg_raw, discord_account)
+    if discord_token_file:
+        token = read_discord_token_file(discord_token_file)
+        source = f"file:{Path(discord_token_file).name}"
+    else:
+        token, source = resolve_discord_token(cfg_raw, discord_account)
     if not token:
         raise RuntimeError(
-            "Discord token missing. Set channels.discord.token (default account), "
-            "or channels.discord.accounts.<id>.token, or DISCORD_BOT_TOKEN for default account.",
+            "Discord token missing or redacted. Pass --discord-token-file, set "
+            "OPENCLAW_DISCORD_TOKEN_FILE, or use DISCORD_BOT_TOKEN for the default account.",
         )
 
     return cfg_raw, merged, token, source
@@ -1078,6 +1126,7 @@ def main() -> int:
         _raw_cfg, merged_cfg, token, token_source = load_discord_config(
             openclaw_bin=args.openclaw_bin,
             discord_account=args.discord_account,
+            discord_token_file=args.discord_token_file,
         )
     except Exception as ex:
         err(str(ex))
