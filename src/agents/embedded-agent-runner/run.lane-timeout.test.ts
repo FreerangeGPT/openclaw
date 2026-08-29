@@ -2,7 +2,9 @@ import { MAX_TIMER_TIMEOUT_MS } from "@openclaw/normalization-core/number-coerci
 import { describe, expect, it } from "vitest";
 import { DEFAULT_AGENT_TIMEOUT_MS } from "../timeout.js";
 import {
+  EMBEDDED_RUN_CLIENT_DISCONNECT_RELEASE_MS,
   EMBEDDED_RUN_LANE_TIMEOUT_GRACE_MS,
+  isClientDisconnectAbortReason,
   resolveEmbeddedRunLaneTimeoutMs,
 } from "./run/lane-runtime.js";
 
@@ -26,5 +28,17 @@ describe("resolveEmbeddedRunLaneTimeoutMs", () => {
     expect(resolveEmbeddedRunLaneTimeoutMs(-1)).toBe(defaultLaneTimeoutMs);
     expect(resolveEmbeddedRunLaneTimeoutMs(Number.NaN)).toBe(defaultLaneTimeoutMs);
     expect(resolveEmbeddedRunLaneTimeoutMs(MAX_TIMER_TIMEOUT_MS)).toBe(defaultLaneTimeoutMs);
+  });
+
+  it("recognizes delivery disconnect aborts for the short voice-turn release", () => {
+    const disconnect = new Error("HTTP client disconnected");
+    disconnect.name = "ClientDisconnectError";
+
+    expect(isClientDisconnectAbortReason(disconnect)).toBe(true);
+    expect(isClientDisconnectAbortReason(new Error("outer", { cause: disconnect }))).toBe(true);
+    expect(isClientDisconnectAbortReason(new Error("user stop"))).toBe(false);
+    expect(EMBEDDED_RUN_CLIENT_DISCONNECT_RELEASE_MS).toBeLessThan(
+      EMBEDDED_RUN_LANE_TIMEOUT_GRACE_MS,
+    );
   });
 });

@@ -11,8 +11,10 @@ import { createToolTerminalObserver } from "../../tool-terminal-outcome.js";
 import type { SystemAgentToolOptions } from "../../tools/system-agent-tool.js";
 import { runEmbeddedAttemptWithBackend } from "./backend.js";
 import {
+  EMBEDDED_RUN_CLIENT_DISCONNECT_RELEASE_MS,
   EMBEDDED_RUN_LANE_HEARTBEAT_MS,
   EMBEDDED_RUN_LANE_TIMEOUT_GRACE_MS,
+  isClientDisconnectAbortReason,
 } from "./lane-runtime.js";
 import type { RunEmbeddedAgentParams } from "./params.js";
 import { preparePluginHarnessPromptImages } from "./plugin-harness-prompt-images.js";
@@ -108,9 +110,24 @@ export async function dispatchEmbeddedRunAttempt(input: {
   const attemptAbortController = new AbortController();
   control.setPostCompactionAbortController(attemptAbortController);
   const parentAbortSignal = params.abortSignal;
+  let clientDisconnectReleaseTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearClientDisconnectRelease = () => {
+    if (clientDisconnectReleaseTimer) {
+      clearTimeout(clientDisconnectReleaseTimer);
+      clientDisconnectReleaseTimer = undefined;
+    }
+  };
   const relayParentAbort = (): void => {
-    control.laneTaskAbortController.abort(parentAbortSignal?.reason);
-    attemptAbortController.abort(parentAbortSignal?.reason);
+    const reason = parentAbortSignal?.reason;
+    control.laneTaskAbortController.abort(reason);
+    attemptAbortController.abort(reason);
+    if (isClientDisconnectAbortReason(reason) && !clientDisconnectReleaseTimer) {
+      clientDisconnectReleaseTimer = setTimeout(
+        () => control.laneTaskReleaseController.abort(reason),
+        EMBEDDED_RUN_CLIENT_DISCONNECT_RELEASE_MS,
+      );
+      clientDisconnectReleaseTimer.unref?.();
+    }
   };
   if (parentAbortSignal?.aborted) {
     relayParentAbort();
@@ -386,6 +403,7 @@ export async function dispatchEmbeddedRunAttempt(input: {
       throw control.getPostCompactionAbortError() ?? err;
     })
     .finally(() => {
+      clearClientDisconnectRelease();
       clearAttemptTimeoutRelease();
       stopLaneProgressHeartbeat();
       parentAbortSignal?.removeEventListener?.("abort", relayParentAbort);

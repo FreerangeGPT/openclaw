@@ -9,6 +9,29 @@ import type { RunEmbeddedAgentParams } from "./params.js";
 
 export const EMBEDDED_RUN_LANE_TIMEOUT_GRACE_MS = 30_000;
 export const EMBEDDED_RUN_LANE_HEARTBEAT_MS = EMBEDDED_RUN_LANE_TIMEOUT_GRACE_MS / 2;
+// HTTP voice clients deliberately disconnect to implement barge-in. Cleanup's
+// abort settlement is bounded to two seconds, so retaining the foreground
+// session lane for the generic 30-second grace only starves the next utterance.
+export const EMBEDDED_RUN_CLIENT_DISCONNECT_RELEASE_MS = 3_000;
+
+export function isClientDisconnectAbortReason(reason: unknown): boolean {
+  let current = reason;
+  const seen = new Set<unknown>();
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    if (
+      current instanceof Error &&
+      (current.name === "ClientDisconnectError" || current.message === "HTTP client disconnected")
+    ) {
+      return true;
+    }
+    current =
+      typeof current === "object" && current !== null && "cause" in current
+        ? (current as { cause?: unknown }).cause
+        : undefined;
+  }
+  return false;
+}
 
 export function resolveEmbeddedRunLaneTimeoutMs(timeoutMs: number): number {
   const defaultLaneTimeoutMs = DEFAULT_AGENT_TIMEOUT_MS + EMBEDDED_RUN_LANE_TIMEOUT_GRACE_MS;
