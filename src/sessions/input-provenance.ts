@@ -6,6 +6,7 @@ import { isStringOption } from "../utils/string-readers.js";
 // Input provenance marks whether a user-role message actually came from an
 // external user, another session, or an internal system/tool handoff.
 const INPUT_PROVENANCE_KIND_VALUES = ["external_user", "inter_session", "internal_system"] as const;
+const MAX_MEMORY_INDEX_INCLUDED_TEXT_CHARS = 12_000;
 
 type InputProvenanceKind = (typeof INPUT_PROVENANCE_KIND_VALUES)[number];
 
@@ -15,6 +16,16 @@ export type InputProvenance = {
   sourceSessionKey?: string;
   sourceChannel?: string;
   sourceTool?: string;
+  /**
+   * Host-stamped model-only prefix length. The raw transcript keeps the prefix for
+   * diagnostics, while session-memory export removes it before lexical/vector indexing.
+   */
+  memoryIndexExcludedPrefixChars?: number;
+  /**
+   * Host-stamped durable content extracted from an otherwise internal turn. This is
+   * reserved for intentional observations that should survive memory indexing.
+   */
+  memoryIndexIncludedText?: string;
 };
 
 export const MAIN_SESSION_RESTART_RECOVERY_SOURCE_TOOL = "main_session_restart_recovery" as const;
@@ -41,12 +52,24 @@ export function normalizeInputProvenance(value: unknown): InputProvenance | unde
   if (!isInputProvenanceKind(record.kind)) {
     return undefined;
   }
+  const memoryIndexExcludedPrefixChars =
+    typeof record.memoryIndexExcludedPrefixChars === "number" &&
+    Number.isSafeInteger(record.memoryIndexExcludedPrefixChars) &&
+    record.memoryIndexExcludedPrefixChars > 0
+      ? record.memoryIndexExcludedPrefixChars
+      : undefined;
+  const memoryIndexIncludedText = normalizeOptionalString(record.memoryIndexIncludedText)?.slice(
+    0,
+    MAX_MEMORY_INDEX_INCLUDED_TEXT_CHARS,
+  );
   return {
     kind: record.kind,
     originSessionId: normalizeOptionalString(record.originSessionId),
     sourceSessionKey: normalizeOptionalString(record.sourceSessionKey),
     sourceChannel: normalizeOptionalString(record.sourceChannel),
     sourceTool: normalizeOptionalString(record.sourceTool),
+    memoryIndexExcludedPrefixChars,
+    memoryIndexIncludedText,
   };
 }
 

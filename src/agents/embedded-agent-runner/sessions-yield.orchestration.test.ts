@@ -69,7 +69,7 @@ describe("sessions_yield orchestration", () => {
     mockedRunEmbeddedAttempt.mockResolvedValueOnce(
       makeAttemptResult({
         yieldDetected: true,
-        clientToolCalls: [{ name: "hosted_tool", params: { arg: "value" } }],
+        clientToolCalls: [{ id: "call-hosted", name: "hosted_tool", params: { arg: "value" } }],
       }),
     );
 
@@ -93,9 +93,9 @@ describe("sessions_yield orchestration", () => {
     mockedRunEmbeddedAttempt.mockResolvedValueOnce(
       makeAttemptResult({
         clientToolCalls: [
-          { name: "create_graph", params: { nodes: ["a", "b"] } },
-          { name: "activate_graph", params: {} },
-          { name: "get_status", params: {} },
+          { id: "call-create", name: "create_graph", params: { nodes: ["a", "b"] } },
+          { id: "call-activate", name: "activate_graph", params: {} },
+          { id: "call-status", name: "get_status", params: {} },
         ],
       }),
     );
@@ -111,6 +111,11 @@ describe("sessions_yield orchestration", () => {
       "create_graph",
       "activate_graph",
       "get_status",
+    ]);
+    expect(result.meta.pendingToolCalls!.map((c) => c.id)).toEqual([
+      "call-create",
+      "call-activate",
+      "call-status",
     ]);
     const firstCall = expectDefined(result.meta.pendingToolCalls![0], "first pending tool call");
     expect(JSON.parse(firstCall.arguments)).toEqual({

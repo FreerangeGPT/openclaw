@@ -30,12 +30,14 @@ import type { SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
   classifySessionKeyShape,
+  isIncognitoSessionKey,
   isUnscopedSessionKeySentinel,
   normalizeAgentId,
   normalizeMainKey,
 } from "../../routing/session-key.js";
 import { isModelSelectionLocked } from "../../sessions/model-overrides.js";
 import { resolveSessionIdMatchSelection } from "../../sessions/session-id-resolution.js";
+import { resolveIncognitoOpenClawAgentSqlitePath } from "../../state/openclaw-agent-db.js";
 import { sessionDeliveryChannel } from "../../utils/delivery-context.shared.js";
 import { listAgentIds, resolveDefaultAgentId } from "../agent-scope.js";
 import { clearBootstrapSnapshotOnSessionRollover } from "../bootstrap-cache.js";
@@ -251,9 +253,12 @@ export function resolveSessionKeyForRequest(opts: {
       ? (requestedAgentId ?? defaultAgentId)
       : resolveAgentIdFromSessionKey(explicitSessionKey, defaultAgentId)
     : (requestedAgentId ?? defaultAgentId);
-  const storePath = resolveStorePath(sessionCfg?.store, {
-    agentId: storeAgentId,
-  });
+  const storePath =
+    explicitSessionKey && isIncognitoSessionKey(explicitSessionKey)
+      ? resolveIncognitoOpenClawAgentSqlitePath({ agentId: storeAgentId })
+      : resolveStorePath(sessionCfg?.store, {
+          agentId: storeAgentId,
+        });
   const loadOptions = opts.clone === false ? { clone: false as const } : undefined;
   const sessionStore = loadCommandSessionStore({
     storePath,

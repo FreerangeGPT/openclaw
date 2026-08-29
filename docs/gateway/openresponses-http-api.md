@@ -39,19 +39,50 @@ If the request includes an OpenResponses `user` string, the Gateway derives a st
 
 ## Request shape
 
-| Field                                                            | Support                                                                                                                        |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `input`                                                          | String or array of item objects.                                                                                               |
-| `instructions`                                                   | Merged into the system prompt.                                                                                                 |
-| `tools`                                                          | Client tool definitions (function tools).                                                                                      |
-| `tool_choice`                                                    | `"auto"`, `"none"`, `"required"`, or `{ "type": "function", "name": "..." }` to filter or require client tools.                |
-| `stream`                                                         | Enables SSE streaming.                                                                                                         |
-| `max_output_tokens`                                              | Best-effort output limit (provider dependent).                                                                                 |
-| `temperature`                                                    | Best-effort sampling temperature. Ignored by the ChatGPT-based Codex Responses backend, which uses fixed server-side sampling. |
-| `top_p`                                                          | Best-effort nucleus sampling. Same Codex Responses caveat as `temperature`.                                                    |
-| `user`                                                           | Stable session routing.                                                                                                        |
-| `previous_response_id`                                           | Session continuity (see above).                                                                                                |
-| `max_tool_calls`, `reasoning`, `metadata`, `store`, `truncation` | Accepted but currently ignored.                                                                                                |
+| Field                                                | Support                                                                                                                        |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `input`                                              | String or array of item objects.                                                                                               |
+| `instructions`                                       | Merged into the system prompt.                                                                                                 |
+| `tools`                                              | Client tool definitions (function tools).                                                                                      |
+| `tool_choice`                                        | `"auto"`, `"none"`, `"required"`, or `{ "type": "function", "name": "..." }` to filter or require client tools.                |
+| `stream`                                             | Enables SSE streaming.                                                                                                         |
+| `max_output_tokens`                                  | Best-effort output limit (provider dependent).                                                                                 |
+| `temperature`                                        | Best-effort sampling temperature. Ignored by the ChatGPT-based Codex Responses backend, which uses fixed server-side sampling. |
+| `top_p`                                              | Best-effort nucleus sampling. Same Codex Responses caveat as `temperature`.                                                    |
+| `user`                                               | Stable session routing.                                                                                                        |
+| `previous_response_id`                               | Session continuity (see above).                                                                                                |
+| `metadata`                                           | String map. Supports the trusted sensory/heartbeat and client-tool settlement extensions below; other keys are ignored.        |
+| `max_tool_calls`, `reasoning`, `store`, `truncation` | Accepted but currently ignored.                                                                                                |
+
+### Trusted sensory context and heartbeat metadata
+
+Operator-authenticated integrations can attach ephemeral embodiment context without
+polluting durable session recall:
+
+```json
+{
+  "metadata": {
+    "openclaw.sensory_context": "[Your eyes see: a red mug beside the monitor]",
+    "openclaw.run_kind": "heartbeat",
+    "openclaw.intentional_observation": "A detailed view requested by the agent."
+  }
+}
+```
+
+- `openclaw.sensory_context` is capped at 4,000 characters and prepended to the current
+  model message inside an explicit untrusted sensory boundary.
+- The raw session transcript and exact `llm_input` diagnostic hook retain the full block.
+- Gateway-stamped provenance records the excluded prefix length. The canonical session
+  memory exporter removes that prefix before producing content for both FTS/BM25 and
+  vector embeddings; ordinary human text in the same turn remains indexable.
+- `openclaw.run_kind: "heartbeat"` activates OpenClaw's native heartbeat lifecycle and
+  transcript provenance, so the control turn and its generated responses are excluded
+  from session-memory indexing.
+- `openclaw.intentional_observation` is capped at 12,000 characters. It preserves a
+  deliberate observation from an otherwise excluded heartbeat as an `Observation:` entry
+  in both lexical and vector memory. Do not use it for automatically sampled sensory data.
+
+These keys are a trusted operator integration surface, not arbitrary end-user metadata.
 
 ## Items (input)
 
@@ -86,6 +117,23 @@ Provide tools with `tools: [{ type: "function", name, description?, parameters? 
 If the agent calls a tool, the response returns a `function_call` output item. Send a follow-up request with `function_call_output` to continue the turn.
 
 For `tool_choice: "required"` and function-pinned `tool_choice`, the endpoint narrows the exposed client function-tool set, instructs the runtime to call a client tool before responding, and rejects the turn if it does not include a matching structured client-tool call, matching the `/v1/chat/completions` contract. Non-streaming requests return `502` with an `api_error`; streaming requests emit a `response.failed` event.
+
+### Robot speech interruption settlement
+
+Trusted voice frontends can settle an interrupted `robot_speak` client call without
+running another model turn. Send a non-streaming request on the same agent/session with
+`metadata.openclaw.client_tool_settle_only: "true"` and exactly one
+`function_call_output` whose JSON output has type
+`openclaw.robot_speech_interruption`. The payload includes the complete generated
+`turn_text`, the complete acknowledged `heard_text` prefix, and every speech call's
+original call id, raw source text, spoken text, emitted text, and turn offsets.
+
+The Gateway fails closed unless `turn_text.startsWith(heard_text)`, the spans reconstruct
+the turn exactly, and each call id plus original source text matches the stored transcript.
+It then rewrites only those tool calls/results to the heard prefixes, marks the truncated
+call `[interrupted by user]`, and rebuilds the session-memory projection. The request
+returns a completed response with empty output and performs no model inference. Both
+`robot_speak` and the legacy `reachy_speak` name are accepted during migration.
 
 ## Images (`input_image`)
 
@@ -219,7 +267,7 @@ Set `stream: true` to receive Server-Sent Events:
 - Each event line is `event: <type>` and `data: <json>`
 - Stream ends with `data: [DONE]`
 
-Event types currently emitted: `response.created`, `response.in_progress`, `response.output_item.added`, `response.content_part.added`, `response.output_text.delta`, `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, `response.completed`, `response.failed` (on error).
+Event types currently emitted: `response.created`, `response.in_progress`, `response.output_item.added`, `response.content_part.added`, `response.output_text.delta`, `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, `response.completed`, `response.failed` (on error), plus the OpenClaw extension `openclaw.compaction.started`. The compaction event is lifecycle-only assistant status; clients may render or speak it without adding text to conversation history.
 
 ## Usage
 

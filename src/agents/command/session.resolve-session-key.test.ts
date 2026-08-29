@@ -28,6 +28,11 @@ vi.mock("../../config/sessions/main-session.js", () => ({
   resolveExplicitAgentSessionKey: () => undefined,
 }));
 
+vi.mock("../../state/openclaw-agent-db.js", () => ({
+  resolveIncognitoOpenClawAgentSqlitePath: ({ agentId }: { agentId: string }) =>
+    `/stores/${agentId}.incognito.sqlite`,
+}));
+
 vi.mock("../agent-scope.js", () => ({
   listAgentIds: () => hoisted.listAgentIdsMock(),
   resolveDefaultAgentId: () => "main",
@@ -135,6 +140,30 @@ describe("resolveSessionKeyForRequest", () => {
     expect(result.sessionStore).toEqual(embeddedAgentStore);
     expect(result.storePath).toBe("/stores/embedded-agent.json");
     expect(hoisted.listSessionEntriesMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads explicit incognito keys from the process-held agent store", () => {
+    const sessionKey = "agent:main:dashboard:incognito-reachy-private";
+    const incognitoStore = {
+      [sessionKey]: { sessionId: "private-session", updatedAt: 10, incognito: true },
+    } satisfies Record<string, SessionEntry>;
+    mockSessionStores({ "/stores/main.incognito.sqlite": incognitoStore });
+
+    const result = resolveSessionKeyForRequest({
+      cfg: {
+        session: {
+          store: "/stores/{agentId}.json",
+        },
+      } satisfies OpenClawConfig,
+      sessionKey,
+      agentId: "main",
+    });
+
+    expect(result).toEqual({
+      sessionKey,
+      sessionStore: incognitoStore,
+      storePath: "/stores/main.incognito.sqlite",
+    });
   });
 
   it("borrows session stores when requested", () => {

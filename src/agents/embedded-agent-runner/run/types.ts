@@ -303,7 +303,11 @@ export type EmbeddedRunAttemptResult = {
    * checks across the runner pipeline (`attempt.clientToolCalls ? ...`)
    * keep their meaning. When set, the array always has at least one entry.
    */
-  clientToolCalls?: Array<{ name: string; params: Record<string, unknown> }>;
+  clientToolCalls?: Array<{
+    id: string;
+    name: string;
+    params: Record<string, unknown>;
+  }>;
   /** True when sessions_yield tool was called during this attempt. */
   yieldDetected?: boolean;
   replayMetadata: EmbeddedRunReplayMetadata;

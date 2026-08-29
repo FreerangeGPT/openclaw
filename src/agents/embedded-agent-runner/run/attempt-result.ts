@@ -126,7 +126,9 @@ function collectCompletedClientToolCalls(
   slots: readonly EmbeddedAttemptClientToolCallSlot[],
 ): NonNullable<EmbeddedRunAttemptResult["clientToolCalls"]> {
   return slots.flatMap((slot) =>
-    slot.completed && slot.params ? [{ name: slot.name, params: slot.params }] : [],
+    slot.completed && slot.params
+      ? [{ id: slot.toolCallId, name: slot.name, params: slot.params }]
+      : [],
   );
 }
 

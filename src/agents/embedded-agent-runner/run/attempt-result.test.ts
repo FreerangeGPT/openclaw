@@ -86,8 +86,8 @@ describe("attempt result projection", () => {
         ],
       }).clientToolCalls,
     ).toEqual([
-      { name: "search", params: { query: "one" } },
-      { name: "fetch", params: { id: 3 } },
+      { id: "first", name: "search", params: { query: "one" } },
+      { id: "third", name: "fetch", params: { id: 3 } },
     ]);
   });
 

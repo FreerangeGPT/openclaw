@@ -365,7 +365,11 @@ describe("runEmbeddedAgent silent-error retry", () => {
   it.each([
     [
       "client tool calls",
-      { clientToolCalls: [{ name: "browser", params: { url: "https://example.com" } }] },
+      {
+        clientToolCalls: [
+          { id: "call-browser", name: "browser", params: { url: "https://example.com" } },
+        ],
+      },
     ],
     ["yield", { yieldDetected: true }],
     ["approval prompts", { didSendDeterministicApprovalPrompt: true }],

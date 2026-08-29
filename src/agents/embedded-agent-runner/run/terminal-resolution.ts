@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { SILENT_REPLY_TOKEN } from "../../../auto-reply/tokens.js";
 import { freezeDiagnosticTraceContext } from "../../../infra/diagnostic-trace-context.js";
 import type { AssistantMessage } from "../../../llm/types.js";
@@ -570,7 +569,7 @@ function completeEmbeddedRun(
           : {}),
         stopReason,
         pendingToolCalls: input.attempt.clientToolCalls?.map((call) => ({
-          id: randomBytes(5).toString("hex").slice(0, 9),
+          id: call.id,
           name: call.name,
           arguments: JSON.stringify(call.params),
         })),

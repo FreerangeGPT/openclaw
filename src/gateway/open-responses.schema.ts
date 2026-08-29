@@ -364,6 +364,14 @@ const OutputTextDoneEventSchema = z.object({
   text: z.string(),
 });
 
+// OpenClaw extension event. This is intentionally a lifecycle notification,
+// not assistant output: clients may render or speak a transient status without
+// adding it to the conversation transcript.
+const OpenClawCompactionStartedEventSchema = z.object({
+  type: z.literal("openclaw.compaction.started"),
+  response_id: z.string(),
+});
+
 export type StreamingEvent =
   | z.infer<typeof ResponseCreatedEventSchema>
   | z.infer<typeof ResponseInProgressEventSchema>
@@ -374,4 +382,5 @@ export type StreamingEvent =
   | z.infer<typeof ContentPartAddedEventSchema>
   | z.infer<typeof ContentPartDoneEventSchema>
   | z.infer<typeof OutputTextDeltaEventSchema>
-  | z.infer<typeof OutputTextDoneEventSchema>;
+  | z.infer<typeof OutputTextDoneEventSchema>
+  | z.infer<typeof OpenClawCompactionStartedEventSchema>;

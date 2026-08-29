@@ -3,9 +3,52 @@ import { describe, expect, it } from "vitest";
 import {
   annotateInterSessionPromptText,
   isAgentMediatedCompletionSourceTool,
+  normalizeInputProvenance,
   shouldPreserveUserFacingSessionStateForInputProvenance,
   stripInterSessionPromptPrefixForDisplay,
 } from "./input-provenance.js";
+
+describe("normalizeInputProvenance", () => {
+  it("preserves a positive host-stamped memory-excluded prefix length", () => {
+    expect(
+      normalizeInputProvenance({
+        kind: "external_user",
+        sourceTool: "openresponses_sensory_context",
+        memoryIndexExcludedPrefixChars: 123,
+      }),
+    ).toMatchObject({
+      kind: "external_user",
+      sourceTool: "openresponses_sensory_context",
+      memoryIndexExcludedPrefixChars: 123,
+    });
+  });
+
+  it.each([0, -1, 1.5, Number.POSITIVE_INFINITY, "123"])(
+    "drops an invalid memory-excluded prefix length %s",
+    (memoryIndexExcludedPrefixChars) => {
+      expect(
+        normalizeInputProvenance({
+          kind: "external_user",
+          memoryIndexExcludedPrefixChars,
+        })?.memoryIndexExcludedPrefixChars,
+      ).toBeUndefined();
+    },
+  );
+
+  it("preserves bounded host-stamped intentional observation text", () => {
+    expect(
+      normalizeInputProvenance({
+        kind: "internal_system",
+        sourceTool: "heartbeat",
+        memoryIndexIncludedText: "  A detailed view of a red mug.  ",
+      }),
+    ).toMatchObject({
+      kind: "internal_system",
+      sourceTool: "heartbeat",
+      memoryIndexIncludedText: "A detailed view of a red mug.",
+    });
+  });
+});
 
 describe("annotateInterSessionPromptText", () => {
   it("marks inter-session prompt text as non-user-authored", () => {

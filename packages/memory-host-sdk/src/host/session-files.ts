@@ -620,6 +620,41 @@ function sanitizeSessionText(text: string, role: "user" | "assistant"): string |
   return normalized;
 }
 
+function stripMemoryIndexExcludedPrefix(
+  text: string,
+  provenance: unknown,
+  role: "user" | "assistant",
+): string {
+  if (role !== "user" || !provenance || typeof provenance !== "object") {
+    return text;
+  }
+  const prefixChars = (provenance as { memoryIndexExcludedPrefixChars?: unknown })
+    .memoryIndexExcludedPrefixChars;
+  if (
+    typeof prefixChars !== "number" ||
+    !Number.isSafeInteger(prefixChars) ||
+    prefixChars <= 0 ||
+    prefixChars > text.length
+  ) {
+    return text;
+  }
+  // Provenance is stamped by trusted ingress. Keep the original JSONL event intact
+  // for replay/diagnostics, but expose only durable human content to every indexer.
+  return text.slice(prefixChars).trimStart();
+}
+
+function readMemoryIndexIncludedText(provenance: unknown): string | null {
+  if (!provenance || typeof provenance !== "object") {
+    return null;
+  }
+  const text = (provenance as { memoryIndexIncludedText?: unknown }).memoryIndexIncludedText;
+  if (typeof text !== "string") {
+    return null;
+  }
+  const trimmed = text.trim().slice(0, 12_000);
+  return trimmed || null;
+}
+
 function parseSessionTimestampMs(
   record: { timestamp?: unknown },
   message: { timestamp?: unknown },
@@ -860,25 +895,38 @@ export async function buildSessionEntry(
       if (message.role === "user" && hasInterSessionUserProvenance(message)) {
         continue;
       }
-      const rawText = collectRawSessionText(message.content);
+      const includedHeartbeatText = insideHeartbeatTurn
+        ? readMemoryIndexIncludedText(message.provenance)
+        : null;
+      const rawText = includedHeartbeatText ?? collectRawSessionText(message.content);
       if (rawText === null) {
         continue;
       }
 
       // User text is not trusted archive-wide provenance. Per-message sanitization
       // drops cron prompts without clearing unrelated content from the archive.
-      const text = sanitizeSessionText(rawText, message.role);
+      const indexableText = includedHeartbeatText
+        ? rawText
+        : stripMemoryIndexExcludedPrefix(rawText, message.provenance, message.role);
+      const text = sanitizeSessionText(
+        indexableText,
+        includedHeartbeatText ? "assistant" : message.role,
+      );
       if (!text) {
         continue;
       }
-      if (insideHeartbeatTurn) {
+      if (insideHeartbeatTurn && !includedHeartbeatText) {
         continue;
       }
       if (generatedByDreamingNarrative || generatedByCronRun) {
         continue;
       }
       const safe = redactSensitiveText(text, { mode: "tools" });
-      const label = message.role === "user" ? "User" : "Assistant";
+      const label = includedHeartbeatText
+        ? "Observation"
+        : message.role === "user"
+          ? "User"
+          : "Assistant";
       const renderedLines = renderSessionExportLines(label, safe);
       const timestampMs = parseSessionTimestampMs(
         record as { timestamp?: unknown },

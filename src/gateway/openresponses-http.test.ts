@@ -15,6 +15,7 @@ import { getActiveGatewayRootWorkCount } from "../process/gateway-work-admission
 import { createDeferred } from "../test-utils/deferred.js";
 import { withEnvAsync } from "../test-utils/env.js";
 import { IMAGE_ONLY_USER_MESSAGE } from "./agent-prompt.js";
+import { loadSessionEntryReadOnly } from "./session-utils.js";
 import { buildAssistantDeltaResult } from "./test-helpers.agent-results.js";
 import {
   agentCommand,
@@ -367,6 +368,107 @@ describe("OpenResponses HTTP API (e2e)", () => {
         "webchat",
       );
       await ensureResponseConsumed(resHeader);
+
+      const incognitoKey = "agent:main:dashboard:incognito-openresponses-test";
+      mockAgentOnce([{ text: "private hello" }]);
+      const resIncognito = await postResponses(
+        port,
+        { model: "openclaw", input: "hello privately" },
+        {
+          "x-openclaw-session-key": incognitoKey,
+          "x-openclaw-scopes": "operator.admin",
+        },
+      );
+      expect(resIncognito.status, await resIncognito.clone().text()).toBe(200);
+      await ensureResponseConsumed(resIncognito);
+      const firstIncognitoEntry = loadSessionEntryReadOnly(incognitoKey, {
+        agentId: "main",
+      }).entry;
+      expect(firstIncognitoEntry).toMatchObject({ incognito: true });
+
+      mockAgentOnce([{ text: "private again" }]);
+      const resIncognitoAgain = await postResponses(
+        port,
+        { model: "openclaw", input: "hello privately again" },
+        {
+          "x-openclaw-session-key": incognitoKey,
+          "x-openclaw-scopes": "operator.admin",
+        },
+      );
+      expect(resIncognitoAgain.status, await resIncognitoAgain.clone().text()).toBe(200);
+      await ensureResponseConsumed(resIncognitoAgain);
+      expect(loadSessionEntryReadOnly(incognitoKey, { agentId: "main" }).entry?.sessionId).toBe(
+        firstIncognitoEntry?.sessionId,
+      );
+
+      mockAgentOnce([{ text: "I can see the changed scene." }]);
+      const resSensoryContext = await postResponses(port, {
+        model: "openclaw",
+        input: "What changed?",
+        metadata: {
+          "openclaw.sensory_context": "[Your eyes see: a red mug beside the monitor]",
+        },
+      });
+      expect(resSensoryContext.status).toBe(200);
+      const sensoryOpts = firstAgentOpts();
+      expect(sensoryOpts.message).toContain("<openclaw-sensory-context");
+      expect(sensoryOpts.message).toContain("a red mug beside the monitor");
+      expect(sensoryOpts.message).toMatch(/What changed\?$/);
+      expect(sensoryOpts.transcriptMessage).toBe(sensoryOpts.message);
+      expect(sensoryOpts.inputProvenance).toMatchObject({
+        kind: "external_user",
+        sourceTool: "openresponses_sensory_context",
+        memoryIndexExcludedPrefixChars: expect.any(Number),
+      });
+      await ensureResponseConsumed(resSensoryContext);
+
+      mockAgentOnce([{ text: "HEARTBEAT_OK" }]);
+      const resHeartbeat = await postResponses(port, {
+        model: "openclaw",
+        input: "The room appears to have changed.",
+        metadata: {
+          "openclaw.run_kind": "heartbeat",
+          "openclaw.sensory_context": "[Your eyes see: someone entered from the left]",
+        },
+      });
+      expect(resHeartbeat.status).toBe(200);
+      const heartbeatOpts = firstAgentOpts();
+      expect(heartbeatOpts.bootstrapContextRunKind).toBe("heartbeat");
+      expect(heartbeatOpts.transcriptMessage).toContain("[OpenClaw heartbeat poll]");
+      expect(heartbeatOpts.transcriptMessage).toContain("The room appears to have changed.");
+      expect(heartbeatOpts.inputProvenance).toMatchObject({
+        kind: "internal_system",
+        sourceTool: "heartbeat",
+        memoryIndexExcludedPrefixChars: expect.any(Number),
+      });
+      await ensureResponseConsumed(resHeartbeat);
+
+      mockAgentOnce([{ text: "I inspected the requested area." }]);
+      const resIntentionalObservation = await postResponses(port, {
+        model: "openclaw",
+        input: [
+          {
+            type: "function_call_output",
+            call_id: "look_1",
+            output: "A detailed tool result.",
+          },
+        ],
+        metadata: {
+          "openclaw.run_kind": "heartbeat",
+          "openclaw.intentional_observation":
+            "A red mug is left of the keyboard, with a blue cloth behind it.",
+        },
+      });
+      expect(resIntentionalObservation.status).toBe(200);
+      const observationOpts = firstAgentOpts();
+      expect(observationOpts.message).toContain("A detailed tool result.");
+      expect(observationOpts.transcriptMessage).toContain("A detailed tool result.");
+      expect(observationOpts.inputProvenance).toMatchObject({
+        kind: "internal_system",
+        sourceTool: "heartbeat",
+        memoryIndexIncludedText: "A red mug is left of the keyboard, with a blue cloth behind it.",
+      });
+      await ensureResponseConsumed(resIntentionalObservation);
 
       mockAgentOnce([{ text: "hello" }]);
       const resSessionOverride = await postResponses(
@@ -952,13 +1054,16 @@ describe("OpenResponses HTTP API (e2e)", () => {
     const port = enabledPort;
     try {
       agentCommand.mockClear();
-      agentCommand.mockImplementationOnce((async (opts: unknown) =>
-        buildAssistantDeltaResult({
+      agentCommand.mockImplementationOnce((async (opts: unknown) => {
+        const runId = (opts as { runId?: string }).runId ?? "";
+        emitAgentEvent({ runId, stream: "compaction", data: { phase: "start" } });
+        return buildAssistantDeltaResult({
           opts,
           emit: emitAgentEvent,
           deltas: ["he", "llo"],
           text: "hello",
-        })) as never);
+        });
+      }) as never);
 
       const resDelta = await postResponses(port, {
         stream: true,
@@ -967,6 +1072,8 @@ describe("OpenResponses HTTP API (e2e)", () => {
       });
       expect(resDelta.status).toBe(200);
       expect(resDelta.headers.get("content-type") ?? "").toContain("text/event-stream");
+      expect(firstAgentOpts().deliver).toBe(false);
+      expect(firstAgentOpts().bestEffortDeliver).toBe(false);
 
       const deltaText = await resDelta.text();
       const deltaEvents = parseSseEvents(deltaText);
@@ -976,6 +1083,7 @@ describe("OpenResponses HTTP API (e2e)", () => {
       expect(eventTypes).toContain("response.output_item.added");
       expect(eventTypes).toContain("response.in_progress");
       expect(eventTypes).toContain("response.content_part.added");
+      expect(eventTypes).toContain("openclaw.compaction.started");
       expect(eventTypes).toContain("response.output_text.delta");
       expect(eventTypes).toContain("response.output_text.done");
       expect(eventTypes).toContain("response.content_part.done");
@@ -990,6 +1098,12 @@ describe("OpenResponses HTTP API (e2e)", () => {
         })
         .join("");
       expect(deltas).toBe("hello");
+
+      const compactionStarted = findSseEvent(deltaEvents, "openclaw.compaction.started");
+      expect(parseSseData(compactionStarted)).toMatchObject({
+        type: "openclaw.compaction.started",
+        response_id: expect.stringMatching(/^resp_/),
+      });
 
       const completedDeltaResponse = deltaEvents.find((e) => e.event === "response.completed");
       const completedDeltaOutput = (
