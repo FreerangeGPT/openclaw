@@ -272,4 +272,102 @@ print(json.dumps({"deduplicated": deduplicated, "failed": failed}))
       failed: false,
     });
   });
+
+  it("retries an unprocessed message after cooldown and a transient rating failure", () => {
+    const probe = String.raw`
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("memory_sidecar", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+class Connection:
+    def close(self):
+        pass
+
+after_seqs = []
+ratings = iter([
+    {"score": 9, "fragment": "first", "source": "memory/first.md", "reason": "relevant"},
+    None,
+    {"score": 1, "fragment": "", "source": "memory/second.md", "reason": "not relevant"},
+])
+times = iter([1000, 1000, 1010, 1070, 1080])
+
+module.open_session_database = lambda: Connection()
+module.find_current_message_cursor = lambda _connection: ("main-session", 1)
+module.find_active_session = lambda _connection: "main-session"
+def tail(_connection, _session_id, after_seq):
+    after_seqs.append(after_seq)
+    if len(after_seqs) > 4:
+        raise KeyboardInterrupt()
+    return {"seq": 2, "content": "first"} if after_seq == 1 else {"seq": 3, "content": "second"}
+module.tail_last_user_message = tail
+module.get_recent_conversation = lambda *_args, **_kwargs: "conversation"
+module.gather_memory_snippets = lambda **_kwargs: "memories"
+module.rate_memories = lambda *_args, **_kwargs: next(ratings)
+module.inject_memory = lambda *_args, **_kwargs: True
+module.time.time = lambda: next(times)
+module.time.sleep = lambda _seconds: None
+sys.argv = [sys.argv[1], "--interval", "1", "--poll", "0"]
+module.main()
+print(json.dumps({"after_seqs": after_seqs}))
+`;
+    const result = runProbe(probe);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.split("\n").at(-2) ?? "{}")).toEqual({
+      after_seqs: [1, 2, 2, 2, 3],
+    });
+  });
+
+  it("quarantines a message after bounded rating failures", () => {
+    const probe = String.raw`
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("memory_sidecar", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+class Connection:
+    def close(self):
+        pass
+
+after_seqs = []
+rating_calls = 0
+module.open_session_database = lambda: Connection()
+module.find_current_message_cursor = lambda _connection: ("main-session", 1)
+module.find_active_session = lambda _connection: "main-session"
+def tail(_connection, _session_id, after_seq):
+    after_seqs.append(after_seq)
+    if after_seq == 2:
+        raise KeyboardInterrupt()
+    return {"seq": 2, "content": "unrateable"}
+def rate(*_args, **_kwargs):
+    global rating_calls
+    rating_calls += 1
+    raise ValueError("unexpected scorer result")
+module.tail_last_user_message = tail
+module.get_recent_conversation = lambda *_args, **_kwargs: "conversation"
+module.gather_memory_snippets = lambda **_kwargs: "memories"
+module.rate_memories = rate
+module.time.time = lambda: 1000
+module.time.sleep = lambda _seconds: None
+sys.argv = [sys.argv[1], "--poll", "0"]
+module.main()
+print(json.dumps({"after_seqs": after_seqs, "rating_calls": rating_calls}))
+`;
+    const result = runProbe(probe);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.split("\n").at(-2) ?? "{}")).toEqual({
+      after_seqs: [1, 1, 1, 2],
+      rating_calls: 3,
+    });
+  });
 });

@@ -166,4 +166,23 @@ describe("provider replay log", () => {
     ).not.toThrow();
     expect(write).toHaveBeenCalledTimes(1);
   });
+
+  it("makes flush failures fail-soft and disables subsequent writes", async () => {
+    const write = vi.fn();
+    const recorder = createProviderReplayRecorder({
+      env: { OPENCLAW_ANTHROPIC_PAYLOAD_LOG: "raw" },
+      runId: "run-flush-failure",
+      writer: {
+        filePath: "memory-flush-failure",
+        write,
+        flush: async () => {
+          throw new Error("disk unavailable");
+        },
+      },
+    });
+
+    await expect(recorder?.flush()).resolves.toBeUndefined();
+    recorder?.recordResponse({ snapshot: snapshot(), message: { role: "assistant" } });
+    expect(write).not.toHaveBeenCalled();
+  });
 });

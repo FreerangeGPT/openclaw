@@ -1,11 +1,23 @@
 #!/usr/bin/env node
 export type TsdownBuildInvocation = {
-  command: unknown;
+  command: string;
   args: string[];
   options: {
     env: NodeJS.ProcessEnv;
+    shell: boolean;
+    stdio: string[];
+    windowsVerbatimArguments: boolean | undefined;
     [key: string]: unknown;
   };
+  [key: string]: unknown;
+};
+export type TsdownBuildInvocationParams = {
+  args?: string[];
+  comSpec?: string;
+  env?: NodeJS.ProcessEnv;
+  nodeExecPath?: string;
+  npmExecPath?: string;
+  platform?: NodeJS.Platform;
   [key: string]: unknown;
 };
 /**
@@ -34,27 +46,9 @@ export function createTsdownOutputScanner(params?: Record<string, unknown>): {
     fatalUnresolvedImport: unknown;
   };
 };
-export function resolveTsdownBuildInvocation(params?: Record<string, unknown>):
-  | {
-      command: unknown;
-      args: unknown[];
-      options: {
-        stdio: string[];
-        shell: boolean;
-        windowsVerbatimArguments: undefined;
-        env: NodeJS.ProcessEnv;
-      };
-    }
-  | {
-      command: string;
-      args: string[];
-      options: {
-        stdio: string[];
-        shell: boolean;
-        windowsVerbatimArguments: boolean | undefined;
-        env: NodeJS.ProcessEnv;
-      };
-    };
+export function resolveTsdownBuildInvocation(
+  params?: TsdownBuildInvocationParams,
+): TsdownBuildInvocation;
 export function isTsdownMemoryFailure(result: {
   captured?: string;
   oomKilled?: boolean;
@@ -66,28 +60,9 @@ export function resolveTsdownLowMemoryRetryInvocation(
   invocation: TsdownBuildInvocation,
 ): TsdownBuildInvocation | null;
 /** Builds declarations in dependency order without overlapping the largest graphs. */
-export function resolveTsdownBuildInvocations(params?: Record<string, unknown>): (
-  | {
-      command: unknown;
-      args: unknown[];
-      options: {
-        stdio: string[];
-        shell: boolean;
-        windowsVerbatimArguments: undefined;
-        env: NodeJS.ProcessEnv;
-      };
-    }
-  | {
-      command: string;
-      args: string[];
-      options: {
-        stdio: string[];
-        shell: boolean;
-        windowsVerbatimArguments: boolean | undefined;
-        env: NodeJS.ProcessEnv;
-      };
-    }
-)[];
+export function resolveTsdownBuildInvocations(
+  params?: TsdownBuildInvocationParams,
+): TsdownBuildInvocation[];
 export function signalTsdownBuildProcessTree(
   child: { pid?: number; kill(signal?: NodeJS.Signals): unknown },
   signal: NodeJS.Signals,

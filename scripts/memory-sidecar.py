@@ -26,6 +26,7 @@ MAIN_SESSION_KEY = "agent:main:main"
 DEFAULT_ENQUEUE_URL = "http://127.0.0.1:8100/memory/enqueue"
 DEFAULT_MODEL_URL = "http://127.0.0.1:4001/v1/chat/completions"
 DEFAULT_MODEL = "aineko-recall"
+MAX_RATING_FAILURES_PER_MESSAGE = 3
 
 TIER2_GLOBS = [
     "memory/tier2-*.md",
@@ -377,6 +378,8 @@ def main() -> None:
     last_message_cursor = find_current_message_cursor(connection)
     last_inject_time = 0.0
     pending_injection = None
+    rating_failure_cursor = None
+    rating_failure_count = 0
 
     try:
         while True:
@@ -391,6 +394,10 @@ def main() -> None:
                     )
                     if success:
                         last_inject_time = time.time()
+                        last_message_cursor = (
+                            pending_injection["session_id"],
+                            pending_injection["seq"],
+                        )
                         pending_injection = None
                     else:
                         if args.verbose:
@@ -418,7 +425,6 @@ def main() -> None:
                 if not new_msg:
                     time.sleep(args.poll)
                     continue
-                last_message_cursor = (session_id, new_msg["seq"])
 
                 now = time.time()
                 cooldown = args.interval * 60
@@ -447,39 +453,61 @@ def main() -> None:
                     time.sleep(args.poll)
                     continue
 
-                result = rate_memories(
-                    conversation,
-                    memories,
-                    model_url=args.model_url,
-                    model=args.model,
-                    timeout_seconds=args.model_timeout,
-                )
+                try:
+                    result = rate_memories(
+                        conversation,
+                        memories,
+                        model_url=args.model_url,
+                        model=args.model,
+                        timeout_seconds=args.model_timeout,
+                    )
+                    if result:
+                        raw_score = result.get("score")
+                        score = (
+                            float(raw_score)
+                            if isinstance(raw_score, (int, float))
+                            and not isinstance(raw_score, bool)
+                            else 0.0
+                        )
+                        fragment = result.get("fragment")
+                        source = result.get("source")
+                        reason = result.get("reason")
+                        fragment = fragment if isinstance(fragment, str) else ""
+                        source = source if isinstance(source, str) else "unknown"
+                        reason = reason if isinstance(reason, str) else ""
+                except Exception as error:
+                    print(f"[memory-sidecar] rating failed: {error}", file=sys.stderr)
+                    result = None
                 if not result:
+                    message_cursor = (session_id, new_msg["seq"])
+                    if rating_failure_cursor == message_cursor:
+                        rating_failure_count += 1
+                    else:
+                        rating_failure_cursor = message_cursor
+                        rating_failure_count = 1
                     print(
-                        "[memory-sidecar] rating returned no usable JSON",
+                        "[memory-sidecar] rating returned no usable JSON "
+                        f"(attempt {rating_failure_count}/{MAX_RATING_FAILURES_PER_MESSAGE})",
                         file=sys.stderr,
                     )
+                    if rating_failure_count >= MAX_RATING_FAILURES_PER_MESSAGE:
+                        # A permanently broken scorer must not pin the cursor and
+                        # spend forever on one message. Later user turns stay live.
+                        last_message_cursor = message_cursor
+                        rating_failure_cursor = None
+                        rating_failure_count = 0
                     time.sleep(args.poll)
                     continue
+                rating_failure_cursor = None
+                rating_failure_count = 0
 
-                raw_score = result.get("score")
-                score = (
-                    float(raw_score)
-                    if isinstance(raw_score, (int, float)) and not isinstance(raw_score, bool)
-                    else 0.0
-                )
-                fragment = result.get("fragment")
-                source = result.get("source")
-                reason = result.get("reason")
-                fragment = fragment if isinstance(fragment, str) else ""
-                source = source if isinstance(source, str) else "unknown"
-                reason = reason if isinstance(reason, str) else ""
                 log_source = source.replace("\n", " ")[:160]
                 print(
                     f"[memory-sidecar] score={score:g} source={log_source}",
                     file=sys.stderr,
                 )
                 if score < args.threshold or not fragment.strip():
+                    last_message_cursor = (session_id, new_msg["seq"])
                     continue
 
                 if args.dry_run:
@@ -488,12 +516,15 @@ def main() -> None:
                         f"from {log_source}"
                     )
                     last_inject_time = now
+                    last_message_cursor = (session_id, new_msg["seq"])
                     continue
 
                 pending_injection = {
                     "fragment": fragment,
                     "source": source,
                     "reason": reason,
+                    "session_id": session_id,
+                    "seq": new_msg["seq"],
                 }
                 if inject_memory(
                     fragment,
@@ -503,6 +534,7 @@ def main() -> None:
                     timeout_seconds=args.enqueue_timeout,
                 ):
                     last_inject_time = time.time()
+                    last_message_cursor = (session_id, new_msg["seq"])
                     pending_injection = None
 
             except KeyboardInterrupt:

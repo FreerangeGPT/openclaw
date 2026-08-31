@@ -25,6 +25,7 @@ const targets = [
   "openclaw.mjs",
   "tsdown.ai.config.ts",
   "tsdown.config.ts",
+  "tsdown.low-memory.config.ts",
   "vitest.config.ts",
 ];
 

@@ -119,6 +119,15 @@ function waitForChildClose(
 }
 
 describe("resolveTsdownBuildInvocation", () => {
+  it("rejects non-string process overrides before returning a spawn invocation", () => {
+    expect(() => resolveTsdownBuildInvocation({ args: ["--no-dts", 42] } as never)).toThrow(
+      "args must be an array of strings",
+    );
+    expect(() => resolveTsdownBuildInvocation({ nodeExecPath: 42 } as never)).toThrow(
+      "nodeExecPath must be a string",
+    );
+  });
+
   it("parses wrapper help before any tsdown work", () => {
     expect(parseTsdownBuildArgs(["--help"])).toEqual({ forwardedArgs: [], help: true });
     expect(parseTsdownBuildArgs(["--format", "esm"])).toEqual({
@@ -618,10 +627,12 @@ describe("resolveTsdownBuildInvocation", () => {
     });
 
     const retry = resolveTsdownLowMemoryRetryInvocation(invocation);
-    expect(retry?.args).toEqual(
-      expect.arrayContaining(["--config", "tsdown.low-memory.config.ts"]),
-    );
-    expect(retry?.options.env.GOMEMLIMIT).toBe("11264MiB");
+    expect(retry).not.toBeNull();
+    if (!retry) {
+      throw new Error("expected a low-memory retry invocation");
+    }
+    expect(retry.args).toEqual(expect.arrayContaining(["--config", "tsdown.low-memory.config.ts"]));
+    expect(retry.options.env.GOMEMLIMIT).toBe("11264MiB");
     expect(resolveTsdownLowMemoryRetryInvocation(retry)).toBeNull();
   });
 

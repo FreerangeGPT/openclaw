@@ -145,7 +145,7 @@ export function parseRobotSpeechInterruptionSettlement(
   for (const call of calls) {
     if (
       callIds.has(call.call_id) ||
-      call.turn_start < previousEnd ||
+      call.turn_start !== previousEnd ||
       call.turn_end > value.turn_text.length ||
       value.turn_text.slice(call.turn_start, call.turn_end) !== call.emitted_text ||
       !call.emitted_text.endsWith(call.spoken_text) ||
@@ -156,6 +156,9 @@ export function parseRobotSpeechInterruptionSettlement(
     }
     callIds.add(call.call_id);
     previousEnd = call.turn_end;
+  }
+  if (previousEnd !== value.turn_text.length) {
+    return undefined;
   }
   return {
     discard_unheard_suffix: true,
@@ -227,6 +230,45 @@ function toolResultText(params: {
   });
 }
 
+function isPendingRobotToolResult(
+  message: AgentMessage,
+  params: { callId: string; toolName: string },
+): boolean {
+  if (
+    message.role !== "toolResult" ||
+    message.toolCallId !== params.callId ||
+    message.toolName !== params.toolName ||
+    message.isError ||
+    message.content.length !== 1 ||
+    message.content[0]?.type !== "text"
+  ) {
+    return false;
+  }
+  try {
+    const result: unknown = JSON.parse(message.content[0].text);
+    return (
+      isRecord(result) &&
+      result.status === "pending" &&
+      (result.tool === undefined || result.tool === params.toolName)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function findLatestToolResultEvent(
+  transcriptEvents: readonly TranscriptMessageEvent[],
+  params: { afterEventIndex: number; callId: string },
+): TranscriptMessageEvent | undefined {
+  return transcriptEvents
+    .slice(params.afterEventIndex + 1)
+    .filter(
+      (candidate) =>
+        candidate.message.role === "toolResult" && candidate.message.toolCallId === params.callId,
+    )
+    .at(-1);
+}
+
 /**
  * Build an all-or-nothing rewrite of the exact robot_speak calls named by call id.
  *
@@ -240,6 +282,45 @@ export function buildRobotSpeechInterruptionRewritePlan(
   const transcriptEvents = events
     .map(asTranscriptMessageEvent)
     .filter(Boolean) as TranscriptMessageEvent[];
+  const lastUserEventIndex = transcriptEvents.findLastIndex(
+    (event) => event.message.role === "user",
+  );
+  const activeTranscriptEvents = transcriptEvents.slice(lastUserEventIndex + 1);
+  const activeRobotCallIds = activeTranscriptEvents.flatMap((event, activeIndex) => {
+    if (event.message.role !== "assistant" || !Array.isArray(event.message.content)) {
+      return [];
+    }
+    const eventIndex = lastUserEventIndex + 1 + activeIndex;
+    return event.message.content.flatMap((block) => {
+      if (
+        !isRecord(block) ||
+        block.type !== "toolCall" ||
+        typeof block.id !== "string" ||
+        typeof block.name !== "string" ||
+        !ROBOT_SPEECH_TOOL_NAMES.has(block.name)
+      ) {
+        return [];
+      }
+      const resultEvent = findLatestToolResultEvent(transcriptEvents, {
+        afterEventIndex: eventIndex,
+        callId: block.id,
+      });
+      return resultEvent &&
+        isPendingRobotToolResult(resultEvent.message, {
+          callId: block.id,
+          toolName: block.name,
+        })
+        ? [block.id]
+        : [];
+    });
+  });
+  const settlementCallIds = settlement.speech_calls.map((call) => call.call_id);
+  if (
+    activeRobotCallIds.length !== settlementCallIds.length ||
+    activeRobotCallIds.some((callId, index) => callId !== settlementCallIds[index])
+  ) {
+    throw new Error("speech settlement does not match the active robot speech call sequence");
+  }
   const replacements = new Map<string, AgentMessage>();
   let interruptionMarked = false;
 
@@ -249,7 +330,8 @@ export function buildRobotSpeechInterruptionRewritePlan(
       event: TranscriptMessageEvent;
       eventIndex: number;
     }> = [];
-    for (const [eventIndex, event] of transcriptEvents.entries()) {
+    for (const event of activeTranscriptEvents) {
+      const eventIndex = transcriptEvents.indexOf(event);
       if (event.message.role !== "assistant" || !Array.isArray(event.message.content)) {
         continue;
       }
@@ -280,6 +362,30 @@ export function buildRobotSpeechInterruptionRewritePlan(
 
     const heardText = heardTextForCall(settlement, call);
     const interrupted = heardText.length < call.spoken_text.length;
+    const matchedAssistantMessage = match.event.message;
+    if (
+      matchedAssistantMessage.role !== "assistant" ||
+      !Array.isArray(matchedAssistantMessage.content)
+    ) {
+      throw new Error(`robot_speak transcript call ${call.call_id} has no content array`);
+    }
+    const matchedBlock = matchedAssistantMessage.content[match.blockIndex];
+    if (!isRecord(matchedBlock) || typeof matchedBlock.name !== "string") {
+      throw new Error(`robot_speak transcript call ${call.call_id} is malformed`);
+    }
+    const toolResultEvent = findLatestToolResultEvent(transcriptEvents, {
+      afterEventIndex: match.eventIndex,
+      callId: call.call_id,
+    });
+    if (
+      !toolResultEvent ||
+      !isPendingRobotToolResult(toolResultEvent.message, {
+        callId: call.call_id,
+        toolName: matchedBlock.name,
+      })
+    ) {
+      throw new Error(`robot_speak transcript call ${call.call_id} has no matching pending result`);
+    }
     const assistantMessage = (replacements.get(match.event.id) ??
       cloneMessage(match.event.message)) as AssistantToolCallMessage;
     if (!Array.isArray(assistantMessage.content)) {
@@ -299,30 +405,21 @@ export function buildRobotSpeechInterruptionRewritePlan(
     assistantMessage.content[match.blockIndex] = nextBlock as never;
     replacements.set(match.event.id, assistantMessage);
 
-    const toolResultEvent = transcriptEvents
-      .slice(match.eventIndex + 1)
-      .find(
-        (candidate) =>
-          candidate.message.role === "toolResult" &&
-          (candidate.message as { toolCallId?: unknown }).toolCallId === call.call_id,
-      );
-    if (toolResultEvent) {
-      const toolResult =
-        replacements.get(toolResultEvent.id) ?? cloneMessage(toolResultEvent.message);
-      if (toolResult.role === "toolResult") {
-        toolResult.content = [
-          {
-            type: "text",
-            text: toolResultText({
-              heardText,
-              interrupted,
-              reason: settlement.reason,
-            }),
-          },
-        ];
-        toolResult.isError = false;
-        replacements.set(toolResultEvent.id, toolResult);
-      }
+    const toolResult =
+      replacements.get(toolResultEvent.id) ?? cloneMessage(toolResultEvent.message);
+    if (toolResult.role === "toolResult") {
+      toolResult.content = [
+        {
+          type: "text",
+          text: toolResultText({
+            heardText,
+            interrupted,
+            reason: settlement.reason,
+          }),
+        },
+      ];
+      toolResult.isError = false;
+      replacements.set(toolResultEvent.id, toolResult);
     }
     interruptionMarked ||= interrupted;
   }

@@ -5,6 +5,7 @@ import {
   type AnthropicPromptCacheTouchResult,
 } from "@openclaw/ai/transports";
 import { MAIN_SESSION_CACHE_TOUCH_CUSTOM_TYPE } from "../agents/embedded-agent-runner/cache-ttl.js";
+import { refreshLivePromptCacheEvidenceAfterTouch } from "../agents/embedded-agent-runner/prompt-cache-evidence.js";
 import { acquireSessionWriteLock } from "../agents/session-write-lock.js";
 import { SessionManager } from "../agents/sessions/index.js";
 import type { Model } from "../llm/types.js";
@@ -45,6 +46,7 @@ export type MainSessionCacheTouchParent = MainSessionCacheTouchStage & {
   generation: string;
   hardFailures: number;
   nextAttemptAtMs: number;
+  promptCacheEvidenceId: string;
 };
 
 export type CacheTouchObservation = {
@@ -63,6 +65,11 @@ export type MainSessionCacheKeeperDeps = {
     observation: CacheTouchObservation,
   ) => Promise<string | undefined>;
   readActiveLeafId: (parent: MainSessionCacheTouchParent) => Promise<string | null>;
+  refreshEvidence: (params: {
+    confirmedCachedTokens: number;
+    evidenceId: string;
+    timestamp: number;
+  }) => boolean;
   setInterval: (callback: () => void, delayMs: number) => ReturnType<typeof setInterval>;
   setTimeout: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
   touch: (parent: MainSessionCacheTouchParent) => Promise<AnthropicPromptCacheTouchResult>;
@@ -116,6 +123,7 @@ function createDefaultDeps(): MainSessionCacheKeeperDeps {
     now: Date.now,
     persistObservation: persistCacheTouchObservation,
     readActiveLeafId,
+    refreshEvidence: refreshLivePromptCacheEvidenceAfterTouch,
     setInterval: (callback, delayMs) => setInterval(callback, delayMs),
     setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
     touch: (parent) =>
@@ -195,11 +203,17 @@ export class MainSessionCacheKeeperRuntime {
     return true;
   }
 
-  commit(params: { anchorId: string; expectedCachedTokens: number; runId: string }): boolean {
+  commit(params: {
+    anchorId: string;
+    expectedCachedTokens: number;
+    promptCacheEvidenceId: string;
+    runId: string;
+  }): boolean {
     const staged = this.stagedByRun.get(params.runId);
     if (
       !staged ||
       !params.anchorId ||
+      !params.promptCacheEvidenceId ||
       !Number.isFinite(params.expectedCachedTokens) ||
       params.expectedCachedTokens <= 0
     ) {
@@ -217,6 +231,7 @@ export class MainSessionCacheKeeperRuntime {
         generation,
         hardFailures: 0,
         nextAttemptAtMs: staged.providerCallStartedAt + MAIN_SESSION_CACHE_TOUCH_INTERVAL_MS,
+        promptCacheEvidenceId: params.promptCacheEvidenceId,
       });
     }
     this.stagedByRun.delete(params.runId);
@@ -303,14 +318,51 @@ export class MainSessionCacheKeeperRuntime {
     const attemptStartedAtMs = this.deps.now();
     try {
       const result = await this.deps.touch(parent);
+      // Anthropic's generic cacheWrite already includes the one-hour subtype;
+      // adding cacheWrite1h again would overstate confirmed prefix coverage.
       const confirmedCachedTokens = result.usage.cacheRead + result.usage.cacheWrite;
       if (confirmedCachedTokens < parent.expectedCachedTokens) {
         throw new Error(
           `cache coverage ${confirmedCachedTokens} below expected ${parent.expectedCachedTokens}`,
         );
       }
+      let currentLeafId: string | null;
+      try {
+        currentLeafId = await this.deps.readActiveLeafId(parent);
+      } catch (error) {
+        // The paid provider touch already succeeded. A local verification error
+        // cannot justify repeating it; a foreground turn must seed a new parent.
+        if (this.parents.get(parent.agentId)?.generation === parent.generation) {
+          this.parents.delete(parent.agentId);
+        }
+        log.warn(
+          `main cache touch dropped after leaf verification failed: agent=${parent.agentId} ` +
+            `session=${parent.sessionId} error=${String(error)}`,
+        );
+        return;
+      }
       const current = this.parents.get(parent.agentId);
       if (!current || current.generation !== parent.generation) {
+        return;
+      }
+      if (currentLeafId !== parent.anchorId) {
+        this.parents.delete(parent.agentId);
+        return;
+      }
+      if (
+        !this.deps.refreshEvidence({
+          confirmedCachedTokens,
+          evidenceId: parent.promptCacheEvidenceId,
+          timestamp: attemptStartedAtMs,
+        })
+      ) {
+        // Missing or mismatched live evidence cannot be recreated by another
+        // paid touch. Drop this parent and wait for a foreground turn to seed it.
+        this.parents.delete(parent.agentId);
+        log.warn(
+          `main cache touch dropped stale evidence: agent=${parent.agentId} ` +
+            `session=${parent.sessionId}`,
+        );
         return;
       }
       const attempt = current.hardFailures + 1;
@@ -377,6 +429,7 @@ export function stageMainSessionCacheTouch(candidate: MainSessionCacheTouchStage
 export function commitMainSessionCacheTouch(params: {
   anchorId: string;
   expectedCachedTokens: number;
+  promptCacheEvidenceId: string;
   runId: string;
 }): boolean {
   return mainSessionCacheKeeper.commit(params);

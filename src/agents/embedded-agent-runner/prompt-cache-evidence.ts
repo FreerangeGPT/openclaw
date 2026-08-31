@@ -227,6 +227,28 @@ export function refreshLivePromptCacheEvidence(params: {
   return true;
 }
 
+/** Advances live evidence after a background touch proves the original cached prefix. */
+export function refreshLivePromptCacheEvidenceAfterTouch(params: {
+  confirmedCachedTokens: number;
+  evidenceId: string;
+  timestamp: number;
+}): boolean {
+  const live = liveEvidenceById.get(params.evidenceId);
+  const timestamp = normalizeTokenCount(params.timestamp);
+  const confirmedCachedTokens = normalizeTokenCount(params.confirmedCachedTokens);
+  if (
+    !live ||
+    timestamp === undefined ||
+    timestamp < live.lastConfirmedTimestamp ||
+    confirmedCachedTokens === undefined ||
+    confirmedCachedTokens < live.data.confirmedCachedTokens
+  ) {
+    return false;
+  }
+  live.lastConfirmedTimestamp = timestamp;
+  return true;
+}
+
 export type MainSessionCacheKeeperMismatchReason =
   | "cache-evidence-expired"
   | "cache-evidence-missing"
@@ -486,7 +508,7 @@ function hasActiveBranchLongCacheEvidence(params: {
  * Persists the retention that produced a cache-bearing main-dialogue response.
  * The heartbeat keeper must not promote an old short-TTL hit after a config reload.
  */
-export function appendMainSessionPromptCacheEvidence(params: {
+type AppendMainSessionPromptCacheEvidenceParams = {
   sessionManager: {
     appendCustomEntry?: (customType: string, data: unknown) => unknown;
     getBranch?: () => readonly unknown[];
@@ -510,7 +532,11 @@ export function appendMainSessionPromptCacheEvidence(params: {
   cacheWrite?: number;
   cacheWrite1h?: number;
   promptTokens?: number;
-}): boolean {
+};
+
+function appendMainSessionPromptCacheEvidenceData(
+  params: AppendMainSessionPromptCacheEvidenceParams,
+): PromptCacheEvidenceData | false {
   if (!isCanonicalAgentMainSession(params)) {
     return false;
   }
@@ -612,5 +638,17 @@ export function appendMainSessionPromptCacheEvidence(params: {
     data,
     lastConfirmedTimestamp: data.timestamp,
   });
-  return true;
+  return data;
+}
+
+export function appendMainSessionPromptCacheEvidence(
+  params: AppendMainSessionPromptCacheEvidenceParams,
+): boolean {
+  return Boolean(appendMainSessionPromptCacheEvidenceData(params));
+}
+
+export function appendMainSessionPromptCacheEvidenceWithData(
+  params: AppendMainSessionPromptCacheEvidenceParams,
+): PromptCacheEvidenceData | undefined {
+  return appendMainSessionPromptCacheEvidenceData(params) || undefined;
 }

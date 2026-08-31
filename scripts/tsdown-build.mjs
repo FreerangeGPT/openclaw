@@ -882,9 +882,30 @@ export function createTsdownOutputScanner(params = {}) {
   };
 }
 
+function readTsdownInvocationString(value, name) {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new TypeError(`${name} must be a string`);
+  }
+  return value;
+}
+
 export function resolveTsdownBuildInvocation(params = {}) {
   let forwardedArgs = params.args ?? [];
+  if (!Array.isArray(forwardedArgs) || forwardedArgs.some((arg) => typeof arg !== "string")) {
+    throw new TypeError("args must be an array of strings");
+  }
   const sourceEnv = params.env ?? process.env;
+  if (typeof sourceEnv !== "object" || Array.isArray(sourceEnv)) {
+    throw new TypeError("env must be an object");
+  }
+  const nodeExecPath =
+    readTsdownInvocationString(params.nodeExecPath, "nodeExecPath") ?? process.execPath;
+  const npmExecPath = readTsdownInvocationString(params.npmExecPath, "npmExecPath");
+  const comSpec = readTsdownInvocationString(params.comSpec, "comSpec");
+  const platform = readTsdownInvocationString(params.platform, "platform") ?? process.platform;
   validateDeclarationBuildMemory(forwardedArgs, sourceEnv, params);
   let env = resolveTsdownEnv(sourceEnv, params);
   if (shouldUseLowMemoryDts(forwardedArgs, env)) {
@@ -903,7 +924,7 @@ export function resolveTsdownBuildInvocation(params = {}) {
   ];
   if (env.OPENCLAW_BUILD_ALL_NO_PNPM === "1") {
     return {
-      command: params.nodeExecPath ?? process.execPath,
+      command: nodeExecPath,
       args: ["node_modules/tsdown/dist/run.mjs", ...tsdownArgs],
       options: {
         stdio: ["ignore", "pipe", "pipe"],
@@ -916,10 +937,10 @@ export function resolveTsdownBuildInvocation(params = {}) {
   const runner = resolvePnpmRunner({
     env,
     pnpmArgs: ["exec", "tsdown", ...tsdownArgs],
-    nodeExecPath: params.nodeExecPath ?? process.execPath,
-    npmExecPath: params.npmExecPath ?? env.npm_execpath,
-    comSpec: params.comSpec,
-    platform: params.platform ?? process.platform,
+    nodeExecPath,
+    npmExecPath: npmExecPath ?? env.npm_execpath,
+    comSpec,
+    platform,
   });
   return {
     command: runner.command,

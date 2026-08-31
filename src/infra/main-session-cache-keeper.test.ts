@@ -71,6 +71,8 @@ function createRuntime(
   params: {
     leafId?: { value: string | null };
     persistObservation?: MainSessionCacheKeeperDeps["persistObservation"];
+    readActiveLeafId?: MainSessionCacheKeeperDeps["readActiveLeafId"];
+    refreshEvidence?: MainSessionCacheKeeperDeps["refreshEvidence"];
     touch?: MainSessionCacheKeeperDeps["touch"];
   } = {},
 ) {
@@ -78,17 +80,25 @@ function createRuntime(
   const touch = params.touch ?? vi.fn(async () => createTouchResult());
   const persistObservation =
     params.persistObservation ?? vi.fn(async () => "cache-touch-observation-1");
+  const refreshEvidence = params.refreshEvidence ?? vi.fn(() => true);
   const deps: MainSessionCacheKeeperDeps = {
     clearInterval: (timer) => clearInterval(timer),
     clearTimeout: (timer) => clearTimeout(timer),
     now: Date.now,
     persistObservation,
-    readActiveLeafId: vi.fn(async () => leafId.value),
+    readActiveLeafId: params.readActiveLeafId ?? vi.fn(async () => leafId.value),
+    refreshEvidence,
     setInterval: (callback, delayMs) => setInterval(callback, delayMs),
     setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
     touch,
   };
-  return { leafId, persistObservation, runtime: new MainSessionCacheKeeperRuntime(deps), touch };
+  return {
+    leafId,
+    persistObservation,
+    refreshEvidence,
+    runtime: new MainSessionCacheKeeperRuntime(deps),
+    touch,
+  };
 }
 
 describe("main session cache keeper", () => {
@@ -102,11 +112,16 @@ describe("main session cache keeper", () => {
   });
 
   it("uses one precise timer for the first touch at 45 minutes", async () => {
-    const { runtime, touch, persistObservation } = createRuntime();
+    const { runtime, touch, persistObservation, refreshEvidence } = createRuntime();
     runtime.start();
     expect(runtime.stage(createStage())).toBe(true);
     expect(
-      runtime.commit({ runId: "run-1", anchorId: "assistant-1", expectedCachedTokens: 12_000 }),
+      runtime.commit({
+        runId: "run-1",
+        anchorId: "assistant-1",
+        expectedCachedTokens: 12_000,
+        promptCacheEvidenceId: "evidence-1",
+      }),
     ).toBe(true);
 
     await vi.advanceTimersByTimeAsync(MAIN_SESSION_CACHE_TOUCH_INTERVAL_MS - 1);
@@ -114,10 +129,91 @@ describe("main session cache keeper", () => {
     await vi.advanceTimersByTimeAsync(1);
 
     expect(touch).toHaveBeenCalledTimes(1);
+    expect(refreshEvidence).toHaveBeenCalledWith({
+      confirmedCachedTokens: 12_000,
+      evidenceId: "evidence-1",
+      timestamp: START_MS + MAIN_SESSION_CACHE_TOUCH_INTERVAL_MS,
+    });
     expect(persistObservation).toHaveBeenCalledWith(
       expect.objectContaining({ confirmedAtMs: START_MS + MAIN_SESSION_CACHE_TOUCH_INTERVAL_MS }),
       expect.objectContaining({ attempt: 1, confirmedAtMs: START_MS + 45 * 60_000 }),
     );
+    runtime.stop();
+  });
+
+  it("does not double-count one-hour writes within generic cache-write usage", async () => {
+    const touch = vi.fn(async () => {
+      const result = createTouchResult();
+      return {
+        ...result,
+        usage: {
+          ...result.usage,
+          cacheRead: 0,
+          cacheWrite: 12_000,
+          cacheWrite1h: 12_000,
+        },
+      };
+    });
+    const { runtime, refreshEvidence } = createRuntime({ touch });
+    runtime.start();
+    runtime.stage(createStage());
+    runtime.commit({
+      runId: "run-1",
+      anchorId: "assistant-1",
+      expectedCachedTokens: 12_000,
+      promptCacheEvidenceId: "evidence-1",
+    });
+
+    await vi.advanceTimersByTimeAsync(MAIN_SESSION_CACHE_TOUCH_INTERVAL_MS);
+
+    expect(refreshEvidence).toHaveBeenCalledWith(
+      expect.objectContaining({ confirmedCachedTokens: 12_000 }),
+    );
+    runtime.stop();
+  });
+
+  it("drops stale live evidence after one successful provider touch", async () => {
+    const refreshEvidence = vi.fn(() => false);
+    const { runtime, touch, persistObservation } = createRuntime({ refreshEvidence });
+    runtime.start();
+    runtime.stage(createStage());
+    runtime.commit({
+      runId: "run-1",
+      anchorId: "assistant-1",
+      expectedCachedTokens: 12_000,
+      promptCacheEvidenceId: "missing-evidence",
+    });
+
+    await vi.advanceTimersByTimeAsync(2 * MAIN_SESSION_CACHE_TOUCH_INTERVAL_MS);
+
+    expect(touch).toHaveBeenCalledOnce();
+    expect(refreshEvidence).toHaveBeenCalledOnce();
+    expect(persistObservation).not.toHaveBeenCalled();
+    runtime.stop();
+  });
+
+  it("does not repeat a paid touch when post-touch leaf verification fails", async () => {
+    const readActiveLeafId = vi
+      .fn<MainSessionCacheKeeperDeps["readActiveLeafId"]>()
+      .mockResolvedValueOnce("assistant-1")
+      .mockRejectedValueOnce(new Error("database unavailable"));
+    const { runtime, touch, refreshEvidence, persistObservation } = createRuntime({
+      readActiveLeafId,
+    });
+    runtime.start();
+    runtime.stage(createStage());
+    runtime.commit({
+      runId: "run-1",
+      anchorId: "assistant-1",
+      expectedCachedTokens: 12_000,
+      promptCacheEvidenceId: "evidence-1",
+    });
+
+    await vi.advanceTimersByTimeAsync(2 * MAIN_SESSION_CACHE_TOUCH_INTERVAL_MS);
+
+    expect(touch).toHaveBeenCalledOnce();
+    expect(refreshEvidence).not.toHaveBeenCalled();
+    expect(persistObservation).not.toHaveBeenCalled();
     runtime.stop();
   });
 
@@ -133,7 +229,12 @@ describe("main session cache keeper", () => {
     const { runtime, persistObservation } = createRuntime({ touch });
     runtime.start();
     runtime.stage(createStage());
-    runtime.commit({ runId: "run-1", anchorId: "assistant-1", expectedCachedTokens: 12_000 });
+    runtime.commit({
+      runId: "run-1",
+      anchorId: "assistant-1",
+      expectedCachedTokens: 12_000,
+      promptCacheEvidenceId: "evidence-1",
+    });
 
     await vi.advanceTimersByTimeAsync(MAIN_SESSION_CACHE_TOUCH_INTERVAL_MS);
     for (const delayMs of MAIN_SESSION_CACHE_TOUCH_RETRY_DELAYS_MS) {
@@ -161,7 +262,12 @@ describe("main session cache keeper", () => {
     const { runtime } = createRuntime({ touch });
     runtime.start();
     runtime.stage(createStage());
-    runtime.commit({ runId: "run-1", anchorId: "assistant-1", expectedCachedTokens: 12_000 });
+    runtime.commit({
+      runId: "run-1",
+      anchorId: "assistant-1",
+      expectedCachedTokens: 12_000,
+      promptCacheEvidenceId: "evidence-1",
+    });
 
     await vi.advanceTimersByTimeAsync(MAIN_SESSION_CACHE_TOUCH_INTERVAL_MS);
     for (const delayMs of MAIN_SESSION_CACHE_TOUCH_RETRY_DELAYS_MS) {
@@ -177,7 +283,12 @@ describe("main session cache keeper", () => {
     const { runtime, touch } = createRuntime();
     runtime.start();
     runtime.stage(createStage());
-    runtime.commit({ runId: "run-1", anchorId: "assistant-1", expectedCachedTokens: 12_000 });
+    runtime.commit({
+      runId: "run-1",
+      anchorId: "assistant-1",
+      expectedCachedTokens: 12_000,
+      promptCacheEvidenceId: "evidence-1",
+    });
 
     await vi.advanceTimersByTimeAsync(MAIN_SESSION_CACHE_TOUCH_INTERVAL_MS - 60_000);
     runtime.stage(
@@ -189,7 +300,12 @@ describe("main session cache keeper", () => {
     await vi.advanceTimersByTimeAsync(60_000 + MAIN_SESSION_CACHE_TOUCH_WATCHDOG_MS);
     expect(touch).not.toHaveBeenCalled();
 
-    runtime.commit({ runId: "run-2", anchorId: "assistant-2", expectedCachedTokens: 12_000 });
+    runtime.commit({
+      runId: "run-2",
+      anchorId: "assistant-2",
+      expectedCachedTokens: 12_000,
+      promptCacheEvidenceId: "evidence-2",
+    });
     runtime.stop();
   });
 
@@ -198,7 +314,12 @@ describe("main session cache keeper", () => {
     const { runtime, touch } = createRuntime({ leafId });
     runtime.start();
     runtime.stage(createStage());
-    runtime.commit({ runId: "run-1", anchorId: "assistant-1", expectedCachedTokens: 12_000 });
+    runtime.commit({
+      runId: "run-1",
+      anchorId: "assistant-1",
+      expectedCachedTokens: 12_000,
+      promptCacheEvidenceId: "evidence-1",
+    });
     leafId.value = "new-user-turn";
 
     await vi.advanceTimersByTimeAsync(MAIN_SESSION_CACHE_TOUCH_INTERVAL_MS);
@@ -212,7 +333,12 @@ describe("main session cache keeper", () => {
     const { runtime, touch } = createRuntime();
     const handle = runtime.start();
     runtime.stage(createStage());
-    runtime.commit({ runId: "run-1", anchorId: "assistant-1", expectedCachedTokens: 12_000 });
+    runtime.commit({
+      runId: "run-1",
+      anchorId: "assistant-1",
+      expectedCachedTokens: 12_000,
+      promptCacheEvidenceId: "evidence-1",
+    });
 
     handle.updateConfig();
     await vi.advanceTimersByTimeAsync(MAIN_SESSION_CACHE_TOUCH_INTERVAL_MS);

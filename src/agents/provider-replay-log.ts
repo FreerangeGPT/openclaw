@@ -101,6 +101,17 @@ export function createProviderReplayRecorder(
     ...(params.workspaceDir ? { workspaceDir: params.workspaceDir } : {}),
   } as const;
   let recordingEnabled = true;
+  const disableAfterSinkFailure = (operation: "flush" | "write") => {
+    if (!recordingEnabled) {
+      return;
+    }
+    // Replay capture is optional diagnostics. Disable it after a sink failure
+    // so logging can never change the foreground provider call's outcome.
+    recordingEnabled = false;
+    log.warn(`provider replay logging disabled after a ${operation} failure`, {
+      filePath: writer.filePath,
+    });
+  };
   const record = (event: Record<string, unknown>) => {
     if (!recordingEnabled) {
       return;
@@ -111,12 +122,7 @@ export function createProviderReplayRecorder(
         writer.write(`${line}\n`);
       }
     } catch {
-      // Replay capture is optional diagnostics. Disable it after a sink failure
-      // so logging can never change the foreground provider call's outcome.
-      recordingEnabled = false;
-      log.warn("provider replay logging disabled after a write failure", {
-        filePath: writer.filePath,
-      });
+      disableAfterSinkFailure("write");
     }
   };
   const requestId = (snapshot: ProviderPromptSnapshot) =>
@@ -163,6 +169,15 @@ export function createProviderReplayRecorder(
         ...(error === undefined ? {} : { error: serializeError(error) }),
       });
     },
-    flush: async () => await writer.flush(),
+    flush: async () => {
+      if (!recordingEnabled) {
+        return;
+      }
+      try {
+        await writer.flush();
+      } catch {
+        disableAfterSinkFailure("flush");
+      }
+    },
   };
 }

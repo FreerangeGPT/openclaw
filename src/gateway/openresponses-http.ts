@@ -110,6 +110,27 @@ const MAX_INTENTIONAL_OBSERVATION_CHARS = 12_000;
 const SENSORY_CONTEXT_START = '<openclaw-sensory-context memory-index="exclude">';
 const SENSORY_CONTEXT_END = "</openclaw-sensory-context>";
 
+function escapeSensoryContextText(value: string, maxChars: number): string {
+  // The wrapper is a trust boundary in the model-visible prompt. Encode text
+  // delimiters without letting entities expand past the model-visible budget.
+  let escaped = "";
+  for (const character of value) {
+    const encoded =
+      character === "&"
+        ? "&amp;"
+        : character === "<"
+          ? "&lt;"
+          : character === ">"
+            ? "&gt;"
+            : character;
+    if (escaped.length + encoded.length > maxChars) {
+      break;
+    }
+    escaped += encoded;
+  }
+  return escaped;
+}
+
 // In-memory map from responseId -> sessionKey for previous_response_id continuity.
 // Entries are evicted after 30 minutes to bound memory usage.
 const RESPONSE_SESSION_TTL_MS = 30 * 60 * 1000;
@@ -448,7 +469,9 @@ function resolveOpenResponsesTurnContext(params: {
   const isHeartbeat =
     params.metadata?.[RUN_KIND_METADATA_KEY]?.trim().toLowerCase() === "heartbeat";
   const rawSensoryContext = params.metadata?.[SENSORY_CONTEXT_METADATA_KEY]?.trim();
-  const sensoryContext = rawSensoryContext?.slice(0, MAX_SENSORY_CONTEXT_CHARS);
+  const sensoryContext = rawSensoryContext
+    ? escapeSensoryContextText(rawSensoryContext, MAX_SENSORY_CONTEXT_CHARS)
+    : undefined;
   const rawIntentionalObservation = params.metadata?.[INTENTIONAL_OBSERVATION_METADATA_KEY]?.trim();
   const intentionalObservation = rawIntentionalObservation?.slice(
     0,

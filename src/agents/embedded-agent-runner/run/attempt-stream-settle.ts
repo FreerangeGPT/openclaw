@@ -14,7 +14,7 @@ import { isRunnerAbortError } from "../abort.js";
 import { isCacheTtlEligibleProvider, readLastCacheTtlTimestamp } from "../cache-ttl.js";
 import { log } from "../logger.js";
 import {
-  appendMainSessionPromptCacheEvidence,
+  appendMainSessionPromptCacheEvidenceWithData,
   fingerprintPromptCacheCredential,
   MainSessionCacheKeeperIdentityMismatchError,
   refreshLivePromptCacheEvidence,
@@ -437,9 +437,13 @@ export async function settleEmbeddedAttemptStream(input: {
       !compactionOccurredThisAttempt &&
       cacheEvidenceAssistantSucceeded
     ) {
+      let promptCacheEvidenceId = attempt.promptCacheKeeperEvidenceId;
       if (cacheKeeperHeartbeatAckDiscard !== "discarded") {
+        // Only the discard path may retain the original keeper evidence. Any
+        // new foreground result must create fresh provenance before scheduling.
+        promptCacheEvidenceId = undefined;
         try {
-          appendMainSessionPromptCacheEvidence({
+          promptCacheEvidenceId = appendMainSessionPromptCacheEvidenceWithData({
             sessionManager,
             cfg: attempt.config ?? {},
             agentId: input.sessionAgentId,
@@ -463,7 +467,7 @@ export async function settleEmbeddedAttemptStream(input: {
             cacheWrite: lastCallUsage?.cacheWrite,
             cacheWrite1h: usageAssistant?.usage.cacheWrite1h,
             promptTokens: exactPromptTokens,
-          });
+          })?.evidenceId;
         } catch (entryErr) {
           // Missing provenance makes the next large heartbeat isolate; the answer
           // itself has already completed and must not be failed by diagnostics.
@@ -478,10 +482,11 @@ export async function settleEmbeddedAttemptStream(input: {
       const expectedCachedTokens =
         (lastCallUsage?.cacheRead ?? 0) + (lastCallUsage?.cacheWrite ?? 0);
       const anchorId = sessionManager.getLeafId();
-      if (anchorId && expectedCachedTokens > 0) {
+      if (anchorId && promptCacheEvidenceId && expectedCachedTokens > 0) {
         commitMainSessionCacheTouch({
           anchorId,
           expectedCachedTokens,
+          promptCacheEvidenceId,
           runId: attempt.runId,
         });
       }

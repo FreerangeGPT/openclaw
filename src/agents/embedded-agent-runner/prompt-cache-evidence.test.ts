@@ -9,6 +9,7 @@ import {
   PROMPT_CACHE_EVIDENCE_CUSTOM_TYPE,
   readPromptCacheEvidenceData,
   refreshLivePromptCacheEvidence,
+  refreshLivePromptCacheEvidenceAfterTouch,
 } from "./prompt-cache-evidence.js";
 
 const evidence = {
@@ -207,6 +208,45 @@ describe("main-session prompt cache evidence", () => {
       }),
     ).toBe(true);
     expect(continued).toHaveBeenCalledOnce();
+  });
+
+  it("advances live freshness after a covering background cache touch", () => {
+    const establish = vi.fn();
+    expect(
+      appendMainSessionPromptCacheEvidence({
+        sessionManager: { appendCustomEntry: establish },
+        cfg: {},
+        agentId: "main",
+        sessionKey: "agent:main:main",
+        ...evidence,
+        promptIdentity: "prompt-identity-background-refresh",
+        authFingerprint: "auth-fingerprint-background-refresh",
+      }),
+    ).toBe(true);
+    const written = establish.mock.calls[0]?.[1] as { evidenceId: string };
+    const refreshedAt = evidence.timestamp + 45 * 60_000;
+
+    expect(
+      refreshLivePromptCacheEvidenceAfterTouch({
+        confirmedCachedTokens: 90_000,
+        evidenceId: written.evidenceId,
+        timestamp: refreshedAt,
+      }),
+    ).toBe(true);
+    expect(() =>
+      assertMainSessionCacheKeeperEvidenceFresh(
+        written.evidenceId,
+        refreshedAt + 59 * 60_000,
+        false,
+      ),
+    ).not.toThrow();
+    expect(
+      refreshLivePromptCacheEvidenceAfterTouch({
+        confirmedCachedTokens: 89_999,
+        evidenceId: written.evidenceId,
+        timestamp: refreshedAt + 1,
+      }),
+    ).toBe(false);
   });
 
   it("combines a confirmed long-cache read with an incremental one-hour write", () => {

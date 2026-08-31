@@ -13,13 +13,12 @@ function extractMemoryPrependSchema(sql: string): string {
   return sql.slice(start, end);
 }
 
-const OPENCLAW_AGENT_MEMORY_PREPEND_SCHEMA_SQL =
-  extractMemoryPrependSchema(OPENCLAW_AGENT_SCHEMA_SQL);
+const AGENT_MEMORY_PREPEND_SCHEMA_SQL = extractMemoryPrependSchema(OPENCLAW_AGENT_SCHEMA_SQL);
 
 /** Lazily create the additive memory-prepend queue inside the caller's transaction. */
 export function ensureOpenClawAgentMemoryPrependSchemaInTransaction(database: DatabaseSync): void {
   if (!database.isTransaction) {
     throw new Error("memory-prepend schema ensure requires an active transaction");
   }
-  database.exec(OPENCLAW_AGENT_MEMORY_PREPEND_SCHEMA_SQL); // sqlite-allow-raw -- Canonical DDL bootstrap for the lazy agent queue.
+  database.exec(AGENT_MEMORY_PREPEND_SCHEMA_SQL); // sqlite-allow-raw -- Canonical DDL bootstrap for the lazy agent queue.
 }
