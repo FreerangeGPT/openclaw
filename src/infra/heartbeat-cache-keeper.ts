@@ -1,4 +1,8 @@
 import {
+  estimateStringChars,
+  estimateTokensFromChars,
+} from "@openclaw/normalization-core/cjk-chars";
+import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
@@ -20,7 +24,6 @@ import {
 import { findSessionTranscriptActiveEvent } from "../config/sessions/session-accessor.js";
 import type { SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import { estimateStringChars, estimateTokensFromChars } from "../utils/cjk-chars.js";
 import {
   shouldAutoIsolateMainSessionHeartbeat,
   shouldSkipExpensiveMainSessionHeartbeat,
@@ -29,7 +32,6 @@ import {
 } from "./heartbeat-cost-guard.js";
 import { isCronSystemEvent, isExecCompletionEvent } from "./heartbeat-events-filter.js";
 import { emitHeartbeatEvent } from "./heartbeat-events.js";
-import type { HeartbeatRunScope } from "./heartbeat-run-scope.js";
 import { heartbeatLog, type HeartbeatConfig } from "./heartbeat-runner-config.js";
 import { resolveHeartbeatRunPrompt, type HeartbeatPreflight } from "./heartbeat-runner-prompt.js";
 import { resolveHeartbeatIntervalMs } from "./heartbeat-summary.js";
@@ -304,7 +306,6 @@ type HeartbeatCacheKeeperPolicy = Awaited<ReturnType<typeof resolveHeartbeatCach
 export async function resolvePromptAwareHeartbeatCacheKeeperPolicy(
   params: Parameters<typeof resolveHeartbeatCacheKeeperPolicy>[0] & {
     preflight: HeartbeatPreflight;
-    runScope: HeartbeatRunScope;
     scheduledTasks: readonly HeartbeatScheduledTask[];
   },
 ): Promise<HeartbeatCacheKeeperPolicy> {
@@ -328,7 +329,6 @@ export async function resolvePromptAwareHeartbeatCacheKeeperPolicy(
         heartbeatScratchContent: params.preflight.heartbeatScratchContent,
         // A main-session keeper preserves the ordinary dialogue tool prefix.
         useHeartbeatResponseTool: false,
-        runScope: params.runScope,
       }).prompt,
   );
   const pendingPromptTokens = Math.max(
@@ -417,7 +417,7 @@ export function resolveLoggedHeartbeatCacheKeeperReplyOptions(
 type HeartbeatCostGuardPreflight = {
   pendingEventEntries: readonly { text: string }[];
   hasTaggedCronEvents: boolean;
-  dueCommitments: readonly unknown[];
+  dueCommitments?: readonly unknown[];
   isCronWake: boolean;
   isExecEventWake: boolean;
 };
@@ -449,7 +449,7 @@ export function resolveHeartbeatSessionIsolation(params: {
     totalTokensFresh: params.entry?.totalTokensFresh,
     hasExecCompletion,
     hasCronEvents,
-    hasDueCommitments: params.preflight.dueCommitments.length > 0,
+    hasDueCommitments: (params.preflight.dueCommitments?.length ?? 0) > 0,
     hasScheduledTasks: params.scheduledTaskCount > 0,
     isCronEventReason: params.preflight.isCronWake,
     isExecEventReason: params.preflight.isExecEventWake,
@@ -478,7 +478,7 @@ export function resolveExpensiveMainSessionHeartbeatSkip(params: {
     prompt: string | null;
     hasExecCompletion: boolean;
     hasCronEvents: boolean;
-    hasDueCommitments: boolean;
+    hasDueCommitments?: boolean;
   };
   policy: HeartbeatCacheKeeperPolicy;
   entry?: HeartbeatCostGuardSessionEntry;
@@ -535,7 +535,7 @@ export function resolveExpensiveMainSessionHeartbeatSkip(params: {
     totalTokensFresh: params.entry?.totalTokensFresh,
     hasExecCompletion: params.runPrompt.hasExecCompletion,
     hasCronEvents: params.runPrompt.hasCronEvents,
-    hasDueCommitments: params.runPrompt.hasDueCommitments,
+    hasDueCommitments: params.runPrompt.hasDueCommitments === true,
     hasScheduledTasks: params.scheduledTaskCount > 0,
     isCronEventReason: params.preflight.isCronWake,
     isExecEventReason: params.preflight.isExecEventWake,

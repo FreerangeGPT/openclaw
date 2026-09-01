@@ -41,11 +41,25 @@ function ensureDependencyIgnores(root) {
 
 function prepare(root) {
   ensureDependencyIgnores(root);
+  // Preserve source-checkout identity through preflight clones and global links;
+  // packaged postinstall cleanup would otherwise delete the fixture's build stamps.
+  for (const directory of ["src", "extensions"]) {
+    fs.mkdirSync(path.join(root, directory), { recursive: true });
+    fs.writeFileSync(path.join(root, directory, ".gitkeep"), "");
+  }
   const packageJsonPath = path.join(root, "package.json");
   const packageJson = readJson(packageJsonPath);
+  // npm still resolves omitted dev dependencies; this fixture runs the packed runtime.
+  delete packageJson.devDependencies;
+  packageJson.scripts = {
+    ...packageJson.scripts,
+    openclaw: "node openclaw.mjs",
+  };
+  delete packageJson.scripts.postinstall;
   const aiRuntimeSource = path.join(root, "node_modules", "@openclaw", "ai");
   const aiRuntimePackageJson = path.join(aiRuntimeSource, "package.json");
   if (!fs.existsSync(aiRuntimePackageJson)) {
+    writeJson(packageJsonPath, packageJson);
     return;
   }
 
@@ -53,6 +67,10 @@ function prepare(root) {
   fs.rmSync(aiRuntimeTarget, { force: true, recursive: true });
   fs.mkdirSync(path.dirname(aiRuntimeTarget), { recursive: true });
   fs.renameSync(aiRuntimeSource, aiRuntimeTarget);
+  const relocatedAiRuntimePackageJson = path.join(aiRuntimeTarget, "package.json");
+  const relocatedAiRuntimePackage = readJson(relocatedAiRuntimePackageJson);
+  delete relocatedAiRuntimePackage.devDependencies;
+  writeJson(relocatedAiRuntimePackageJson, relocatedAiRuntimePackage);
 
   packageJson.dependencies ??= {};
   packageJson.dependencies["@openclaw/ai"] = "file:.openclaw-fixture/packages/ai";

@@ -1,12 +1,13 @@
 // Logger implementation writes structured log output with redaction and transports.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { Logger as TsLogger } from "tslog";
 import type { OpenClawConfig } from "../config/types.js";
+import { hasInternalDiagnosticEventInterest } from "../infra/diagnostic-event-listener-presence.js";
 import {
+  areDiagnosticsEnabledForProcess,
   emitDiagnosticEvent,
   emitDiagnosticEventWithTrustedTraceContext,
 } from "../infra/diagnostic-events.js";
@@ -19,21 +20,24 @@ import {
 } from "../infra/diagnostic-trace-context.js";
 import { expandHomePrefix } from "../infra/home-dir.js";
 import { isBlockedObjectKey } from "../infra/prototype-keys.js";
-import { appendRegularFileSync } from "../infra/regular-file.js";
 import {
   DEFAULT_POSIX_TMP_ROOT,
   resolvePreferredOpenClawTmpDir,
 } from "../infra/tmp-openclaw-dir.js";
-import { readLoggingConfig, shouldSkipMutatingLoggingConfigRead } from "./config.js";
+import { invalidateLoggingConfigCache, readLoggingConfig } from "./config.js";
 import { resolveEnvLogLevelOverride } from "./env-log-level.js";
-import { formatConsoleDiagnosticLine } from "./json-console-line.js";
 import { type LogLevel, levelToMinLevel, normalizeLogLevel } from "./levels.js";
-import { isLegacyRollingLogFilePath, resolveRollingLogFilePathForDate } from "./log-file-path.js";
-import { resolveDefaultRollingLogFile } from "./log-file-path.js";
+import {
+  isLegacyRollingLogFilePath,
+  resolveRollingLogFilePathForDate,
+  resolveDefaultRollingLogFile,
+} from "./log-file-path.js";
 import { canUseNodeFs, formatLocalDate, LOG_PREFIX, LOG_SUFFIX } from "./log-file-shared.js";
+import { fileLogTransport } from "./logger-file-transport.js";
+import { defaultLoggerHostnameResolver, loggerHostnameState } from "./logger-hostname-state.js";
 import { setLoggerFileTargetResolver } from "./logger-settings-internal.js";
 import { redactSecrets, redactSensitiveText } from "./redact.js";
-import { loggingState } from "./state.js";
+import { APPLIED_LOGGING_CONFIG_UNOWNED, loggingState } from "./state.js";
 import { formatTimestamp } from "./timestamps.js";
 import type { LoggerSettings } from "./types.js";
 export type { LoggerSettings } from "./types.js";
@@ -53,7 +57,6 @@ export const DEFAULT_LOG_FILE = resolveDefaultLogFile(DEFAULT_LOG_DIR); // legac
 
 const MAX_LOG_AGE_MS = 24 * 60 * 60 * 1000; // 24h
 const DEFAULT_MAX_LOG_FILE_BYTES = 100 * 1024 * 1024; // 100 MB
-const MAX_ROTATED_LOG_FILES = 5;
 
 type LogObj = { date?: Date } & Record<string, unknown>;
 
@@ -66,7 +69,6 @@ type ResolvedRuntimeSettings = ResolvedSettings & { rolling: boolean };
 export type LoggerResolvedSettings = ResolvedSettings;
 type TsLogRecord = Record<string, unknown>;
 type LoggerConfigLoader = () => OpenClawConfig["logging"] | undefined;
-type HostnameResolver = () => string;
 
 type DiagnosticLogCode = {
   line?: number;
@@ -79,10 +81,27 @@ const MAX_DIAGNOSTIC_LOG_MESSAGE_CHARS = 4 * 1024;
 const loadLoggerConfigDefault: LoggerConfigLoader = () => readLoggingConfig();
 let loadLoggerConfig: LoggerConfigLoader = loadLoggerConfigDefault;
 
-export function setLoggerConfigLoaderForTests(loader?: LoggerConfigLoader): void {
-  loadLoggerConfig = loader ?? loadLoggerConfigDefault;
+function invalidateLoggerSettings(): void {
+  loggingState.generation += 1;
   loggingState.cachedLogger = null;
   loggingState.cachedSettings = null;
+  loggingState.cachedConsoleSettings = null;
+}
+
+/** Publishes authoritative config-derived logging state for the active runtime. */
+export function applyLoggingConfig(config: OpenClawConfig["logging"] | undefined): void {
+  loggingState.appliedConfig = config;
+  invalidateLoggingConfigCache();
+  invalidateLoggerSettings();
+}
+
+export function setLoggerConfigLoaderForTests(loader?: LoggerConfigLoader): void {
+  loadLoggerConfig = loader ?? loadLoggerConfigDefault;
+  invalidateLoggerSettings();
+}
+
+export function readLoggerConfig(): OpenClawConfig["logging"] | undefined {
+  return loadLoggerConfig();
 }
 const MAX_DIAGNOSTIC_LOG_ATTRIBUTE_COUNT = 32;
 const MAX_DIAGNOSTIC_LOG_ATTRIBUTE_VALUE_CHARS = 2 * 1024;
@@ -90,9 +109,6 @@ const MAX_DIAGNOSTIC_LOG_NAME_CHARS = 120;
 const MAX_FILE_LOG_MESSAGE_CHARS = 4 * 1024;
 const MAX_FILE_LOG_CONTEXT_VALUE_CHARS = 512;
 const DIAGNOSTIC_LOG_ATTRIBUTE_KEY_RE = /^[A-Za-z0-9_.:-]{1,64}$/u;
-const defaultHostnameResolver: HostnameResolver = () => os.hostname();
-let hostnameResolver: HostnameResolver = defaultHostnameResolver;
-let cachedHostname: string | null = null;
 
 type DiagnosticLogAttributes = Record<string, string | number | boolean>;
 
@@ -293,14 +309,14 @@ function buildFileLogMessage(numericArgs: readonly unknown[]): string | undefine
 }
 
 function resolveLogHostname(): string {
-  if (cachedHostname) {
-    return cachedHostname;
+  if (loggerHostnameState.cached) {
+    return loggerHostnameState.cached;
   }
-  const hostname = hostnameResolver().trim();
+  const hostname = loggerHostnameState.resolver().trim();
   if (!hostname) {
     return "unknown";
   }
-  cachedHostname = hostname;
+  loggerHostnameState.cached = hostname;
   return hostname;
 }
 
@@ -483,6 +499,9 @@ function redactLogRecordForTransport<T extends LogObj>(record: T): T {
 
 function attachDiagnosticEventTransport(logger: TsLogger<LogObj>): void {
   logger.attachTransport((logObj: LogObj) => {
+    if (!areDiagnosticsEnabledForProcess() || !hasInternalDiagnosticEventInterest("log.record")) {
+      return;
+    }
     try {
       const record = buildDiagnosticLogRecord(redactLogRecordForTransport(logObj) as TsLogRecord);
       const emit = record.trustedTraceContext
@@ -555,18 +574,6 @@ setLoggerFileTargetResolver(() => {
   return { file, rolling };
 });
 
-function settingsChanged(a: ResolvedRuntimeSettings | null, b: ResolvedRuntimeSettings) {
-  if (!a) {
-    return true;
-  }
-  return (
-    a.level !== b.level ||
-    a.file !== b.file ||
-    a.maxFileBytes !== b.maxFileBytes ||
-    a.rolling !== b.rolling
-  );
-}
-
 export function isFileLogLevelEnabled(level: LogLevel): boolean {
   const settings =
     (loggingState.cachedSettings as ResolvedRuntimeSettings | null) ?? resolveSettings();
@@ -607,9 +614,6 @@ function buildLogger(settings: ResolvedRuntimeSettings): TsLogger<LogObj> {
   if (rollingFile) {
     pruneOldRollingLogs(path.dirname(activeFile));
   }
-  let currentFileBytes = getCurrentLogFileBytes(activeFile);
-  let warnedAboutRotationFailure = false;
-
   logger.attachTransport((logObj: LogObj) => {
     try {
       const nextActiveFile = resolveActiveLogFileWithMode(settings.file, rollingFile);
@@ -619,7 +623,6 @@ function buildLogger(settings: ResolvedRuntimeSettings): TsLogger<LogObj> {
         if (rollingFile) {
           pruneOldRollingLogs(path.dirname(activeFile));
         }
-        currentFileBytes = getCurrentLogFileBytes(activeFile);
       }
       const time = formatTimestamp(logObj.date ?? new Date(), { style: "long" });
       const traceFields = buildTraceFileLogFields(logObj as TsLogRecord);
@@ -635,22 +638,12 @@ function buildLogger(settings: ResolvedRuntimeSettings): TsLogger<LogObj> {
         ...traceFields,
       };
       const line = redactSensitiveText(JSON.stringify(redactLogRecordForTransport(record)));
-      const payload = `${line}\n`;
-      const payloadBytes = Buffer.byteLength(payload, "utf8");
-      const nextBytes = currentFileBytes + payloadBytes;
-      if (currentFileBytes > 0 && nextBytes > settings.maxFileBytes) {
-        if (rotateLogFile(activeFile)) {
-          currentFileBytes = getCurrentLogFileBytes(activeFile);
-          warnedAboutRotationFailure = false;
-        } else if (!warnedAboutRotationFailure) {
-          warnedAboutRotationFailure = true;
-          const message = `[openclaw] log file rotation failed; continuing writes file=${activeFile} maxFileBytes=${settings.maxFileBytes}`;
-          process.stderr.write(`${formatConsoleDiagnosticLine({ level: "warn", message })}\n`);
-        }
-      }
-      if (appendLogLine(activeFile, payload)) {
-        currentFileBytes += payloadBytes;
-      }
+      fileLogTransport.enqueue({
+        file: activeFile,
+        hostname: expectDefined(structuredFields.hostname, "structured log hostname"),
+        maxFileBytes: settings.maxFileBytes,
+        payload: `${line}\n`,
+      });
     } catch {
       // never block on logging failures
     }
@@ -667,31 +660,16 @@ function resolveMaxLogFileBytes(raw: unknown): number {
   return DEFAULT_MAX_LOG_FILE_BYTES;
 }
 
-function getCurrentLogFileBytes(file: string): number {
-  try {
-    return fs.statSync(file).size;
-  } catch {
-    return 0;
-  }
-}
-
-function appendLogLine(file: string, line: string): boolean {
-  try {
-    appendRegularFileSync({ filePath: file, content: line });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export function getLogger(): TsLogger<LogObj> {
-  const settings = resolveSettings();
   const cachedLogger = loggingState.cachedLogger as TsLogger<LogObj> | null;
   const cachedSettings = loggingState.cachedSettings as ResolvedRuntimeSettings | null;
-  if (!cachedLogger || settingsChanged(cachedSettings, settings)) {
-    loggingState.cachedLogger = buildLogger(settings);
-    loggingState.cachedSettings = settings;
+  if (cachedLogger && cachedSettings) {
+    return cachedLogger;
   }
+  const settings = cachedSettings ?? resolveSettings();
+  const logger = buildLogger(settings);
+  loggingState.cachedLogger = logger;
+  loggingState.cachedSettings = settings;
   return loggingState.cachedLogger as TsLogger<LogObj>;
 }
 
@@ -770,36 +748,25 @@ export function getResolvedLoggerSettings(): LoggerResolvedSettings {
   return settings;
 }
 
+/** Flushes queued file logs before a graceful owner exits the process. */
+export async function flushLogger(): Promise<void> {
+  await fileLogTransport.flush();
+}
+
 // Test helpers
 export function setLoggerOverride(settings: LoggerSettings | null) {
   loggingState.overrideSettings = settings;
-  loggingState.cachedLogger = null;
-  loggingState.cachedSettings = null;
-  loggingState.cachedConsoleSettings = null;
+  invalidateLoggerSettings();
 }
 
 export function resetLogger() {
-  loggingState.cachedLogger = null;
-  loggingState.cachedSettings = null;
-  loggingState.cachedConsoleSettings = null;
+  loggingState.appliedConfig = APPLIED_LOGGING_CONFIG_UNOWNED;
   loggingState.overrideSettings = null;
+  invalidateLoggingConfigCache();
   loadLoggerConfig = loadLoggerConfigDefault;
-  hostnameResolver = defaultHostnameResolver;
-  cachedHostname = null;
-}
-
-export const testApi = {
-  resolveActiveLogFile,
-  setHostnameResolverForTests: (resolver?: HostnameResolver) => {
-    hostnameResolver = resolver ?? defaultHostnameResolver;
-    cachedHostname = null;
-  },
-  shouldSkipMutatingLoggingConfigRead,
-};
-export { testApi as __test__ };
-
-function resolveActiveLogFile(file: string): string {
-  return resolveActiveLogFileWithMode(file, isLegacyRollingLogFilePath(file));
+  loggerHostnameState.resolver = defaultLoggerHostnameResolver;
+  loggerHostnameState.cached = null;
+  invalidateLoggerSettings();
 }
 
 function resolveActiveLogFileWithMode(file: string, rolling: boolean): string {
@@ -833,29 +800,4 @@ function pruneOldRollingLogs(dir: string): void {
   }
 }
 
-function rotatedLogPath(file: string, index: number): string {
-  const ext = path.extname(file);
-  const base = file.slice(0, file.length - ext.length);
-  return `${base}.${index}${ext}`;
-}
-
-function rotateLogFile(file: string): boolean {
-  try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.rmSync(rotatedLogPath(file, MAX_ROTATED_LOG_FILES), { force: true });
-    for (let index = MAX_ROTATED_LOG_FILES - 1; index >= 1; index -= 1) {
-      const from = rotatedLogPath(file, index);
-      if (!fs.existsSync(from)) {
-        continue;
-      }
-      fs.renameSync(from, rotatedLogPath(file, index + 1));
-    }
-    if (fs.existsSync(file)) {
-      fs.renameSync(file, rotatedLogPath(file, 1));
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

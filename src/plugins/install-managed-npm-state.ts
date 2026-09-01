@@ -35,7 +35,7 @@ const MANAGED_NPM_PROJECT_REBUILD_ARTIFACTS = [
   "npm-shrinkwrap.json",
 ] as const;
 
-export function isNpmAliasOverrideComparatorError(result: {
+export function isNpmAliasOverrideCompatibilityError(result: {
   stdout: string;
   stderr: string;
 }): boolean {

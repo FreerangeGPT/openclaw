@@ -1,16 +1,20 @@
 // @vitest-environment node
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../../../test/helpers/promise.js";
+import type { GatewayBrowserClient } from "../../api/gateway.ts";
+import type { SessionsListResult } from "../../api/types.ts";
+import { createSessionCapability } from "../../lib/sessions/index.ts";
+import { waitForFast } from "../../test-helpers/wait-for.ts";
+import { prunePersistedAssistantStreamSegments } from "./stream-segment-pruning.ts";
+import type { FallbackStatus } from "./tool-stream-contract.ts";
+import { handleSessionOperationEvent } from "./tool-stream-status.ts";
 import {
   agentEvent,
   createHost,
   TOOL_STREAM_TEST_NOW,
   useToolStreamFakeTimers,
 } from "./tool-stream.test-helpers.ts";
-import {
-  handleAgentEvent,
-  handleSessionOperationEvent,
-  type FallbackStatus,
-} from "./tool-stream.ts";
+import { handleAgentEvent } from "./tool-stream.ts";
 
 function expectCompactionCompleteAndAutoClears(host: ReturnType<typeof createHost>) {
   expect(host.compactionStatus).toEqual({
@@ -41,16 +45,21 @@ function requireFallbackStatus(host: ReturnType<typeof createHost>): FallbackSta
 }
 
 describe("app-tool-stream fallback lifecycle handling", () => {
-  beforeEach(() => {
-    vi.useRealTimers();
-  });
+  const globalWithWindow = globalThis as typeof globalThis & {
+    window?: Window & typeof globalThis;
+  };
+  let installedTestWindow = false;
 
   beforeAll(() => {
-    const globalWithWindow = globalThis as typeof globalThis & {
-      window?: Window & typeof globalThis;
-    };
     if (!globalWithWindow.window) {
       globalWithWindow.window = globalThis as unknown as Window & typeof globalThis;
+      installedTestWindow = true;
+    }
+  });
+
+  afterAll(() => {
+    if (installedTestWindow) {
+      Reflect.deleteProperty(globalWithWindow, "window");
     }
   });
 
@@ -114,7 +123,8 @@ describe("app-tool-stream fallback lifecycle handling", () => {
 
   it("auto-clears fallback status after toast duration", () => {
     useToolStreamFakeTimers();
-    const host = createHost();
+    const requestUpdate = vi.fn();
+    const host = createHost({ requestUpdate });
 
     handleAgentEvent(host, {
       runId: "run-1",
@@ -140,8 +150,10 @@ describe("app-tool-stream fallback lifecycle handling", () => {
     expect(fallbackStatus.phase).toBe("active");
     expect(fallbackStatus.selected).toBe("fireworks/accounts/fireworks/routers/kimi-k2p5-turbo");
     expect(fallbackStatus.active).toBe("deepinfra/moonshotai/Kimi-K2.5");
+    expect(requestUpdate).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1);
     expect(host.fallbackStatus).toBeNull();
+    expect(requestUpdate).toHaveBeenCalledOnce();
     vi.useRealTimers();
   });
 
@@ -172,66 +184,130 @@ describe("app-tool-stream fallback lifecycle handling", () => {
     vi.useRealTimers();
   });
 
-  it("updates the chat model cache from session_status model changes", () => {
-    const host = createHost();
-
-    handleAgentEvent(host, {
-      runId: "run-1",
-      seq: 1,
-      stream: "tool",
-      ts: Date.now(),
-      sessionKey: "main",
-      data: {
-        phase: "result",
-        name: "session_status",
-        toolCallId: "status-1",
-        result: {
-          details: {
-            ok: true,
-            sessionKey: "main",
-            changedModel: true,
-            modelProvider: "anthropic",
-            model: "claude-sonnet-4-6",
-            modelOverride: "anthropic/claude-sonnet-4-6",
-          },
+  it.each([
+    ["main", "agent:main:main", "main", null],
+    ["agent:work:thread", "agent:work:thread", "work", "openai/gpt-5-mini"],
+    ["global", "global", "work", null],
+    ["agent:work:main", "global", "work", null],
+  ])(
+    "refreshes canonical selection after status changes for %s",
+    async (key, target, agentId, override) => {
+      const row = {
+        key,
+        kind: "direct" as const,
+        updatedAt: 1,
+        modelProvider: "openai",
+        model: "gpt-5.6-sol",
+        modelOverrideSource: null,
+      };
+      const result: SessionsListResult = {
+        ts: 1,
+        path: "(multiple)",
+        count: 1,
+        defaults: { modelProvider: null, model: null, contextTokens: null },
+        sessions: [row],
+      };
+      const pendingPatch = createDeferred<unknown>();
+      const request = vi.fn(async (method: string) =>
+        method === "sessions.patch" ? pendingPatch.promise : result,
+      );
+      const sessions = createSessionCapability({
+        snapshot: {
+          client: { request } as unknown as GatewayBrowserClient,
+          phase: "connected",
+          hello: null,
+          assistantAgentId: agentId,
+          sessionKey: key,
         },
-      },
-    });
+        subscribe: () => () => undefined,
+        subscribeEvents: () => () => undefined,
+      });
+      const host = createHost({
+        sessionKey: key,
+        assistantAgentId: agentId,
+        agentsList: { defaultId: "main", scope: target === "global" ? "global" : "per-sender" },
+        sessions,
+      });
+      const event = {
+        ...agentEvent(
+          "run-1",
+          1,
+          "tool",
+          {
+            phase: "result",
+            name: "session_status",
+            toolCallId: "status-1",
+            result: {
+              details: { changedModel: true, sessionKey: target, agentId, modelOverride: override },
+            },
+          },
+          key,
+        ),
+        agentId,
+      };
+      handleAgentEvent(host, event);
+      await waitForFast(() =>
+        expect(sessions.state.result?.sessions[0]?.model).toBe("gpt-5.6-sol"),
+      );
+      expect(request).toHaveBeenCalledWith("sessions.list", expect.objectContaining({ agentId }));
+      expect(sessions.state.modelOverrides).toEqual({});
 
-    expect(host.sessions.state.modelOverrides.main).toBe("anthropic/claude-sonnet-4-6");
+      // Replaying an old tool result reads today's row, without replacing a newer UI intent.
+      result.sessions = [{ ...row, model: "gpt-5-mini" }];
+      const patch = sessions.patch(key, { model: "openai/gpt-5.6-luna" });
+      handleAgentEvent(
+        createHost({
+          sessionKey: key,
+          assistantAgentId: agentId,
+          agentsList: { defaultId: "main", scope: target === "global" ? "global" : "per-sender" },
+          sessions,
+        }),
+        event,
+      );
+      await waitForFast(() =>
+        expect(request.mock.calls.filter(([method]) => method === "sessions.list")).toHaveLength(2),
+      );
+      await waitForFast(() => expect(sessions.state.loading).toBe(false));
+      expect(sessions.state.result?.sessions[0]?.model).toBe("gpt-5-mini");
+      expect(sessions.state.modelOverrides[key]).toBe("openai/gpt-5.6-luna");
+      pendingPatch.resolve({ ok: true, key, entry: {} });
+      await patch;
+      expect(sessions.state.modelOverrides).toEqual({});
+      sessions.dispose();
+    },
+  );
+
+  it.each([
+    { changedModel: true, sessionKey: "global" },
+    { changedModel: false, sessionKey: "global", agentId: "work" },
+    { changedModel: true, sessionKey: "agent:work:other", agentId: "work" },
+    { changedModel: true, sessionKey: "global", agentId: "main" },
+  ])("does not refresh an unrelated/read-only status result (%j)", (details) => {
+    const host = createHost({
+      sessionKey: "global",
+      assistantAgentId: "work",
+      agentsList: { defaultId: "main" },
+    });
+    handleAgentEvent(host, {
+      ...agentEvent(
+        "run-1",
+        1,
+        "tool",
+        {
+          phase: "result",
+          name: "session_status",
+          toolCallId: "status-1",
+          result: { details },
+        },
+        "global",
+      ),
+      agentId: "work",
+    });
+    expect(host.sessions.refreshReplacement).not.toHaveBeenCalled();
+    expect(host.sessions.state.modelOverrides).toEqual({});
   });
 
-  it("clears the chat model cache from session_status default resets", () => {
-    const host = createHost();
-    host.sessions.setModelOverride("main", "anthropic/claude-sonnet-4-6");
-
-    handleAgentEvent(host, {
-      runId: "run-1",
-      seq: 1,
-      stream: "tool",
-      ts: Date.now(),
-      sessionKey: "main",
-      data: {
-        phase: "result",
-        name: "session_status",
-        toolCallId: "status-1",
-        result: {
-          details: {
-            ok: true,
-            sessionKey: "main",
-            changedModel: true,
-            modelProvider: "openai",
-            model: "gpt-5.4",
-            modelOverride: null,
-          },
-        },
-      },
-    });
-
-    expect(host.sessions.state.modelOverrides.main).toBeNull();
-  });
-
-  it("tags stream segments with the tool they precede", () => {
+  it("tags stream segments with the tool they precede without resetting elapsed time", () => {
     useToolStreamFakeTimers();
     const host = createHost({
       chatRunId: "run-1",
@@ -255,7 +331,7 @@ describe("app-tool-stream fallback lifecycle handling", () => {
     expect(host.chatStreamSegments).toEqual([
       {
         text: "visible text before tool",
-        ts: TOOL_STREAM_TEST_NOW,
+        ts: TOOL_STREAM_TEST_NOW - 10,
         runId: "run-1",
         toolCallId: "call_1",
       },
@@ -303,6 +379,128 @@ describe("app-tool-stream fallback lifecycle handling", () => {
     ]);
     expect(host.chatStream).toBeNull();
     vi.useRealTimers();
+  });
+
+  it.each(["run-1", "run-2", undefined])(
+    "replaces only the commentary owned by persisted run %s",
+    (runId) => {
+      const state = createHost({
+        chatStreamSegments: [
+          { itemId: "shared-item", runId: "run-1", text: "First run", ts: 1 },
+          { itemId: "shared-item", runId: "run-2", text: "Second run", ts: 2 },
+        ],
+      });
+      const originalSegments = [...state.chatStreamSegments];
+      const persisted = {
+        role: "assistant",
+        content: "Completed progress",
+        __openclaw: { id: "persisted-commentary", seq: 3, ...(runId ? { runId } : {}) },
+        openclawStreamFallback: { itemId: "shared-item", source: "segment" },
+      };
+      prunePersistedAssistantStreamSegments(state, persisted);
+      expect(state.chatStreamSegments).toEqual(
+        runId ? originalSegments.filter((segment) => segment.runId !== runId) : [],
+      );
+      if (runId) {
+        state.chatMessages = [persisted];
+        handleAgentEvent(
+          state,
+          agentEvent(runId, 4, "item", {
+            kind: "preamble",
+            itemId: "shared-item",
+            progressText: "Completed progress",
+          }),
+        );
+        expect(state.chatStreamSegments).toEqual(
+          originalSegments.filter((segment) => segment.runId !== runId),
+        );
+      }
+    },
+  );
+
+  it.each([
+    { progressText: "Another run's commentary", name: "replace" },
+    { progressText: "", name: "clear" },
+  ])("does not let another run $name the active preamble", ({ progressText }) => {
+    useToolStreamFakeTimers();
+    const host = createHost({ chatRunId: "run-1" });
+
+    handleAgentEvent(host, {
+      runId: "run-1",
+      seq: 1,
+      stream: "item",
+      ts: Date.now(),
+      sessionKey: "main",
+      data: {
+        kind: "preamble",
+        itemId: "msg-preamble-1",
+        progressText: "The active run's commentary",
+      },
+    });
+    handleAgentEvent(host, {
+      runId: "run-2",
+      seq: 2,
+      stream: "item",
+      ts: Date.now(),
+      sessionKey: "main",
+      data: { kind: "preamble", itemId: "msg-preamble-1", progressText },
+    });
+
+    expect(host.chatStreamSegments).toEqual([
+      {
+        text: "The active run's commentary",
+        ts: TOOL_STREAM_TEST_NOW,
+        runId: "run-1",
+        itemId: "msg-preamble-1",
+      },
+    ]);
+  });
+
+  it("does not insert another run's preamble into the active transcript", () => {
+    useToolStreamFakeTimers();
+    const host = createHost({ chatRunId: "run-1" });
+
+    handleAgentEvent(host, {
+      runId: "run-2",
+      seq: 1,
+      stream: "item",
+      ts: Date.now(),
+      sessionKey: "main",
+      data: {
+        kind: "preamble",
+        itemId: "msg-preamble-2",
+        progressText: "Another run's commentary",
+      },
+    });
+
+    expect(host.chatStreamSegments).toEqual([]);
+  });
+
+  it("accepts a session-scoped preamble while no run is active", () => {
+    useToolStreamFakeTimers();
+    const host = createHost();
+
+    handleAgentEvent(host, {
+      runId: "run-1",
+      seq: 1,
+      stream: "item",
+      ts: Date.now(),
+      sessionKey: "main",
+      data: {
+        kind: "preamble",
+        itemId: "msg-preamble-1",
+        progressText: "An already active session's commentary",
+      },
+    });
+
+    expect(host.chatStreamSegments).toEqual([
+      {
+        text: "An already active session's commentary",
+        ts: TOOL_STREAM_TEST_NOW,
+        runId: "run-1",
+        itemId: "msg-preamble-1",
+      },
+    ]);
   });
 
   it("clears keyed preamble item progress on empty updates", () => {
@@ -626,7 +824,7 @@ describe("app-tool-stream fallback lifecycle handling", () => {
     useToolStreamFakeTimers();
     const host = createHost({
       sessionKey: "agent:work:main",
-      agentsList: { defaultId: "main" },
+      agentsList: { defaultId: "main", scope: "global" },
     });
 
     handleAgentEvent(host, {

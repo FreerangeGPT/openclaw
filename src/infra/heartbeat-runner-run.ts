@@ -4,16 +4,16 @@ import {
   readMainSessionCacheKeeperMismatch,
   type MainSessionCacheKeeperMismatchReason,
 } from "../agents/embedded-agent-runner/prompt-cache-evidence.js";
+import { DEFAULT_HEARTBEAT_ACK_MAX_CHARS } from "../auto-reply/heartbeat.js";
 import { resolveResponsePrefixTemplate } from "../auto-reply/reply/response-prefix-template.js";
+import { resolveSourceReplyDeliveryMode } from "../auto-reply/reply/source-reply-delivery-mode.js";
 import { HEARTBEAT_TOKEN } from "../auto-reply/tokens.js";
-import { sendDurableMessageBatch } from "../channels/message/runtime.js";
-import { markCommitmentsAttempted } from "../commitments/store.js";
+import { sendDurableMessageBatchCore } from "../channels/message/runtime.js";
 import { formatErrorMessage } from "./errors.js";
 import { emitHeartbeatEvent, resolveIndicatorType } from "./heartbeat-events.js";
 import {
   isHeartbeatTypingEnabled,
   heartbeatLog,
-  resolveHeartbeatAckMaxChars,
   resolveHeartbeatChannelPlugin,
   resolveHeartbeatTypingIntervalSeconds,
 } from "./heartbeat-runner-config.js";
@@ -28,7 +28,11 @@ import {
   type HeartbeatRunOptions,
 } from "./heartbeat-runner-execution.js";
 import { createHeartbeatTypingCallbacks } from "./heartbeat-typing.js";
-import { HEARTBEAT_SKIP_REQUESTS_IN_FLIGHT, type HeartbeatRunResult } from "./heartbeat-wake.js";
+import {
+  HEARTBEAT_SKIP_PREEMPTED,
+  HEARTBEAT_SKIP_REQUESTS_IN_FLIGHT,
+  type HeartbeatRunResult,
+} from "./heartbeat-wake.js";
 import { resolveAgentOutboundIdentity } from "./outbound/identity.js";
 import { buildOutboundSessionContext } from "./outbound/session-context.js";
 
@@ -84,10 +88,9 @@ export async function runHeartbeatOnce(opts: HeartbeatRunOptions): Promise<Heart
       durationMs: Date.now() - wake.startedAt,
     });
   }
-  const { cfg, agentId, heartbeat, startedAt } = wake;
+  const { cfg, agentId, startedAt } = wake;
   const { delivery, visibility, replyPrefix, runSessionKey } = prepared;
   const { outboundPolicySessionKey, hasRelayableExecCompletion } = prepared;
-  const { hasDueCommitments, dueCommitmentIds } = prepared;
 
   if (!visibility.showAlerts && !visibility.showOk && !visibility.useIndicator) {
     emitHeartbeatEvent({
@@ -99,8 +102,6 @@ export async function runHeartbeatOnce(opts: HeartbeatRunOptions): Promise<Heart
     });
     return { status: "skipped", reason: "alerts-disabled" };
   }
-  await markCommitmentsAttempted({ cfg, ids: dueCommitmentIds, nowMs: startedAt });
-
   const resolveHeartbeatResponsePrefix = () =>
     resolveResponsePrefixTemplate(
       replyPrefix.responsePrefix,
@@ -118,7 +119,7 @@ export async function runHeartbeatOnce(opts: HeartbeatRunOptions): Promise<Heart
   });
   const outboundIdentity = resolveAgentOutboundIdentity(cfg, agentId);
   const canAttemptHeartbeatOk = Boolean(
-    !hasDueCommitments && visibility.showOk && delivery.channel !== "none" && delivery.to,
+    visibility.showOk && delivery.channel !== "none" && delivery.to,
   );
   const hasChatDelivery = Boolean(
     delivery.channel !== "none" && delivery.to && (visibility.showAlerts || visibility.showOk),
@@ -165,7 +166,7 @@ export async function runHeartbeatOnce(opts: HeartbeatRunOptions): Promise<Heart
           return false;
         }
       }
-      const send = await sendDurableMessageBatch({
+      const send = await sendDurableMessageBatchCore({
         cfg,
         channel: delivery.channel,
         to: delivery.to,
@@ -179,7 +180,7 @@ export async function runHeartbeatOnce(opts: HeartbeatRunOptions): Promise<Heart
       if (send.status === "failed" || send.status === "partial_failed") {
         throw send.error;
       }
-      return true;
+      return send.status === "sent";
     } catch (err) {
       log.warn(`heartbeat: HEARTBEAT_OK delivery failed: ${formatErrorMessage(err)}`);
       return false;
@@ -189,19 +190,26 @@ export async function runHeartbeatOnce(opts: HeartbeatRunOptions): Promise<Heart
   try {
     await heartbeatTyping?.onReplyStart();
     const agentRun = await invokeHeartbeatAgentRun(opts, wake, prepared);
-    if (agentRun.kind === "busy") {
-      emitHeartbeatEvent({
-        status: "skipped",
-        reason: HEARTBEAT_SKIP_REQUESTS_IN_FLIGHT,
-        durationMs: Date.now() - startedAt,
-      });
-      return { status: "skipped", reason: HEARTBEAT_SKIP_REQUESTS_IN_FLIGHT };
+    if (agentRun.kind !== "completed") {
+      const reason =
+        agentRun.kind === "busy"
+          ? HEARTBEAT_SKIP_REQUESTS_IN_FLIGHT
+          : agentRun.kind === "preempted"
+            ? HEARTBEAT_SKIP_PREEMPTED
+            : "agent-runner-cancelled";
+      emitHeartbeatEvent({ status: "skipped", reason, durationMs: Date.now() - startedAt });
+      return { status: "skipped", reason };
     }
     const outcome = classifyHeartbeatAgentOutcome({
       agentRun,
       hasRelayableExecCompletion,
+      suppressUnmarkedSourceReplies:
+        resolveSourceReplyDeliveryMode({
+          cfg,
+          ctx: { ChatType: delivery.chatType, Provider: delivery.channel },
+        }) === "message_tool_only",
       responsePrefix: resolveHeartbeatResponsePrefix(),
-      ackMaxChars: resolveHeartbeatAckMaxChars(cfg, heartbeat),
+      ackMaxChars: DEFAULT_HEARTBEAT_ACK_MAX_CHARS,
     });
     return await finalizeHeartbeatOutcome({
       opts,
@@ -213,9 +221,7 @@ export async function runHeartbeatOnce(opts: HeartbeatRunOptions): Promise<Heart
       outboundIdentity,
     });
   } catch (err) {
-    const cacheEvidenceId = (
-      prepared.cacheKeeperReplyOptions as { heartbeatPromptCacheEvidenceId?: string }
-    ).heartbeatPromptCacheEvidenceId;
+    const cacheEvidenceId = prepared.cacheKeeperReplyOptions.heartbeatPromptCacheEvidenceId;
     if (cacheEvidenceId && isMainSessionCacheKeeperIdentityMismatchError(err)) {
       invalidateLivePromptCacheEvidence(cacheEvidenceId);
       const mismatch = readMainSessionCacheKeeperMismatch(err);

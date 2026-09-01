@@ -1,14 +1,15 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
-import { expectDefined } from "@openclaw/normalization-core";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { findVerifiedGatewayListenerPidsOnPortSync } from "../infra/gateway-processes.js";
-import { inspectPortUsage } from "../infra/ports.js";
+import { inspectPortUsage } from "../infra/ports-inspect.js";
 import {
   getWindowsCmdExePath,
   getWindowsPowerShellExePath,
 } from "../infra/windows-install-roots.js";
+import { spawnWithFallback } from "../process/spawn-utils.js";
 import { sleep } from "../utils.js";
+import { resolveGatewayServiceProbeHosts } from "./gateway-service-probe-hosts.js";
 import { formatLine } from "./output.js";
 import { parseKeyValueOutput } from "./runtime-parse.js";
 import { execSchtasks } from "./schtasks-exec.js";
@@ -30,7 +31,10 @@ import {
   shouldManageGatewayListenerPort,
   terminateGatewayProcessTree,
 } from "./schtasks-process.js";
-import type { GatewayServiceRuntime } from "./service-runtime.js";
+import {
+  createServiceRuntimeInspectionFailure,
+  type GatewayServiceRuntime,
+} from "./service-runtime.js";
 import type {
   GatewayServiceCommandConfig,
   GatewayServiceEnv,
@@ -132,11 +136,25 @@ export async function removeStartupEntries(
     try {
       await fs.unlink(startupEntryPath);
       stdout.write(`${formatLine("Removed Windows login item", startupEntryPath)}\n`);
-    } catch {}
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        throw createStartupEntryRemovalError(error);
+      }
+    }
   }
 }
 
-export async function hasScheduledTaskRunningEvidence(env: GatewayServiceEnv): Promise<boolean> {
+function createStartupEntryRemovalError(error: unknown): Error {
+  const code = (error as NodeJS.ErrnoException).code;
+  // Native filesystem errors include the private Startup-folder path in their messages.
+  return new Error(
+    `Windows login item removal failed${code ? ` (${code})` : ""}. Check permissions and retry.`,
+    { cause: code ? { code } : undefined },
+  );
+}
+
+async function hasScheduledTaskRunningEvidence(env: GatewayServiceEnv): Promise<boolean> {
   const runtime = await readScheduledTaskRuntime(env).catch(() => null);
   if (runtime?.status !== "running") {
     return false;
@@ -181,21 +199,56 @@ export async function launchFallbackTaskScript(
   const command =
     installedCommand === undefined ? await readScheduledTaskCommand(env) : installedCommand;
   if (command?.programArguments.length) {
-    const [executable, ...args] = command.programArguments;
-    const child = spawn(expectDefined(executable, "schtasks executable"), args, {
-      cwd: command.workingDirectory || undefined,
-      detached: true,
-      env: { ...process.env, ...command.environment },
-      stdio: "ignore",
-      windowsHide: true,
+    const { child } = await spawnWithFallback({
+      argv: command.programArguments,
+      options: {
+        cwd: command.workingDirectory || undefined,
+        detached: true,
+        env: { ...process.env, ...command.environment },
+        stdio: "ignore",
+        windowsHide: true,
+      },
     });
     child.unref();
     return;
   }
-  const child = spawn(getWindowsCmdExePath(), ["/d", "/c", scriptPath], {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true,
+  // Preserve native missing-script errors before testing the actual cmd.exe access contract.
+  await (await fs.open(scriptPath, "r")).close();
+  const scriptEnv = { ...process.env, OPENCLAW_TASK_SCRIPT: scriptPath };
+  // libuv uses backup semantics, so privileged Node opens can bypass the DACL that cmd enforces.
+  const scriptProbe = spawnSync(
+    getWindowsPowerShellExePath(),
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-EncodedCommand",
+      Buffer.from(
+        "$ErrorActionPreference='Stop'; [System.IO.File]::OpenRead($env:OPENCLAW_TASK_SCRIPT).Dispose()",
+        "utf16le",
+      ).toString("base64"),
+    ],
+    {
+      env: scriptEnv,
+      stdio: "ignore",
+      windowsHide: true,
+    },
+  );
+  if (scriptProbe.error) {
+    throw scriptProbe.error;
+  }
+  if (scriptProbe.status !== 0) {
+    throw Object.assign(new Error("Windows login item script is not readable"), { code: "EACCES" });
+  }
+  const { child } = await spawnWithFallback({
+    // Node's verbatim /s shell contract preserves inner quotes; percent expansion is nonrecursive.
+    argv: [getWindowsCmdExePath(), "/d", "/s", "/v:off", "/c", '""%OPENCLAW_TASK_SCRIPT%""'],
+    options: {
+      detached: true,
+      env: scriptEnv,
+      stdio: "ignore",
+      windowsHide: true,
+      windowsVerbatimArguments: true,
+    },
   });
   child.unref();
 }
@@ -270,17 +323,9 @@ export async function resolveFallbackRuntime(
         detail: `Startup-folder login item installed; could not verify the installed process for gateway port ${port}.`,
       };
     }
-  } else {
-    const verifiedPids = findVerifiedGatewayListenerPidsOnPortSync(port);
-    if (verifiedPids.length > 0) {
-      return {
-        status: "running",
-        pid: verifiedPids[0],
-        detail: `Startup-folder login item installed; verified gateway listener detected on port ${port}.`,
-      };
-    }
   }
-  const diagnostics = await inspectPortUsage(port).catch(() => null);
+  const probeHosts = await resolveGatewayServiceProbeHosts({ env, command });
+  const diagnostics = await inspectPortUsage(port, { probeHosts }).catch(() => null);
   if (!diagnostics) {
     return {
       status: "unknown",
@@ -299,7 +344,12 @@ export async function resolveFallbackRuntime(
     };
   }
   const matchedGatewayPids = resolveGatewayListenerPids(diagnostics.listeners);
-  if (matchedGatewayPids.length > 0) {
+  const scopedListenerPids = new Set(diagnostics.listeners.map((listener) => listener.pid));
+  const verifiedGatewayPids = findVerifiedGatewayListenerPidsOnPortSync(port).filter((pid) =>
+    scopedListenerPids.has(pid),
+  );
+  const ownedGatewayPids = matchedGatewayPids.length > 0 ? matchedGatewayPids : verifiedGatewayPids;
+  if (ownedGatewayPids.length > 0) {
     return requireCommandOwnership
       ? {
           status: "unknown",
@@ -307,7 +357,7 @@ export async function resolveFallbackRuntime(
         }
       : {
           status: "running",
-          pid: matchedGatewayPids[0],
+          pid: ownedGatewayPids[0],
           detail: `Startup-folder login item installed; verified gateway listener detected on port ${port}.`,
         };
   }
@@ -317,12 +367,17 @@ export async function resolveFallbackRuntime(
   };
 }
 
-export function probeScheduledTaskExists(taskName: string): boolean | null {
+type ScheduledTaskStateProbe =
+  | { status: "found"; state: number | null }
+  | { status: "missing" }
+  | { status: "unknown" };
+
+function probeScheduledTaskState(taskName: string): ScheduledTaskStateProbe {
   const encodedTaskName = Buffer.from(taskName, "utf8").toString("base64");
   const script = [
     "$ErrorActionPreference='Stop'",
     `$taskName=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedTaskName}'))`,
-    "try { $service=New-Object -ComObject 'Schedule.Service'; $service.Connect(); $null=$service.GetFolder('\\').GetTask($taskName); exit 0 } catch { $exception=$_.Exception; while($null -ne $exception.InnerException){$exception=$exception.InnerException}; [Console]::Out.Write($exception.HResult); exit 1 }",
+    "try { $service=New-Object -ComObject 'Schedule.Service'; $service.Connect(); $task=$service.GetFolder('\\').GetTask($taskName); [Console]::Out.Write([int]$task.State); exit 0 } catch { $exception=$_.Exception; while($null -ne $exception.InnerException){$exception=$exception.InnerException}; [Console]::Out.Write($exception.HResult); exit 1 }",
   ].join("; ");
   const probe = spawnSync(
     getWindowsPowerShellExePath(),
@@ -335,14 +390,35 @@ export function probeScheduledTaskExists(taskName: string): boolean | null {
     { encoding: "utf8", timeout: 5_000, windowsHide: true },
   );
   if (probe.error) {
-    return null;
+    return { status: "unknown" };
   }
   if (probe.status === 0) {
-    return true;
+    const rawState = probe.stdout.trim();
+    const state = /^\d+$/.test(rawState) ? Number.parseInt(rawState, 10) : null;
+    return {
+      status: "found",
+      state,
+    };
   }
   const hresult = Number.parseInt(probe.stdout.trim(), 10);
   // Only the locale-independent missing task/folder HRESULT values prove absence.
-  return hresult === -2147024894 || hresult === -2147024893 ? false : null;
+  return hresult === -2147024894 || hresult === -2147024893
+    ? { status: "missing" }
+    : { status: "unknown" };
+}
+
+export function probeScheduledTaskExists(taskName: string): boolean | null {
+  const probe = probeScheduledTaskState(taskName);
+  return probe.status === "found" ? true : probe.status === "missing" ? false : null;
+}
+
+export function isScheduledTaskDefinitelyNotRunning(taskName: string): boolean {
+  const probe = probeScheduledTaskState(taskName);
+  if (probe.status !== "found") {
+    return false;
+  }
+  // TASK_STATE_DISABLED and TASK_STATE_READY both prove no instance is queued or running.
+  return probe.state === 1 || probe.state === 3;
 }
 
 export async function readWindowsStartupFallbackRuntimeForUpdate(
@@ -465,7 +541,7 @@ export async function readScheduledTaskRuntime(
     if (await isStartupEntryInstalled(env)) {
       return resolveFallbackRuntime(env);
     }
-    return { status: "unknown", detail: String(err) };
+    return createServiceRuntimeInspectionFailure(err);
   }
   const taskName = resolveTaskName(env);
   const res = await execSchtasks(["/Query", "/TN", taskName, "/V", "/FO", "LIST"]);
@@ -474,12 +550,10 @@ export async function readScheduledTaskRuntime(
       return resolveFallbackRuntime(env);
     }
     const detail = (res.stderr || res.stdout).trim();
-    const missing = normalizeLowercaseStringOrEmpty(detail).includes("cannot find the file");
-    return {
-      status: missing ? "stopped" : "unknown",
-      detail: detail || undefined,
-      missingUnit: missing,
-    };
+    const missing = probeScheduledTaskExists(taskName) === false;
+    return missing
+      ? { status: "stopped", missingUnit: true }
+      : { ...createServiceRuntimeInspectionFailure(detail), missingUnit: false };
   }
   const parsed = parseSchtasksQuery(res.stdout || "");
   const derived = deriveScheduledTaskRuntimeStatus(parsed);

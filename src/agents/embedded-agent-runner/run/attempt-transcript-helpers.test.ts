@@ -68,7 +68,7 @@ describe("cache keeper heartbeat acknowledgement discard", () => {
           trigger: "heartbeat",
           promptCacheKeeperEvidenceId: "evidence-1",
           userTurnTranscriptRecorder: {
-            getPersistedMessageId: () => "heartbeat-user",
+            getAdmissionReceipt: () => ({ entryId: "heartbeat-user" }),
           } as never,
         },
         cacheRefreshConfirmed: true,
@@ -105,7 +105,7 @@ describe("cache keeper heartbeat acknowledgement discard", () => {
           trigger: "heartbeat",
           promptCacheKeeperEvidenceId: "evidence-1",
           userTurnTranscriptRecorder: {
-            getPersistedMessageId: () => "heartbeat-user",
+            getAdmissionReceipt: () => ({ entryId: "heartbeat-user" }),
           } as never,
         },
         cacheRefreshConfirmed: true,
@@ -128,7 +128,7 @@ describe("cache keeper heartbeat acknowledgement discard", () => {
           trigger: "heartbeat",
           promptCacheKeeperEvidenceId: "evidence-1",
           userTurnTranscriptRecorder: {
-            getPersistedMessageId: () => "heartbeat-user",
+            getAdmissionReceipt: () => ({ entryId: "heartbeat-user" }),
           } as never,
         },
         cacheRefreshConfirmed: false,
@@ -152,7 +152,7 @@ describe("cache keeper heartbeat acknowledgement discard", () => {
           trigger: "heartbeat",
           promptCacheKeeperEvidenceId: "evidence-1",
           userTurnTranscriptRecorder: {
-            getPersistedMessageId: () => "heartbeat-user",
+            getAdmissionReceipt: () => ({ entryId: "heartbeat-user" }),
           } as never,
         },
         cacheRefreshConfirmed: true,
@@ -210,7 +210,9 @@ describe("cache keeper transcript rollback", () => {
         activeSession: activeSession as never,
         attempt: {
           promptCacheKeeperEvidenceId: "evidence-1",
-          userTurnTranscriptRecorder: { getPersistedMessageId: () => "keeper-user" } as never,
+          userTurnTranscriptRecorder: {
+            getAdmissionReceipt: () => ({ entryId: "keeper-user" }),
+          } as never,
         },
         promptError: new MainSessionCacheKeeperIdentityMismatchError(),
         sessionManager: sessionManager as never,
@@ -228,7 +230,9 @@ describe("cache keeper transcript rollback", () => {
         activeSession: { agent: { state: { messages: [] } } } as never,
         attempt: {
           promptCacheKeeperEvidenceId: "evidence-1",
-          userTurnTranscriptRecorder: { getPersistedMessageId: () => "keeper-user" } as never,
+          userTurnTranscriptRecorder: {
+            getAdmissionReceipt: () => ({ entryId: "keeper-user" }),
+          } as never,
         },
         promptError: new MainSessionCacheKeeperIdentityMismatchError(),
         sessionManager: { removeTrailingEntries } as never,

@@ -1,13 +1,21 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { MainSessionCacheKeeperIdentityMismatchError } from "../prompt-cache-evidence.js";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useAutoCleanupTempDirTracker } from "../../../../test/helpers/temp-dir.js";
 import {
-  beginPromptCacheObservation,
-  completePromptCacheObservation,
-} from "../prompt-cache-observability.js";
-import { clearProviderPromptState, getProviderPromptState } from "../provider-prompt-state.js";
+  appendTranscriptMessage,
+  readActiveTranscriptEntryAnchor,
+  upsertSessionEntryCore,
+} from "../../../config/sessions/session-accessor.js";
+import { createNestedToolActivity } from "../../../sessions/nested-tool-activity.js";
+import { createUserTurnTranscriptRecorder } from "../../../sessions/user-turn-transcript.js";
+import { closeOpenClawAgentDatabasesForTest } from "../../../state/openclaw-agent-db.js";
+import { FULL_BOOTSTRAP_COMPLETED_CUSTOM_TYPE } from "../../bootstrap-files.js";
+import { SessionManager } from "../../sessions/session-manager.js";
 
 const hoisted = vi.hoisted(() => ({
   runAgentEndSideEffects: vi.fn(),
+  shouldWaitForCompletionRequiredAsyncTasks: vi.fn((): boolean => false),
+  waitForCompletionRequiredAsyncTasks: vi.fn(),
 }));
 
 vi.mock("../../harness/agent-end-side-effects.js", () => ({
@@ -16,13 +24,25 @@ vi.mock("../../harness/agent-end-side-effects.js", () => ({
 vi.mock("./agent-end-context.js", () => ({
   buildEmbeddedAgentEndContext: () => ({}),
 }));
+vi.mock("./attempt-async-tasks.js", () => ({
+  shouldWaitForCompletionRequiredAsyncTasks: hoisted.shouldWaitForCompletionRequiredAsyncTasks,
+  waitForCompletionRequiredAsyncTasks: hoisted.waitForCompletionRequiredAsyncTasks,
+}));
 
-import { completeEmbeddedAttemptAfterTurn } from "./attempt-after-turn.js";
+import { completeEmbeddedAttemptAfterTurn } from "./attempt-finalize.js";
 import { settleEmbeddedAttemptStream } from "./attempt-stream-settle.js";
+
+const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
 describe("embedded attempt phase lifecycle state", () => {
   beforeEach(() => {
     hoisted.runAgentEndSideEffects.mockReset();
+    hoisted.shouldWaitForCompletionRequiredAsyncTasks.mockReset().mockReturnValue(false);
+    hoisted.waitForCompletionRequiredAsyncTasks.mockReset();
+  });
+
+  afterEach(() => {
+    closeOpenClawAgentDatabasesForTest();
   });
 
   it("re-reads compaction timeout state after the retry wait", async () => {
@@ -45,6 +65,7 @@ describe("embedded attempt phase lifecycle state", () => {
     };
 
     const result = await settleEmbeddedAttemptStream({
+      sessionAgentId: "main",
       attempt: {
         runId: "run-1",
         sessionId: "session-1",
@@ -55,10 +76,7 @@ describe("embedded attempt phase lifecycle state", () => {
       } as never,
       activeSession: activeSession as never,
       sessionManager: sessionManager as never,
-      sessionLockController: {
-        waitForSessionEvents: async () => {},
-      } as never,
-      withOwnedSessionWriteLock: async (operation) => await operation(),
+      withOwnedTranscriptWrite: async (operation) => await operation(),
       subscription: {
         toolMetas: [],
         waitForCompactionRetry: async () => {
@@ -88,10 +106,9 @@ describe("embedded attempt phase lifecycle state", () => {
       runAbortDeadlineAtMs: Date.now() + 60_000,
       runAbortSignal: new AbortController().signal,
       isProbeSession: true,
-      sessionAgentId: "main",
       abortable: async (promise) => await promise,
       prePromptMessageCount: 0,
-      toolSearchTargetTranscriptProjections: [],
+      nestedToolActivities: [],
       cache: {
         observabilityEnabled: false,
         changesForTurn: null,
@@ -104,259 +121,19 @@ describe("embedded attempt phase lifecycle state", () => {
     expect(removeTrailingEntries).toHaveBeenCalledOnce();
   });
 
-  it("does not repeat a cache-keeper rollback completed during session preparation", async () => {
-    const promptError = new MainSessionCacheKeeperIdentityMismatchError();
-    const activeMessages = [{ role: "user", content: "stale keeper" }] as never[];
-    const rebuiltMessages = [{ role: "assistant", content: "authoritative branch" }] as never[];
-    const removeTrailingEntries = vi.fn(() => 0);
-    const sessionManager = {
-      appendCustomEntry: vi.fn(),
-      buildSessionContext: () => ({ messages: rebuiltMessages }),
-      getEntries: () => [],
-      removeTrailingEntries,
-    };
-    const activeSession = {
-      agent: { state: { messages: activeMessages } },
-      isCompacting: false,
-      isStreaming: false,
-      messages: activeMessages,
-      sessionId: "session-1",
-    };
-
-    const result = await settleEmbeddedAttemptStream({
-      attempt: {
-        runId: "run-keeper-rollback",
-        sessionId: "session-1",
-        sessionFile: "/tmp/session.jsonl",
-        provider: "anthropic",
-        modelId: "claude-opus-4-8",
-        model: { api: "anthropic-messages" },
-        promptCacheKeeperEvidenceId: "evidence-1",
-        promptCacheKeeperTurnRollbackCompleted: true,
-        userTurnTranscriptRecorder: { getPersistedMessageId: () => "keeper-user" },
-      } as never,
-      activeSession: activeSession as never,
-      sessionManager: sessionManager as never,
-      sessionLockController: { waitForSessionEvents: async () => {} } as never,
-      withOwnedSessionWriteLock: async (operation) => await operation(),
-      subscription: {
-        toolMetas: [],
-        waitForCompactionRetry: async () => undefined,
-        isCompactionInFlight: () => false,
-        getCompactionCount: () => 0,
-        getCurrentAttemptAssistant: () => undefined,
-        getUsageTotals: () => undefined,
-        getLastAssistantUsage: () => undefined,
-      } as never,
-      state: {
-        promptError,
-        promptErrorSource: "prompt",
-        yieldAborted: false,
-        sessionIdUsed: "session-1",
-      },
-      readLifecycleState: () => ({
-        aborted: false,
-        timedOut: false,
-        timedOutDuringCompaction: false,
-      }),
-      markTimedOutDuringCompaction: () => {},
-      runAbortDeadlineAtMs: Date.now() + 60_000,
-      runAbortSignal: new AbortController().signal,
-      isProbeSession: true,
-      sessionAgentId: "main",
-      abortable: async (promise) => await promise,
-      prePromptMessageCount: 0,
-      toolSearchTargetTranscriptProjections: [],
-      cache: {
-        observabilityEnabled: false,
-        changesForTurn: null,
-        retention: "long",
-      },
-      shouldFlushForContextEngine: false,
+  it("settles a user-aborted run whose async-task wait throws AbortError", async () => {
+    const abortError = Object.assign(new Error("This operation was aborted"), {
+      name: "AbortError",
     });
-
-    expect(removeTrailingEntries).not.toHaveBeenCalled();
-    expect(activeSession.agent.state.messages).toEqual(rebuiltMessages);
-    expect(activeSession.messages).toEqual(rebuiltMessages);
-    expect(result.promptError).toBe(promptError);
-    expect(result.promptError).toMatchObject({ replaySafe: true });
-  });
-
-  it("compares cache reads from individual provider calls instead of tool-loop totals", async () => {
-    const sessionId = "session-per-call-cache-usage";
-    const observation = {
-      sessionId,
-      sessionKey: "agent:main:per-call-cache-usage",
-      provider: "anthropic",
-      modelId: "claude-opus-4-8",
-      modelApi: "anthropic-messages",
-      cacheRetention: "long" as const,
-      streamStrategy: "boundary-aware:anthropic-messages",
-      systemPrompt: "stable system",
-      tools: [{ name: "read" }],
-    };
-    beginPromptCacheObservation(observation);
-    completePromptCacheObservation({
-      sessionId,
-      sessionKey: observation.sessionKey,
-      usage: { cacheRead: 51_352 },
-    });
-    beginPromptCacheObservation(observation);
-
-    const lastCallUsage = {
-      input: 1_000,
-      output: 10,
-      cacheRead: 51_352,
-      cacheWrite: 31_498,
-      total: 83_860,
-    };
-    const aggregateUsage = {
-      input: 3_000,
-      output: 30,
-      cacheRead: 77_751,
-      cacheWrite: 60_000,
-      total: 140_781,
-    };
-    const assistant = {
-      role: "assistant",
-      content: [{ type: "text", text: "done" }],
-      api: "anthropic-messages",
-      provider: "anthropic",
-      model: "claude-opus-4-8",
-      usage: lastCallUsage,
-      stopReason: "stop",
-      timestamp: Date.now(),
-    };
-    const zeroUsageAssistant = {
-      ...assistant,
-      content: [{ type: "text", text: "terminal abort" }],
-      usage: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        total: 0,
-      },
-      stopReason: "error",
-      errorMessage: "terminal call failed before reporting usage",
-    };
-    const messages = [assistant, zeroUsageAssistant];
+    hoisted.shouldWaitForCompletionRequiredAsyncTasks.mockReturnValue(true);
+    hoisted.waitForCompletionRequiredAsyncTasks
+      .mockRejectedValueOnce(abortError)
+      .mockResolvedValueOnce({ timedOutRunIds: ["exec-run-1"] });
+    const messages: never[] = [];
     const sessionManager = {
       appendCustomEntry: vi.fn(),
       buildSessionContext: () => ({ messages }),
       getEntries: () => [],
-      getLeafId: () => "assistant-1",
-      removeTrailingEntries: vi.fn(() => 0),
-    };
-    const result = await settleEmbeddedAttemptStream({
-      attempt: {
-        config: {},
-        runId: "run-per-call-cache-usage",
-        sessionId,
-        sessionKey: observation.sessionKey,
-        sessionFile: "/tmp/session.jsonl",
-        provider: "anthropic",
-        modelId: "claude-opus-4-8",
-        model: { api: "anthropic-messages" },
-      } as never,
-      activeSession: {
-        agent: { state: { messages } },
-        isCompacting: false,
-        isStreaming: false,
-        messages,
-        sessionId,
-      } as never,
-      sessionManager: sessionManager as never,
-      sessionLockController: { waitForSessionEvents: async () => {} } as never,
-      withOwnedSessionWriteLock: async (operation) => await operation(),
-      subscription: {
-        toolMetas: [],
-        waitForCompactionRetry: async () => undefined,
-        isCompactionInFlight: () => false,
-        getCompactionCount: () => 0,
-        getCurrentAttemptAssistant: () => zeroUsageAssistant,
-        getUsageTotals: () => aggregateUsage,
-        getLastAssistantUsage: () => zeroUsageAssistant.usage,
-      } as never,
-      state: {
-        promptError: null,
-        promptErrorSource: null,
-        yieldAborted: false,
-        sessionIdUsed: sessionId,
-      },
-      readLifecycleState: () => ({
-        aborted: false,
-        timedOut: false,
-        timedOutDuringCompaction: false,
-      }),
-      markTimedOutDuringCompaction: () => {},
-      runAbortDeadlineAtMs: Date.now() + 60_000,
-      runAbortSignal: new AbortController().signal,
-      isProbeSession: true,
-      sessionAgentId: "main",
-      abortable: async (promise) => await promise,
-      prePromptMessageCount: 0,
-      toolSearchTargetTranscriptProjections: [],
-      cache: {
-        observabilityEnabled: true,
-        changesForTurn: null,
-        retention: "long",
-      },
-      shouldFlushForContextEngine: false,
-    });
-
-    expect(result.attemptUsage?.cacheRead).toBe(77_751);
-    expect(result.cacheBreak).toBeNull();
-    expect(result.promptCache?.lastCallUsage?.cacheRead).toBe(51_352);
-    expect(result.promptCache?.observation?.cacheRead).toBe(51_352);
-  });
-
-  it("records the effective cache retention after a cache-bearing main-session turn", async () => {
-    const runId = "run-cache-evidence";
-    const providerCallStartedAt = 1_699_999_955_000;
-    getProviderPromptState(runId).lastAttempt = {
-      scopeDigest: "scope",
-      digest: "payload",
-      byteWeight: 1,
-      cachePrefixIdentity: "provider-cache-prefix-identity-main",
-      cacheRequestOptionsIdentity: "request-options-identity-main",
-      cacheTree: {
-        version: 1,
-        tools: { blockCount: 0, identity: "tools" },
-        system: { blockCount: 0, identity: "system" },
-        messages: { blockCount: 0, messageCount: 0, identity: "messages" },
-        breakpoints: [],
-      },
-      providerMessageIdentity: "provider-message-identity-main",
-      providerCallSequence: 1,
-      providerCallStartedAt,
-    };
-    const usage = {
-      input: 1_000,
-      output: 100,
-      cacheRead: 0,
-      cacheWrite: 90_000,
-      cacheWrite1h: 90_000,
-      contextUsage: { state: "available" as const, promptTokens: 91_000, totalTokens: 91_100 },
-      total: 91_100,
-    };
-    const assistant = {
-      role: "assistant",
-      content: [{ type: "text", text: "done" }],
-      api: "anthropic-messages",
-      provider: "anthropic",
-      model: "claude-opus-4-8",
-      usage,
-      stopReason: "stop",
-      timestamp: 1_700_000_000_000,
-    };
-    const messages = [assistant];
-    const appendCustomEntry = vi.fn();
-    const sessionManager = {
-      appendCustomEntry,
-      buildSessionContext: () => ({ messages }),
-      getEntries: () => [],
-      getLeafId: () => "assistant-1",
       removeTrailingEntries: vi.fn(() => 0),
     };
     const activeSession = {
@@ -368,29 +145,116 @@ describe("embedded attempt phase lifecycle state", () => {
     };
 
     const result = await settleEmbeddedAttemptStream({
+      sessionAgentId: "main",
       attempt: {
-        config: {},
-        runId,
+        runId: "run-1",
         sessionId: "session-1",
         sessionKey: "agent:main:main",
         sessionFile: "/tmp/session.jsonl",
-        provider: "anthropic",
-        modelId: "claude-opus-4-8",
-        model: { api: "anthropic-messages" },
-        resolvedApiKey: "sk-ant-test",
+        provider: "test",
+        modelId: "model",
+        model: { api: "openai-responses" },
       } as never,
       activeSession: activeSession as never,
       sessionManager: sessionManager as never,
-      sessionLockController: { waitForSessionEvents: async () => {} } as never,
-      withOwnedSessionWriteLock: async (operation) => await operation(),
+      withOwnedTranscriptWrite: async (operation) => await operation(),
       subscription: {
-        toolMetas: [],
-        waitForCompactionRetry: async () => undefined,
+        toolMetas: [{ toolName: "exec", asyncStarted: true }],
+        waitForCompactionRetry: async () => {},
         isCompactionInFlight: () => false,
         getCompactionCount: () => 0,
-        getCurrentAttemptAssistant: () => assistant,
-        getUsageTotals: () => usage,
-        getLastAssistantUsage: () => usage,
+        getCurrentAttemptAssistant: () => undefined,
+        getUsageTotals: () => undefined,
+        getLastAssistantUsage: () => undefined,
+      } as never,
+      state: {
+        promptError: null,
+        promptErrorSource: null,
+        yieldAborted: false,
+        sessionIdUsed: "session-1",
+      },
+      readLifecycleState: () => ({
+        aborted: true,
+        timedOut: false,
+        timedOutDuringCompaction: false,
+      }),
+      markTimedOutDuringCompaction: () => {},
+      runAbortDeadlineAtMs: Date.now() + 60_000,
+      runAbortSignal: AbortSignal.abort(),
+      isProbeSession: true,
+      abortable: async (promise) => await promise,
+      prePromptMessageCount: 0,
+      nestedToolActivities: [],
+      cache: {
+        observabilityEnabled: false,
+        changesForTurn: null,
+        retention: undefined,
+      },
+      shouldFlushForContextEngine: false,
+    });
+
+    // The aborted run settles instead of unwinding the lane task, and its
+    // unfinished async tasks are not reclassified as a timeout failure.
+    expect(result.promptError).toBeNull();
+    expect(hoisted.waitForCompletionRequiredAsyncTasks).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps projected nested tool evidence from owning the model terminal (#118274)", async () => {
+    const modelAssistant = {
+      role: "assistant",
+      stopReason: "toolUse",
+      content: [{ type: "toolCall", id: "outer-exec", name: "exec", arguments: {} }],
+    };
+    const messages = [
+      { role: "user", content: "Read a missing file." },
+      modelAssistant,
+      {
+        role: "toolResult",
+        toolCallId: "outer-exec",
+        toolName: "exec",
+        isError: true,
+        content: [{ type: "text", text: "ENOENT" }],
+      },
+    ];
+    const activeSession = {
+      agent: { state: { messages } },
+      isCompacting: false,
+      isStreaming: false,
+      messages,
+      sessionId: "session-1",
+    };
+    const sessionManager = {
+      appendCustomEntry: vi.fn(),
+      buildSessionContext: () => ({ messages }),
+      getEntries: () => [],
+      removeTrailingEntries: vi.fn(() => 0),
+    };
+
+    const result = await settleEmbeddedAttemptStream({
+      sessionAgentId: "main",
+      attempt: {
+        runId: "run-1",
+        sessionId: "session-1",
+        sessionKey: "agent:main:main",
+        sessionFile: "/tmp/session.jsonl",
+        provider: "mock-openai",
+        modelId: "gpt-5.6-luna",
+        model: { api: "openai-responses" },
+      } as never,
+      activeSession: activeSession as never,
+      sessionManager: sessionManager as never,
+      withOwnedTranscriptWrite: async (operation) => await operation(),
+      subscription: {
+        toolMetas: [
+          { toolName: "read", isError: true },
+          { toolName: "exec", isError: true },
+        ],
+        waitForCompactionRetry: async () => {},
+        isCompactionInFlight: () => false,
+        getCompactionCount: () => 0,
+        getCurrentAttemptAssistant: () => structuredClone(modelAssistant),
+        getUsageTotals: () => undefined,
+        getLastAssistantUsage: () => undefined,
       } as never,
       state: {
         promptError: null,
@@ -406,45 +270,239 @@ describe("embedded attempt phase lifecycle state", () => {
       markTimedOutDuringCompaction: () => {},
       runAbortDeadlineAtMs: Date.now() + 60_000,
       runAbortSignal: new AbortController().signal,
-      isProbeSession: false,
-      sessionAgentId: "main",
+      isProbeSession: true,
       abortable: async (promise) => await promise,
-      prePromptMessageCount: 0,
-      toolSearchTargetTranscriptProjections: [],
+      prePromptMessageCount: 1,
+      nestedToolActivities: [
+        createNestedToolActivity({
+          runId: "run-test",
+          scopeId: "scope-test",
+          afterEntryId: null,
+          startOrder: 0,
+          parentToolCallId: "outer-exec",
+          toolCallId: "tool_search_code:outer-exec:read:1",
+          toolName: "read",
+          input: { path: "missing.txt" },
+          result: {
+            content: [{ type: "text", text: "ENOENT" }],
+            details: { status: "error", error: "ENOENT" },
+          },
+          isError: true,
+          startedAt: 1,
+          timestamp: 2,
+        }),
+      ],
       cache: {
         observabilityEnabled: false,
         changesForTurn: null,
-        identity: "prompt-identity-main",
-        retention: "long",
+        retention: undefined,
       },
       shouldFlushForContextEngine: false,
     });
 
-    expect(appendCustomEntry).toHaveBeenCalledWith(
-      "openclaw.prompt-cache",
-      expect.objectContaining({
-        timestamp: providerCallStartedAt,
-        provider: "anthropic",
-        modelId: "claude-opus-4-8",
-        cacheRetention: "long",
-        promptIdentity: "prompt-identity-main",
-        providerCachePrefixIdentity: "provider-cache-prefix-identity-main",
-        requestOptionsIdentity: "request-options-identity-main",
-        providerMessageIdentity: "provider-message-identity-main",
-        authFingerprint: expect.any(String),
-        cacheRead: 0,
-        cacheWrite: 90_000,
-        cacheWrite1h: 90_000,
-        promptTokens: 91_000,
-        confirmedCachedTokens: 90_000,
-        evidenceId: expect.any(String),
-      }),
-    );
-    expect(result.promptCache?.lastCacheTouchAt).toBe(providerCallStartedAt);
-    clearProviderPromptState(runId);
+    expect(result.lastAssistant).toBe(modelAssistant);
+    expect(result.currentAttemptAssistant).toBe(modelAssistant);
+    expect(result.currentAttemptCompletedAssistant).toEqual(modelAssistant);
+    expect(result.successfulNestedToolNames).toEqual([]);
+    expect(result.messagesSnapshot).toEqual(messages);
   });
 
-  it("re-reads abort state after post-turn session draining", async () => {
+  it.each(["complete", "missing admission", "missing terminal"] as const)(
+    "handles %s candidate anchors without skipping later lifecycle work",
+    async (boundary) => {
+      const dir = tempDirs.make("openclaw-attempt-terminal-anchor-");
+      const target = {
+        agentId: "main",
+        sessionId: "session-1",
+        sessionKey: "agent:main:main",
+        storePath: path.join(dir, "sessions.json"),
+      };
+      await upsertSessionEntryCore(target, { sessionId: target.sessionId, updatedAt: 1 });
+      const userMessage = { role: "user" as const, content: "hello", timestamp: 1 };
+      const persistedUser = await appendTranscriptMessage(target, {
+        cwd: dir,
+        eventId: "user-1",
+        message: userMessage,
+        now: 1,
+      });
+      if (!persistedUser?.anchor) {
+        throw new Error("expected persisted user anchor");
+      }
+      const recorder = createUserTurnTranscriptRecorder({
+        message: userMessage,
+        target: async () => undefined,
+      });
+      if (boundary !== "missing admission") {
+        recorder.markRuntimePersisted(userMessage, persistedUser.anchor);
+      }
+      const sessionManager =
+        boundary === "missing terminal"
+          ? SessionManager.inMemory(dir)
+          : SessionManager.open(target, dir);
+      const terminalEntryId = sessionManager.appendMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "done" }],
+        api: "openai-responses",
+        provider: "openai",
+        model: "test-model",
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 2,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "stop",
+        timestamp: 2,
+      });
+      const expectedTerminalAnchor = readActiveTranscriptEntryAnchor({
+        agentId: persistedUser.anchor.agentId,
+        sessionId: persistedUser.anchor.sessionId,
+        sessionKey: persistedUser.anchor.sessionKey,
+        storePath: persistedUser.anchor.storePath,
+        entryId: terminalEntryId,
+      });
+      if (boundary === "complete" && !expectedTerminalAnchor) {
+        throw new Error("expected persisted terminal anchor");
+      }
+      const afterTurn = vi.fn(async () => {});
+      const maintain = vi.fn(async () => ({
+        changed: false,
+        bytesFreed: 0,
+        rewrittenEntries: 0,
+      }));
+      const onContextEngineTurnCandidate = vi.fn();
+      await completeEmbeddedAttemptAfterTurn({
+        attempt: {
+          runId: "run-1",
+          sessionId: target.sessionId,
+          sessionKey: target.sessionKey,
+          sessionTarget: target,
+          sessionFile: target.sessionKey,
+          provider: "test",
+          modelId: "model",
+          model: { api: "openai-responses" },
+          userTurnTranscriptRecorder: recorder,
+          onContextEngineTurnCandidate,
+        } as never,
+        activeContextEngine: {
+          info: { id: "test", name: "Test" },
+          assemble: vi.fn(),
+          compact: vi.fn(),
+          ingest: vi.fn(),
+          afterTurn,
+          maintain,
+        } as never,
+        activeSession: {} as never,
+        sessionManager,
+        withOwnedTranscriptWrite: async (operation) => await operation(),
+        state: {
+          promptError: null,
+          yieldAborted: false,
+          sessionIdUsed: target.sessionId,
+          messagesSnapshot: [{ role: "assistant", content: "done" }] as never,
+          prePromptMessageCount: 0,
+          contextEngineAfterTurnCheckpoint: null,
+          compactionOccurredThisAttempt: false,
+        },
+        readLifecycleState: () => ({
+          aborted: false,
+          timedOut: false,
+          idleTimedOut: false,
+          timedOutDuringCompaction: false,
+        }),
+        runtime: {
+          effectiveWorkspace: "/tmp/workspace",
+          agentDir: "/tmp/agent",
+          sessionAgentId: "main",
+          resolveActiveContextEnginePluginId: () => "test",
+          shouldRecordCompletedBootstrapTurn: true,
+          cacheTrace: null,
+          anthropicPayloadLogger: null,
+          hookAgentId: "main",
+          diagnosticTrace: { traceId: "trace-1", spanId: "span-1" } as never,
+          skillWorkshopAvailable: false,
+          hookRunner: null,
+          promptStartedAt: Date.now(),
+        },
+      });
+
+      if (boundary === "complete") {
+        expect(onContextEngineTurnCandidate).toHaveBeenCalledWith(
+          expect.objectContaining({
+            boundary: {
+              admission: recorder.getAdmissionReceipt(),
+              terminal: expectedTerminalAnchor,
+            },
+          }),
+        );
+      } else {
+        expect(onContextEngineTurnCandidate).not.toHaveBeenCalled();
+      }
+      expect(sessionManager.getEntries()).toContainEqual(
+        expect.objectContaining({
+          type: "custom",
+          customType: FULL_BOOTSTRAP_COMPLETED_CUSTOM_TYPE,
+        }),
+      );
+      expect(hoisted.runAgentEndSideEffects).toHaveBeenCalledOnce();
+      expect(afterTurn).not.toHaveBeenCalled();
+      expect(maintain).not.toHaveBeenCalled();
+    },
+  );
+
+  it("emits an abort-classified agent_end event when a teardown error races the abort", async () => {
+    const abortError = Object.assign(new Error("This operation was aborted"), {
+      name: "AbortError",
+    });
+    await completeEmbeddedAttemptAfterTurn({
+      attempt: {
+        runId: "run-1",
+        sessionId: "session-1",
+        sessionFile: "/tmp/session.jsonl",
+      } as never,
+      activeSession: {} as never,
+      sessionManager: { appendCustomEntry: vi.fn() } as never,
+      withOwnedTranscriptWrite: async (operation) => await operation(),
+      state: {
+        promptError: abortError,
+        yieldAborted: false,
+        sessionIdUsed: "session-1",
+        messagesSnapshot: [],
+        prePromptMessageCount: 0,
+        contextEngineAfterTurnCheckpoint: null,
+        compactionOccurredThisAttempt: false,
+      },
+      readLifecycleState: () => ({
+        aborted: true,
+        timedOut: false,
+        idleTimedOut: false,
+        timedOutDuringCompaction: false,
+      }),
+      runtime: {
+        effectiveWorkspace: "/tmp/workspace",
+        agentDir: "/tmp/agent",
+        sessionAgentId: "main",
+        resolveActiveContextEnginePluginId: () => undefined,
+        shouldRecordCompletedBootstrapTurn: false,
+        cacheTrace: null,
+        anthropicPayloadLogger: null,
+        hookAgentId: "main",
+        diagnosticTrace: { traceId: "trace-1", spanId: "span-1" } as never,
+        skillWorkshopAvailable: true,
+        hookRunner: null,
+        promptStartedAt: Date.now(),
+      },
+    });
+
+    expect(hoisted.runAgentEndSideEffects).toHaveBeenCalledTimes(1);
+    const event = hoisted.runAgentEndSideEffects.mock.calls[0]?.[0]?.event;
+    expect(event).toMatchObject({ success: false });
+    expect(event?.error).toBeUndefined();
+  });
+
+  it("re-reads abort state inside the post-turn session write", async () => {
     let aborted = false;
     await completeEmbeddedAttemptAfterTurn({
       attempt: {
@@ -454,12 +512,10 @@ describe("embedded attempt phase lifecycle state", () => {
       } as never,
       activeSession: {} as never,
       sessionManager: { appendCustomEntry: vi.fn() } as never,
-      sessionLockController: {
-        waitForSessionEvents: async () => {
-          aborted = true;
-        },
-      } as never,
-      withOwnedSessionWriteLock: async (operation) => await operation(),
+      withOwnedTranscriptWrite: async (operation) => {
+        aborted = true;
+        return await operation();
+      },
       state: {
         promptError: null,
         yieldAborted: false,
@@ -508,8 +564,53 @@ describe("embedded attempt phase lifecycle state", () => {
       } as never,
       activeSession: {} as never,
       sessionManager: { appendCustomEntry: vi.fn() } as never,
-      sessionLockController: { waitForSessionEvents: async () => undefined } as never,
-      withOwnedSessionWriteLock: async (operation) => await operation(),
+      withOwnedTranscriptWrite: async (operation) => await operation(),
+      state: {
+        promptError: null,
+        yieldAborted: false,
+        sessionIdUsed: "session-1",
+        messagesSnapshot: [],
+        prePromptMessageCount: 0,
+        contextEngineAfterTurnCheckpoint: null,
+        compactionOccurredThisAttempt: false,
+      },
+      readLifecycleState: () => ({
+        aborted: false,
+        timedOut: false,
+        idleTimedOut: false,
+        timedOutDuringCompaction: false,
+      }),
+      runtime: {
+        effectiveWorkspace: "/tmp/workspace",
+        agentDir: "/tmp/agent",
+        sessionAgentId: "main",
+        resolveActiveContextEnginePluginId: () => undefined,
+        shouldRecordCompletedBootstrapTurn: false,
+        cacheTrace: null,
+        anthropicPayloadLogger: null,
+        hookAgentId: "main",
+        diagnosticTrace: { traceId: "trace-1", spanId: "span-1" } as never,
+        skillWorkshopAvailable: false,
+        hookRunner: null,
+        promptStartedAt: Date.now(),
+      },
+    });
+
+    expect(hoisted.runAgentEndSideEffects).not.toHaveBeenCalled();
+  });
+
+  it("skips agent_end side effects for a detached run", async () => {
+    await completeEmbeddedAttemptAfterTurn({
+      attempt: {
+        sessionPersistence: "detached",
+        sessionKey: "agent:main:telegram:group:1",
+        runId: "run-1",
+        sessionId: "session-1",
+        sessionFile: "/tmp/session.jsonl",
+      } as never,
+      activeSession: {} as never,
+      sessionManager: { appendCustomEntry: vi.fn() } as never,
+      withOwnedTranscriptWrite: async (operation) => await operation(),
       state: {
         promptError: null,
         yieldAborted: false,

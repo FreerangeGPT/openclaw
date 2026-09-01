@@ -16,7 +16,7 @@ import {
 } from "./session-cost-usage-aggregation.js";
 import { isSessionCostUsageRefreshRunning } from "./session-cost-usage-cache.sqlite.js";
 import {
-  listUsageCountedTranscriptFiles,
+  listUsageCountedTranscriptStats,
   resolveUsageCostTranscriptFile,
   USAGE_COST_TRANSCRIPT_STAT_CONCURRENCY,
 } from "./session-cost-usage-collection.js";
@@ -72,7 +72,7 @@ export async function loadCostUsageSummary(params: {
   });
   const pricingFingerprint = resolveUsageCostPricingFingerprint(params.config, agentDir);
   const rollups = readUsageCostRollups(params.agentId, pricingFingerprint, databasePath);
-  const files = await listUsageCountedTranscriptFiles(params.agentId);
+  const files = await listUsageCountedTranscriptStats(params.agentId);
   return buildCostUsageSummaryFromRollups({
     rollups,
     files,
@@ -99,7 +99,7 @@ export async function loadCostUsageSummaryFromCache(params: {
   const databasePath = resolveUsageCostCacheDatabasePath(params.agentId);
   const pricingFingerprint = resolveUsageCostPricingFingerprint(params.config, agentDir);
   let rollups = readUsageCostRollups(params.agentId, pricingFingerprint, databasePath);
-  let files = await listUsageCountedTranscriptFiles(params.agentId);
+  let files = await listUsageCountedTranscriptStats(params.agentId);
   const staleFiles = getUsageCostStaleRollupFiles({ rollups, files });
   if (params.requestRefresh !== false && staleFiles.length > 0) {
     const cachedFiles = countUsableUsageCostRollups({ rollups, files });
@@ -111,7 +111,7 @@ export async function loadCostUsageSummaryFromCache(params: {
         startMs: params.startMs,
       });
       rollups = readUsageCostRollups(params.agentId, pricingFingerprint, databasePath);
-      files = await listUsageCountedTranscriptFiles(params.agentId);
+      files = await listUsageCountedTranscriptStats(params.agentId);
       if (result === "refreshed" && getUsageCostStaleRollupFiles({ rollups, files }).length > 0) {
         requestCostUsageCacheRefresh({ config: params.config, agentId: params.agentId });
       }
@@ -144,13 +144,15 @@ export async function loadSessionCostSummariesFromCache(params: {
   const agentDir = resolveUsageCostAgentDir(params.config, params.agentId);
   const databasePath = resolveUsageCostCacheDatabasePath(params.agentId);
   const pricingFingerprint = resolveUsageCostPricingFingerprint(params.config, agentDir);
-  const rollups = readUsageCostRollups(params.agentId, pricingFingerprint, databasePath);
   const fileTasks = params.sessions.map(
     (session) => async () => await resolveUsageCostTranscriptFile(session.sessionFile),
   );
   const { results: files } = await runTasksWithConcurrency({
     tasks: fileTasks,
     limit: USAGE_COST_TRANSCRIPT_STAT_CONCURRENCY,
+  });
+  const rollups = readUsageCostRollups(params.agentId, pricingFingerprint, databasePath, {
+    filePaths: files.flatMap((file) => (file ? [file.filePath] : [])),
   });
   const staleFiles = new Set<string>();
   let cachedFiles = 0;

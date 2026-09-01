@@ -1,10 +1,10 @@
-import { rewriteTranscriptEntriesInRuntimeTranscript } from "../agents/embedded-agent-runner/transcript-rewrite.js";
 import type { AgentMessage } from "../agents/runtime/index.js";
 import { getRuntimeConfig } from "../config/io.js";
-import { resolveStorePath } from "../config/sessions.js";
+import { resolveSessionStorePathCore } from "../config/sessions.js";
 import {
-  loadTranscriptEvents,
+  publishTranscriptUpdate,
   resolveSessionEntryAccessTarget,
+  withTranscriptWriteLock,
 } from "../config/sessions/session-accessor.js";
 import type { ItemParam } from "./open-responses.schema.js";
 
@@ -260,13 +260,12 @@ function findLatestToolResultEvent(
   transcriptEvents: readonly TranscriptMessageEvent[],
   params: { afterEventIndex: number; callId: string },
 ): TranscriptMessageEvent | undefined {
-  return transcriptEvents
-    .slice(params.afterEventIndex + 1)
-    .filter(
-      (candidate) =>
-        candidate.message.role === "toolResult" && candidate.message.toolCallId === params.callId,
-    )
-    .at(-1);
+  return transcriptEvents.findLast(
+    (candidate, index) =>
+      index > params.afterEventIndex &&
+      candidate.message.role === "toolResult" &&
+      candidate.message.toolCallId === params.callId,
+  );
 }
 
 /**
@@ -457,17 +456,55 @@ export async function settleRobotSpeechInterruption(params: {
       rewrittenEntries: 0,
     };
   }
-  const storePath = resolveStorePath(cfg.session?.store, { agentId: target.agentId });
+  const storePath = resolveSessionStorePathCore(cfg.session?.store, { agentId: target.agentId });
   const scope = {
     agentId: target.agentId,
     sessionId,
     sessionKey: target.storeKey,
     storePath,
   };
-  const events = await loadTranscriptEvents(scope);
-  let plan: RobotSpeechInterruptionRewritePlan;
   try {
-    plan = buildRobotSpeechInterruptionRewritePlan(events, params.settlement);
+    let lastRewrittenEntryId: string | undefined;
+    const rewrittenEntries = await withTranscriptWriteLock(scope, async (transcript) => {
+      const events = await transcript.readEvents();
+      const plan = buildRobotSpeechInterruptionRewritePlan(events, params.settlement);
+      const replacements = new Map(
+        plan.replacements.map((replacement) => [replacement.entryId, replacement.message]),
+      );
+      let rewritten = 0;
+      const nextEvents = events.map((event) => {
+        const transcriptEvent = asTranscriptMessageEvent(event);
+        const replacement = transcriptEvent ? replacements.get(transcriptEvent.id) : undefined;
+        if (!transcriptEvent || !replacement) {
+          return event;
+        }
+        rewritten += 1;
+        lastRewrittenEntryId = transcriptEvent.id;
+        return Object.assign({}, event as Record<string, unknown>, {
+          message: replacement,
+        });
+      });
+      if (rewritten !== replacements.size) {
+        throw new Error("robot speech transcript changed before settlement");
+      }
+      await transcript.replaceEvents(nextEvents);
+      return rewritten;
+    });
+    await publishTranscriptUpdate(scope, {
+      agentId: scope.agentId,
+      ...(lastRewrittenEntryId ? { messageId: lastRewrittenEntryId } : {}),
+      sessionKey: scope.sessionKey,
+      target: {
+        agentId: scope.agentId,
+        sessionId: scope.sessionId,
+        sessionKey: scope.sessionKey,
+      },
+    });
+    return {
+      changed: rewrittenEntries > 0,
+      heardChars: params.settlement.heard_text.length,
+      rewrittenEntries,
+    };
   } catch (error) {
     return {
       changed: false,
@@ -476,14 +513,4 @@ export async function settleRobotSpeechInterruption(params: {
       rewrittenEntries: 0,
     };
   }
-  const result = await rewriteTranscriptEntriesInRuntimeTranscript({
-    scope,
-    request: { replacements: plan.replacements },
-  });
-  return {
-    changed: result.changed,
-    heardChars: params.settlement.heard_text.length,
-    ...(result.reason ? { reason: result.reason } : {}),
-    rewrittenEntries: result.rewrittenEntries,
-  };
 }

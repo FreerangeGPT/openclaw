@@ -42,28 +42,41 @@ describe("preflightCronModelProvider", () => {
     resetCronModelProviderPreflightCacheForTest();
   });
 
-  it("skips network checks for cloud provider URLs", async () => {
-    const result = await preflightCronModelProvider({
-      cfg: {
-        models: {
-          providers: {
-            openai: {
-              api: "openai-responses",
-              baseUrl: "https://api.openai.com/v1",
-              models: [],
+  it.each(["https://api.openai.com/v1", "http://128.0.0.1:8000/v1"])(
+    "skips network checks for non-local provider URL %s",
+    async (baseUrl) => {
+      const result = await preflightCronModelProvider({
+        cfg: {
+          models: {
+            providers: {
+              openai: {
+                api: "openai-responses",
+                baseUrl,
+                models: [],
+              },
             },
           },
         },
-      },
-      provider: "openai",
-      model: "gpt-5.4",
-    });
+        provider: "openai",
+        model: "gpt-5.4",
+      });
 
-    expect(result).toEqual({ status: "available" });
-    expect(fetchWithSsrFGuardMock).not.toHaveBeenCalled();
-  });
+      expect(result).toEqual({ status: "available" });
+      expect(fetchWithSsrFGuardMock).not.toHaveBeenCalled();
+    },
+  );
 
-  it("treats any HTTP response from a local OpenAI-compatible endpoint as reachable", async () => {
+  it.each([
+    "127.0.0.1",
+    "127.0.0.2",
+    "127.255.255.254",
+    "10.0.0.1",
+    "172.16.0.1",
+    "192.168.0.222",
+    "[::1]",
+    "[::ffff:7f00:1]",
+    "[::ffff:127.0.0.1]",
+  ])("treats any HTTP response from local endpoint host %s as reachable", async (host) => {
     mockReachableResponse(401);
 
     const result = await preflightCronModelProvider({
@@ -72,7 +85,7 @@ describe("preflightCronModelProvider", () => {
           providers: {
             vllm: {
               api: "openai-completions",
-              baseUrl: "http://127.0.0.1:8000/v1",
+              baseUrl: `http://${host}:8000/v1`,
               models: [],
             },
           },
@@ -84,7 +97,7 @@ describe("preflightCronModelProvider", () => {
 
     expect(result).toEqual({ status: "available" });
     const request = requireFetchPreflightRequest();
-    expect(request.url).toBe("http://127.0.0.1:8000/v1/models");
+    expect(request.url).toBe(`http://${host}:8000/v1/models`);
     expect(request.timeoutMs).toBe(2500);
   });
 
@@ -267,7 +280,7 @@ describe("preflightCronModelProvider", () => {
     expect(first.retryAfterMs).toBe(300000);
     expect(first.reason).toContain("the local provider preflight failed");
     expect(first.reason).not.toContain("endpoint is not reachable");
-    expect(first.reason).toContain("Last error: Error: ECONNREFUSED");
+    expect(first.reason).toContain("Last error: ECONNREFUSED");
     expect(first.reason).not.toContain("timed out after");
     expect(second.status).toBe("unavailable");
     if (second.status !== "unavailable") {
@@ -312,7 +325,7 @@ describe("preflightCronModelProvider", () => {
     }
     expect(result.reason).toContain(
       "Last error: Local provider preflight exceeded its configured 2500ms deadline | " +
-        "TypeError: fetch failed | TimeoutError: request timed out",
+        "fetch failed | request timed out",
     );
     expect(result.reason).not.toContain("ECONNREFUSED");
   });
@@ -349,8 +362,7 @@ describe("preflightCronModelProvider", () => {
       throw new Error(`expected preflight unavailable, got ${result.status}`);
     }
     expect(result.reason).toContain(
-      "Last error: AbortError: request aborted (code=ABORT_ERR) | " +
-        "ConnectError: connect ECONNREFUSED (code=ECONNREFUSED)",
+      "Last error: request aborted | ABORT_ERR | connect ECONNREFUSED | ECONNREFUSED",
     );
     expect(result.reason).not.toContain("timed out after");
     expect(result.reason).not.toContain("endpoint is not reachable");
@@ -391,8 +403,9 @@ describe("preflightCronModelProvider", () => {
       throw new Error(`expected preflight unavailable, got ${result.status}`);
     }
     expect(result.reason.match(/failure-0/g)).toHaveLength(1);
-    expect(result.reason).toContain("NestedError7: failure-7 (code=ELOOP7)");
-    expect(result.reason).not.toContain("failure-8");
+    expect(result.reason).toContain("failure-7 | ELOOP7");
+    expect(result.reason).toContain("failure-11 | ELOOP11");
+    expect(result.reason).not.toContain("NestedError");
   });
 
   it("bounds long diagnostics without splitting UTF-16 surrogate pairs", async () => {
@@ -420,8 +433,7 @@ describe("preflightCronModelProvider", () => {
     }
     const diagnostic = result.reason.split("Last error: ")[1];
     expect(diagnostic).toHaveLength(1_000);
-    expect(diagnostic).toMatch(/^Error: x+…$/u);
-    expect(diagnostic).not.toContain("😀");
+    expect(diagnostic).toMatch(/^x{992}😀trunc…$/u);
     expect(diagnostic).not.toContain("truncated-detail");
     expect(/[\uD800-\uDBFF]$/u.test(diagnostic ?? "")).toBe(false);
   });

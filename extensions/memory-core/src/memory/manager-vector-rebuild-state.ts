@@ -1,26 +1,16 @@
 // Memory Core plugin module owns persisted vector completeness state.
 import type { DatabaseSync } from "node:sqlite";
-import { MEMORY_INDEX_META_TABLE } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
+import {
+  MEMORY_INDEX_META_TABLE,
+  type MemoryVectorIndexState,
+} from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 
 const VECTOR_REBUILD_META_KEY = "memory_vector_rebuild_v1";
 
-function vectorTableExists(db: DatabaseSync, tableName: string): boolean {
+export function memoryTableExists(db: DatabaseSync, tableName: string): boolean {
   return Boolean(
     db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName),
   );
-}
-
-/** True when the derived vec0 table can filter before KNN candidate selection. */
-export function hasMemoryVectorFilterColumns(db: DatabaseSync, tableName: string): boolean {
-  if (!vectorTableExists(db, tableName)) {
-    return false;
-  }
-  const columns = new Set(
-    (db.prepare(`PRAGMA table_xinfo(${tableName})`).all() as Array<{ name?: unknown }>).flatMap(
-      (row) => (typeof row.name === "string" ? [row.name] : []),
-    ),
-  );
-  return columns.has("source") && columns.has("model");
 }
 
 export function markMemoryVectorIndexClean(db: DatabaseSync): void {
@@ -43,19 +33,36 @@ export function requiresMemoryVectorRebuild(params: {
   metaVectorDims?: number;
   hasSemanticChunks: boolean;
 }): boolean {
+  const state = resolvePersistedMemoryVectorIndexState(params).state;
+  return state === "incomplete" || state === "unverified";
+}
+
+export function resolvePersistedMemoryVectorIndexState(params: {
+  db: DatabaseSync;
+  vectorTable: string;
+  metaVectorDims?: number;
+  hasSemanticChunks: boolean;
+}): MemoryVectorIndexState {
   const row = params.db
     .prepare(`SELECT value FROM ${MEMORY_INDEX_META_TABLE} WHERE key = ?`)
     .get(VECTOR_REBUILD_META_KEY) as { value?: unknown } | undefined;
   if (row?.value === "1") {
-    return true;
+    return { state: "incomplete" };
   }
-  if (!vectorTableExists(params.db, params.vectorTable)) {
-    return Boolean(params.metaVectorDims && params.hasSemanticChunks);
+  if (!memoryTableExists(params.db, params.vectorTable)) {
+    return params.metaVectorDims && params.hasSemanticChunks
+      ? { state: "incomplete" }
+      : { state: "empty" };
   }
-  if (!hasMemoryVectorFilterColumns(params.db, params.vectorTable)) {
-    return true;
+  // The clean marker is published with the vector table. A later first
+  // incremental write can populate that table without rewriting vectorDims.
+  if (row?.value === "clean") {
+    return params.hasSemanticChunks ? { state: "complete" } : { state: "empty" };
+  }
+  if (params.hasSemanticChunks && !params.metaVectorDims) {
+    return { state: "incomplete" };
   }
   // Existing releases had no completeness marker. Rebuild their vector table
   // once rather than assuming it has neither missing nor orphaned rows.
-  return row?.value !== "clean";
+  return { state: "unverified" };
 }

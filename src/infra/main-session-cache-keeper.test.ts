@@ -60,9 +60,9 @@ function createStage(overrides: Partial<MainSessionCacheTouchStage> = {}) {
     },
     providerCallStartedAt: Date.now(),
     runId: "run-1",
-    sessionFile: "/tmp/main-session.jsonl",
     sessionId: "session-1",
     sessionKey: "agent:main:main",
+    storePath: "/tmp/sessions.json",
     ...overrides,
   } satisfies MainSessionCacheTouchStage;
 }

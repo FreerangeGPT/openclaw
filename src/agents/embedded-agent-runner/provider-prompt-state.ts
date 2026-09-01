@@ -1,10 +1,11 @@
 import { Buffer } from "node:buffer";
 import crypto from "node:crypto";
+import { responsesPromptObserver } from "@openclaw/ai/internal/openai";
+import { stableStringify } from "@openclaw/normalization-core";
 import type { StreamFn } from "openclaw/plugin-sdk/agent-core";
 import type { Model } from "openclaw/plugin-sdk/llm";
 import type { AssistantMessageEventStreamLike } from "../../llm/types.js";
 import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
-import { stableStringify } from "../stable-stringify.js";
 
 export type ProviderPromptSnapshot = {
   scopeDigest: string;
@@ -473,6 +474,7 @@ export function wrapStreamFnWithProviderPromptState(params: {
   streamFn: StreamFn;
   state: ProviderPromptState;
   effectiveContextTokenBudget: number;
+  recordEvent?: (type: string, data?: Record<string, unknown>) => void;
   assertCacheIdentity?: (
     identity: Pick<
       ProviderPromptSnapshot,
@@ -500,60 +502,66 @@ export function wrapStreamFnWithProviderPromptState(params: {
     let providerPromptSnapshot: ProviderPromptSnapshot | undefined;
     let providerPayloadObserved = false;
     let stream: AssistantMessageEventStreamLike;
-    try {
-      stream = await params.streamFn(model, context, {
-        ...options,
-        onPayload: async (payload, payloadModel) => {
-          if (providerPromptSnapshot && providerPayloadObserved) {
-            // A second payload in one stream invocation represents an internal
-            // retry. Close the prior request before tracking the returned stream.
-            params.observeProviderError?.(
-              new Error("provider payload superseded before stream returned"),
-              providerPromptSnapshot,
-            );
-            providerPromptSnapshot = undefined;
-            providerPayloadObserved = false;
-          }
-          const replacement = await originalOnPayload?.(payload, payloadModel);
-          const finalPayload = replacement === undefined ? payload : replacement;
-          const { snapshot, messageContinuity } = snapshotProviderPrompt({
-            model: payloadModel,
-            payload: finalPayload,
-            effectiveContextTokenBudget: params.effectiveContextTokenBudget,
-          });
-          assertProviderPromptRetryProgress(params.state, snapshot);
-          // This runs after every payload hook but before provider I/O. A keeper
-          // must never authorize a cold request after stable-prefix or option drift.
-          providerCallStartedAt = Date.now();
-          const attemptedSnapshot: ProviderPromptSnapshot = {
-            ...snapshot,
-            providerCallSequence: (params.state.providerCallCount ?? 0) + 1,
-            providerCallStartedAt,
-          };
-          params.state.providerCallCount = attemptedSnapshot.providerCallSequence;
-          providerPromptSnapshot = attemptedSnapshot;
-          params.assertCacheIdentity?.(
-            {
-              cachePrefixIdentity: attemptedSnapshot.cachePrefixIdentity,
-              cacheRequestOptionsIdentity: attemptedSnapshot.cacheRequestOptionsIdentity,
-              providerMessageIdentity: attemptedSnapshot.providerMessageIdentity,
-              messageContinuity,
-            },
-            providerCallStartedAt,
+    const observedOptions: NonNullable<Parameters<StreamFn>[2]> = {
+      ...options,
+      onPayload: async (payload, payloadModel) => {
+        if (providerPromptSnapshot && providerPayloadObserved) {
+          // A second payload in one stream invocation represents an internal
+          // retry. Close the prior request before tracking the returned stream.
+          params.observeProviderError?.(
+            new Error("provider payload superseded before stream returned"),
+            providerPromptSnapshot,
           );
-          const headers = (options as { headers?: Record<string, string> } | undefined)?.headers;
-          params.observeProviderPayload?.({
-            ...(headers ? { headers } : {}),
-            model: payloadModel,
-            payload: finalPayload,
-            providerCallStartedAt,
-            snapshot: attemptedSnapshot,
-          });
-          providerPayloadObserved = true;
-          recordProviderPromptAttempt(params.state, attemptedSnapshot);
-          return finalPayload;
-        },
-      });
+          providerPromptSnapshot = undefined;
+          providerPayloadObserved = false;
+        }
+        const replacement = await originalOnPayload?.(payload, payloadModel);
+        const finalPayload = replacement === undefined ? payload : replacement;
+        const { snapshot, messageContinuity } = snapshotProviderPrompt({
+          model: payloadModel,
+          payload: finalPayload,
+          effectiveContextTokenBudget: params.effectiveContextTokenBudget,
+        });
+        assertProviderPromptRetryProgress(params.state, snapshot);
+        // This runs after every payload hook but before provider I/O. A keeper
+        // must never authorize a cold request after stable-prefix or option drift.
+        providerCallStartedAt = Date.now();
+        const attemptedSnapshot: ProviderPromptSnapshot = {
+          ...snapshot,
+          providerCallSequence: (params.state.providerCallCount ?? 0) + 1,
+          providerCallStartedAt,
+        };
+        params.state.providerCallCount = attemptedSnapshot.providerCallSequence;
+        providerPromptSnapshot = attemptedSnapshot;
+        params.assertCacheIdentity?.(
+          {
+            cachePrefixIdentity: attemptedSnapshot.cachePrefixIdentity,
+            cacheRequestOptionsIdentity: attemptedSnapshot.cacheRequestOptionsIdentity,
+            providerMessageIdentity: attemptedSnapshot.providerMessageIdentity,
+            messageContinuity,
+          },
+          providerCallStartedAt,
+        );
+        const headers = (options as { headers?: Record<string, string> } | undefined)?.headers;
+        params.observeProviderPayload?.({
+          ...(headers ? { headers } : {}),
+          model: payloadModel,
+          payload: finalPayload,
+          providerCallStartedAt,
+          snapshot: attemptedSnapshot,
+        });
+        providerPayloadObserved = true;
+        recordProviderPromptAttempt(params.state, attemptedSnapshot);
+        return finalPayload;
+      },
+    };
+    if (params.recordEvent) {
+      responsesPromptObserver.set(observedOptions, (observation) =>
+        params.recordEvent?.("provider.prompt.observed", { ...observation }),
+      );
+    }
+    try {
+      stream = await params.streamFn(model, context, observedOptions);
     } catch (error) {
       if (providerPromptSnapshot && providerPayloadObserved) {
         params.observeProviderError?.(error, providerPromptSnapshot);

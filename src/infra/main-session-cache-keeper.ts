@@ -6,8 +6,11 @@ import {
 } from "@openclaw/ai/transports";
 import { MAIN_SESSION_CACHE_TOUCH_CUSTOM_TYPE } from "../agents/embedded-agent-runner/cache-ttl.js";
 import { refreshLivePromptCacheEvidenceAfterTouch } from "../agents/embedded-agent-runner/prompt-cache-evidence.js";
-import { acquireSessionWriteLock } from "../agents/session-write-lock.js";
-import { SessionManager } from "../agents/sessions/index.js";
+import { generateSessionEntryId } from "../agents/sessions/session-manager-id.js";
+import {
+  appendTranscriptEvent,
+  readSessionTranscriptActivePathEntryRelation,
+} from "../config/sessions/session-accessor.js";
 import type { Model } from "../llm/types.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
@@ -34,9 +37,9 @@ export type MainSessionCacheTouchStage = {
   payload: Record<string, unknown>;
   providerCallStartedAt: number;
   runId: string;
-  sessionFile: string;
   sessionId: string;
   sessionKey: string;
+  storePath: string;
 };
 
 export type MainSessionCacheTouchParent = MainSessionCacheTouchStage & {
@@ -76,44 +79,79 @@ export type MainSessionCacheKeeperDeps = {
 };
 
 async function readActiveLeafId(parent: MainSessionCacheTouchParent): Promise<string | null> {
-  return SessionManager.open(parent.sessionFile).getLeafId();
+  return readSessionTranscriptActivePathEntryRelation(
+    {
+      agentId: parent.agentId,
+      sessionId: parent.sessionId,
+      sessionKey: parent.sessionKey,
+      storePath: parent.storePath,
+    },
+    parent.anchorId,
+  ) === "exact"
+    ? parent.anchorId
+    : null;
 }
 
 async function persistCacheTouchObservation(
   parent: MainSessionCacheTouchParent,
   observation: CacheTouchObservation,
 ): Promise<string | undefined> {
-  let lock: Awaited<ReturnType<typeof acquireSessionWriteLock>> | undefined;
-  try {
-    // Metadata persistence is optional and must yield immediately to a foreground main turn.
-    lock = await acquireSessionWriteLock({ sessionFile: parent.sessionFile, timeoutMs: 100 });
-    const manager = SessionManager.open(parent.sessionFile);
-    if (manager.getLeafId() !== parent.anchorId) {
-      return undefined;
-    }
-    const usage = observation.result.usage;
-    return manager.appendCustomEntry(MAIN_SESSION_CACHE_TOUCH_CUSTOM_TYPE, {
-      timestamp: observation.confirmedAtMs,
-      agentId: parent.agentId,
-      sessionId: parent.sessionId,
-      provider: parent.model.provider,
-      modelId: parent.model.id,
-      mode: observation.result.mode,
-      attempt: observation.attempt,
-      expectedCachedTokens: observation.expectedCachedTokens,
-      usage: {
-        input: usage.input,
-        output: usage.output,
-        cacheRead: usage.cacheRead,
-        cacheWrite: usage.cacheWrite,
-        cacheWrite1h: usage.cacheWrite1h,
-        totalTokens: usage.totalTokens,
-        costUsd: usage.cost.total,
-      },
-    });
-  } finally {
-    await lock?.release();
+  const scope = {
+    agentId: parent.agentId,
+    sessionId: parent.sessionId,
+    sessionKey: parent.sessionKey,
+    storePath: parent.storePath,
+  };
+  if (readSessionTranscriptActivePathEntryRelation(scope, parent.anchorId) !== "exact") {
+    return undefined;
   }
+  const entryId = generateSessionEntryId();
+  const usage = observation.result.usage;
+  let anchorChanged = false;
+  await appendTranscriptEvent(
+    scope,
+    {
+      type: "custom",
+      customType: MAIN_SESSION_CACHE_TOUCH_CUSTOM_TYPE,
+      id: entryId,
+      parentId: parent.anchorId,
+      timestamp: new Date(observation.confirmedAtMs).toISOString(),
+      data: {
+        timestamp: observation.confirmedAtMs,
+        agentId: parent.agentId,
+        sessionId: parent.sessionId,
+        provider: parent.model.provider,
+        modelId: parent.model.id,
+        mode: observation.result.mode,
+        attempt: observation.attempt,
+        expectedCachedTokens: observation.expectedCachedTokens,
+        usage: {
+          input: usage.input,
+          output: usage.output,
+          cacheRead: usage.cacheRead,
+          cacheWrite: usage.cacheWrite,
+          cacheWrite1h: usage.cacheWrite1h,
+          totalTokens: usage.totalTokens,
+          costUsd: usage.cost.total,
+        },
+      },
+    },
+    {
+      appendIntent: "active-branch",
+      beforeCommitInTransaction: () => {
+        anchorChanged =
+          readSessionTranscriptActivePathEntryRelation(scope, parent.anchorId) !== "exact";
+        if (anchorChanged) {
+          throw new Error("main cache-touch transcript anchor changed");
+        }
+      },
+    },
+  ).catch((error: unknown) => {
+    if (!anchorChanged) {
+      throw error;
+    }
+  });
+  return anchorChanged ? undefined : entryId;
 }
 
 function createDefaultDeps(): MainSessionCacheKeeperDeps {
@@ -186,6 +224,7 @@ export class MainSessionCacheKeeperRuntime {
   stage(candidate: MainSessionCacheTouchStage): boolean {
     if (
       !candidate.apiKey.trim() ||
+      !candidate.storePath.trim() ||
       !isDirectAnthropicPromptCacheTouchModel(candidate.model) ||
       !isAnthropicPromptCacheTouchPayload(candidate.payload)
     ) {

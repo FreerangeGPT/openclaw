@@ -1,12 +1,18 @@
 // Captures plugin registrations for controlled registry assembly.
-import { normalizeStringEntries } from "@openclaw/normalization-core/string-normalization";
+import {
+  normalizeStringEntries,
+  normalizeUniqueStringEntries,
+} from "@openclaw/normalization-core/string-normalization";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type {
   AgentToolResultMiddleware,
   AgentToolResultMiddlewareOptions,
 } from "./agent-tool-result-middleware-types.js";
-import { normalizeAgentToolResultMiddlewareRuntimes } from "./agent-tool-result-middleware.js";
-import { buildPluginApi } from "./api-builder.js";
+import {
+  agentToolResultMiddlewareRegistrationCoversTool,
+  normalizeAgentToolResultMiddlewareRuntimes,
+} from "./agent-tool-result-middleware.js";
+import { buildPluginApi, createUnavailableRuntime } from "./api-builder.js";
 import type { CodexAppServerExtensionFactory } from "./codex-app-server-extension-types.js";
 import type { EmbeddingProviderAdapter } from "./embedding-providers.js";
 import type {
@@ -19,10 +25,10 @@ import type {
   PluginToolMetadataRegistration,
   PluginTrustedToolPolicyRegistration,
 } from "./host-hooks.js";
-import type { MemoryEmbeddingProviderAdapter } from "./memory-embedding-providers.js";
 import type { PluginAgentToolResultMiddlewareRegistration } from "./registry-types.js";
-import type { PluginRuntime } from "./runtime/types.js";
+import { createPluginRuntime } from "./runtime/index.js";
 import type { SessionCatalogProvider } from "./session-catalog.js";
+import { normalizePluginToolMatcher } from "./tool-hook-matcher.js";
 import type {
   AnyAgentTool,
   AgentHarness,
@@ -76,7 +82,6 @@ export type CapturedPluginRegistration = {
   webSearchProviders: WebSearchProviderPlugin[];
   workerProviders: WorkerProvider[];
   migrationProviders: MigrationProviderPlugin[];
-  memoryEmbeddingProviders: MemoryEmbeddingProviderAdapter[];
   sessionExtensions: PluginSessionExtensionRegistration[];
   trustedToolPolicies: PluginTrustedToolPolicyRegistration[];
   toolMetadata: PluginToolMetadataRegistration[];
@@ -117,7 +122,6 @@ export function createCapturedPluginRegistration(params?: {
   const webSearchProviders: WebSearchProviderPlugin[] = [];
   const workerProviders: WorkerProvider[] = [];
   const migrationProviders: MigrationProviderPlugin[] = [];
-  const memoryEmbeddingProviders: MemoryEmbeddingProviderAdapter[] = [];
   const sessionExtensions: PluginSessionExtensionRegistration[] = [];
   const trustedToolPolicies: PluginTrustedToolPolicyRegistration[] = [];
   const toolMetadata: PluginToolMetadataRegistration[] = [];
@@ -133,6 +137,7 @@ export function createCapturedPluginRegistration(params?: {
   const pluginId = params?.id ?? "captured-plugin-registration";
   const pluginName = params?.name ?? "Captured Plugin Registration";
   const pluginSource = params?.source ?? "captured-plugin-registration";
+  const registrationMode = params?.registrationMode ?? "full";
   const noopLogger = {
     info() {},
     warn() {},
@@ -161,7 +166,6 @@ export function createCapturedPluginRegistration(params?: {
     webSearchProviders,
     workerProviders,
     migrationProviders,
-    memoryEmbeddingProviders,
     sessionExtensions,
     trustedToolPolicies,
     toolMetadata,
@@ -177,9 +181,12 @@ export function createCapturedPluginRegistration(params?: {
       id: pluginId,
       name: pluginName,
       source: pluginSource,
-      registrationMode: params?.registrationMode ?? "full",
+      registrationMode,
       config: params?.config ?? ({} as OpenClawConfig),
-      runtime: {} as PluginRuntime,
+      runtime:
+        registrationMode === "cli-metadata" || registrationMode === "setup-only"
+          ? createUnavailableRuntime(registrationMode, pluginId)
+          : createPluginRuntime(),
       logger: noopLogger,
       resolvePath: (input) => input,
       handlers: {
@@ -202,7 +209,7 @@ export function createCapturedPluginRegistration(params?: {
               return normalized;
             })
             .filter((descriptor) => descriptor.name && descriptor.description);
-          const commands = normalizeStringEntries([
+          const commands = normalizeUniqueStringEntries([
             ...(opts?.commands ?? []),
             ...descriptors.map((descriptor) => descriptor.name),
           ]);
@@ -236,14 +243,34 @@ export function createCapturedPluginRegistration(params?: {
           options?: AgentToolResultMiddlewareOptions,
         ) {
           const runtimes = normalizeAgentToolResultMiddlewareRuntimes(options);
-          agentToolResultMiddlewares.push({
+          const matcher = normalizePluginToolMatcher(options?.matcher);
+          const scopedHandler: AgentToolResultMiddleware = (event, ctx) => {
+            if (
+              !agentToolResultMiddlewareRegistrationCoversTool(
+                registration,
+                ctx.runtime,
+                event.toolName,
+              )
+            ) {
+              return;
+            }
+            return handler(event, ctx);
+          };
+          const registration: PluginAgentToolResultMiddlewareRegistration = {
             pluginId,
             pluginName,
             rawHandler: handler,
-            handler,
+            handler: scopedHandler,
             runtimes,
+            scopes: [
+              {
+                runtimes,
+                ...(matcher ? { matcher } : {}),
+              },
+            ],
             source: pluginSource,
-          });
+          };
+          agentToolResultMiddlewares.push(registration);
         },
         registerCliBackend(backend: CliBackendPlugin) {
           cliBackends.push(backend);
@@ -290,14 +317,12 @@ export function createCapturedPluginRegistration(params?: {
         registerMigrationProvider(provider: MigrationProviderPlugin) {
           migrationProviders.push(provider);
         },
-        registerMemoryEmbeddingProvider(adapter: MemoryEmbeddingProviderAdapter) {
-          memoryEmbeddingProviders.push(adapter);
-        },
         registerSessionExtension(extension: PluginSessionExtensionRegistration) {
           sessionExtensions.push(extension);
         },
         registerTrustedToolPolicy(policy: PluginTrustedToolPolicyRegistration) {
-          trustedToolPolicies.push(policy);
+          const matcher = normalizePluginToolMatcher(policy.matcher);
+          trustedToolPolicies.push({ ...policy, ...(matcher ? { matcher } : {}) });
         },
         registerToolMetadata(metadata: PluginToolMetadataRegistration) {
           toolMetadata.push(metadata);

@@ -1,8 +1,9 @@
 /* @vitest-environment jsdom */
 // Exercises the serialized mock gateway exactly as a page would: the init
 // script installs MockWebSocket on window, and requests flow over it.
-import { describe, expect, it } from "vitest";
+import { describe, expect } from "vitest";
 import { createControlUiMockGatewayInitScript } from "./control-ui-e2e.ts";
+import { mockGatewayTest as it } from "./mock-gateway-page.test-support.ts";
 
 type ResponseFrame = {
   event?: string;
@@ -24,7 +25,63 @@ function waitForMockCycle(): Promise<void> {
 }
 
 describe("mock gateway stateful config", () => {
-  it("round-trips config.set through config.get with an advancing hash", async () => {
+  it("takes existing mock sockets offline without closing their replacement", async ({
+    gatewayPage,
+  }) => {
+    const { window, execute } = gatewayPage;
+    const passthroughPrefix = "ws://source-ui/?token=";
+    const script = createControlUiMockGatewayInitScript({
+      webSocketPassthroughPrefixes: [passthroughPrefix],
+    });
+    class PassthroughWebSocket extends window.EventTarget {
+      static readonly CLOSED = 3;
+      static readonly CLOSING = 2;
+      static readonly CONNECTING = 0;
+      static readonly OPEN = 1;
+      readyState = PassthroughWebSocket.OPEN;
+
+      close(): void {
+        this.readyState = PassthroughWebSocket.CLOSED;
+      }
+    }
+    window.WebSocket = PassthroughWebSocket as unknown as typeof WebSocket;
+
+    execute(script);
+
+    const passthrough = new window.WebSocket(`${passthroughPrefix}vite`);
+    const first = new window.WebSocket("ws://mock-gateway/first");
+    const second = new window.WebSocket("ws://mock-gateway/second");
+    await flushMockTimers();
+    expect(passthrough.readyState).toBe(window.WebSocket.OPEN);
+    expect(first.readyState).toBe(window.WebSocket.OPEN);
+    expect(second.readyState).toBe(window.WebSocket.OPEN);
+
+    let replacement: WebSocket | undefined;
+    first.addEventListener("close", () => {
+      replacement = new window.WebSocket("ws://mock-gateway/replacement");
+    });
+
+    const controls = (
+      window as typeof window & {
+        openclawControlUiE2eGateway?: { setOnline: (online: boolean) => void };
+      }
+    ).openclawControlUiE2eGateway;
+    expect(controls).toBeDefined();
+    controls?.setOnline(false);
+
+    expect(passthrough.readyState).toBe(window.WebSocket.OPEN);
+    expect(first.readyState).toBe(window.WebSocket.CLOSED);
+    expect(second.readyState).toBe(window.WebSocket.CLOSED);
+    expect(replacement?.readyState).toBe(window.WebSocket.CONNECTING);
+
+    controls?.setOnline(true);
+    expect(replacement?.readyState).toBe(window.WebSocket.OPEN);
+  });
+
+  it("round-trips config.set through config.get with an advancing hash", async ({
+    gatewayPage,
+  }) => {
+    const { window, execute } = gatewayPage;
     const raw = '{\n  "logging": {\n    "level": "info"\n  }\n}\n';
     const script = createControlUiMockGatewayInitScript({
       methodResponses: {
@@ -38,14 +95,12 @@ describe("mock gateway stateful config", () => {
       },
     });
     // Execute the generated init script the way the browser <script> tag does.
-    window.sessionStorage.clear();
-    // oxlint-disable-next-line typescript/no-implied-eval -- Executes the generated init script standalone, proving it captures no module closures.
-    new Function(script)();
+    execute(script);
 
-    const socket = new WebSocket("ws://mock-gateway");
+    const socket = new window.WebSocket("ws://mock-gateway");
     const frames: ResponseFrame[] = [];
-    socket.addEventListener("message", (event) => {
-      frames.push(JSON.parse(String((event as MessageEvent).data)) as ResponseFrame);
+    socket.addEventListener("message", (event: MessageEvent) => {
+      frames.push(JSON.parse(String(event.data)) as ResponseFrame);
     });
     await flushMockTimers();
 
@@ -74,7 +129,11 @@ describe("mock gateway stateful config", () => {
       baseHash: "fixture-hash",
     });
     // Acks carry the persisted hash, mirroring the real gateway contract.
-    expect(set).toEqual({ ok: true, hash: "mock-config-hash-1" });
+    expect(set).toEqual({
+      ok: true,
+      hash: "mock-config-hash-1",
+      config: { logging: { level: "debug" } },
+    });
 
     const reloaded = await request("get-2", "config.get", {});
     expect(reloaded).toMatchObject({
@@ -89,28 +148,45 @@ describe("mock gateway stateful config", () => {
       raw: nextRaw,
       baseHash: "mock-config-hash-1",
     });
-    expect(applied).toEqual({ ok: true, hash: "mock-config-hash-2" });
+    expect(applied).toEqual({
+      ok: true,
+      hash: "mock-config-hash-2",
+      config: { logging: { level: "debug" } },
+    });
     expect(await request("get-3", "config.get", {})).toMatchObject({
       hash: "mock-config-hash-2",
       configRevisionHash: "mock-config-hash-2",
       appliedConfigHash: "mock-config-hash-2",
     });
 
-    socket.close();
+    const json5Raw = '{\n  // Keep this comment.\n  logging: { level: "warn", },\n}\n';
+    const json5Ack = await request("set-json5", "config.set", {
+      raw: json5Raw,
+      baseHash: "mock-config-hash-2",
+    });
+    expect(json5Ack).toEqual({
+      ok: true,
+      hash: "mock-config-hash-3",
+      config: { logging: { level: "warn" } },
+    });
+    const json5Reloaded = await request("get-json5", "config.get", {});
+    expect(json5Reloaded).toMatchObject({ raw: json5Raw, hash: "mock-config-hash-3" });
+    expect(json5Reloaded.config).toEqual({ logging: { level: "warn" } });
   });
 
-  it("leaves config methods untouched when the scenario has no raw fixture", async () => {
+  it("leaves config methods untouched when the scenario has no raw fixture", async ({
+    gatewayPage,
+  }) => {
+    const { window, execute } = gatewayPage;
     const script = createControlUiMockGatewayInitScript({
       methodResponses: { "config.set": { custom: true } },
     });
-    window.sessionStorage.clear();
-    // oxlint-disable-next-line typescript/no-implied-eval -- Executes the generated init script standalone, proving it captures no module closures.
-    new Function(script)();
+    execute(script);
 
-    const socket = new WebSocket("ws://mock-gateway");
+    const socket = new window.WebSocket("ws://mock-gateway");
     const frames: ResponseFrame[] = [];
-    socket.addEventListener("message", (event) => {
-      frames.push(JSON.parse(String((event as MessageEvent).data)) as ResponseFrame);
+    socket.addEventListener("message", (event: MessageEvent) => {
+      frames.push(JSON.parse(String(event.data)) as ResponseFrame);
     });
     await flushMockTimers();
 
@@ -118,10 +194,12 @@ describe("mock gateway stateful config", () => {
     await flushMockTimers();
     const response = frames.find((frame) => frame.type === "res" && frame.id === "set-1");
     expect(response?.payload).toEqual({ custom: true });
-    socket.close();
   });
 
-  it("hydrates legacy persisted config state without losing revision hashes", async () => {
+  it("hydrates legacy persisted config state without losing revision hashes", async ({
+    gatewayPage,
+  }) => {
+    const { window, execute } = gatewayPage;
     const raw = '{"logging":{"level":"info"}}';
     const script = createControlUiMockGatewayInitScript({
       methodResponses: {
@@ -135,18 +213,16 @@ describe("mock gateway stateful config", () => {
         },
       },
     });
-    window.sessionStorage.clear();
     window.sessionStorage.setItem(
       "openclaw.control-ui-e2e.configState",
       JSON.stringify({ raw, revision: 2 }),
     );
-    // oxlint-disable-next-line typescript/no-implied-eval -- Executes the generated init script standalone, proving it captures no module closures.
-    new Function(script)();
+    execute(script);
 
-    const socket = new WebSocket("ws://mock-gateway");
+    const socket = new window.WebSocket("ws://mock-gateway");
     const frames: ResponseFrame[] = [];
-    socket.addEventListener("message", (event) => {
-      frames.push(JSON.parse(String((event as MessageEvent).data)) as ResponseFrame);
+    socket.addEventListener("message", (event: MessageEvent) => {
+      frames.push(JSON.parse(String(event.data)) as ResponseFrame);
     });
     await flushMockTimers();
     socket.send(JSON.stringify({ type: "req", id: "get-1", method: "config.get", params: {} }));
@@ -157,112 +233,152 @@ describe("mock gateway stateful config", () => {
       configRevisionHash: "fixture-hash",
       appliedConfigHash: "fixture-applied-hash",
     });
-    socket.close();
   });
 });
 
 describe("mock gateway stateful sessions", () => {
-  it("makes a newly created session visible to the next sessions.list", async () => {
-    const sessionKey = "agent:main:created-session";
+  it("acknowledges broad session observation with the real Gateway response", async ({
+    gatewayPage,
+  }) => {
+    const { window, execute } = gatewayPage;
+    const script = createControlUiMockGatewayInitScript({});
+    execute(script);
+
+    const socket = new window.WebSocket("ws://mock-gateway");
+    const frames: ResponseFrame[] = [];
+    socket.addEventListener("message", (event: MessageEvent) => {
+      frames.push(JSON.parse(String(event.data)) as ResponseFrame);
+    });
+    await flushMockTimers();
+
+    socket.send(
+      JSON.stringify({ type: "req", id: "subscribe-events", method: "sessions.subscribe" }),
+    );
+    await flushMockTimers();
+
+    expect(frames.find((frame) => frame.id === "subscribe-events")?.payload).toEqual({
+      subscribed: true,
+    });
+  });
+
+  it("publishes a catalog adoption only after its deferred response succeeds", async ({
+    gatewayPage,
+  }) => {
+    const { window, execute } = gatewayPage;
+    const sessionKey = "agent:main:deferred-catalog-adoption";
     const script = createControlUiMockGatewayInitScript({
+      deferredMethods: ["sessions.catalog.continue"],
       methodResponses: {
-        "sessions.create": { key: sessionKey, runStarted: true },
+        "sessions.catalog.continue": { sessionKey },
       },
     });
-    window.sessionStorage.clear();
-    // oxlint-disable-next-line typescript/no-implied-eval -- Executes the generated init script standalone, proving it captures no module closures.
-    new Function(script)();
+    execute(script);
 
-    const socket = new WebSocket("ws://mock-gateway");
+    const socket = new window.WebSocket("ws://mock-gateway");
     const frames: ResponseFrame[] = [];
-    socket.addEventListener("message", (event) => {
-      frames.push(JSON.parse(String((event as MessageEvent).data)) as ResponseFrame);
+    socket.addEventListener("message", (event: MessageEvent) => {
+      frames.push(JSON.parse(String(event.data)) as ResponseFrame);
     });
     await flushMockTimers();
 
     socket.send(
       JSON.stringify({
         type: "req",
-        id: "create-1",
-        method: "sessions.create",
-        params: { agentId: "main" },
+        id: "deferred-adoption",
+        method: "sessions.catalog.continue",
+        params: { catalogId: "codex", hostId: "gateway:local", threadId: "thread-1" },
       }),
     );
     await flushMockTimers();
-    expect(frames.find((frame) => frame.id === "create-1")?.payload).toEqual({
-      key: sessionKey,
-      runStarted: true,
+    expect(frames.find((frame) => frame.id === "deferred-adoption")).toBeUndefined();
+
+    const gateway = (
+      window as unknown as {
+        openclawControlUiE2eGateway?: {
+          resolveDeferred: (method: string, payload?: unknown) => void;
+        };
+      }
+    ).openclawControlUiE2eGateway;
+    if (!gateway) {
+      throw new Error("Mock Gateway was not installed");
+    }
+    gateway.resolveDeferred("sessions.catalog.continue", { sessionKey });
+    await flushMockTimers();
+    expect(frames.find((frame) => frame.id === "deferred-adoption")?.payload).toEqual({
+      sessionKey,
     });
 
     socket.send(
       JSON.stringify({
         type: "req",
-        id: "list-1",
+        id: "list-after-deferred-adoption",
         method: "sessions.list",
-        params: { agentId: "main", search: "created-session" },
+        params: { agentId: "main", search: "deferred-catalog-adoption" },
       }),
     );
     await flushMockTimers();
-    expect(frames.find((frame) => frame.id === "list-1")?.payload).toMatchObject({
+    expect(
+      frames.find((frame) => frame.id === "list-after-deferred-adoption")?.payload,
+    ).toMatchObject({
       count: 2,
       sessions: [
-        expect.objectContaining({ key: "main" }),
-        expect.objectContaining({
-          key: sessionKey,
-          hasActiveRun: true,
-          status: "running",
-        }),
+        expect.objectContaining({ key: "agent:main:main" }),
+        expect.objectContaining({ key: sessionKey }),
       ],
     });
-    socket.close();
   });
 
-  it("does not publish a rejected session creation to sessions.list", async () => {
-    const sessionKey = "agent:main:rejected-session";
-    const script = createControlUiMockGatewayInitScript({
-      methodResponses: {
-        "sessions.create": {
-          __mockError: { code: "INVALID_REQUEST", message: "session creation rejected" },
-        },
-      },
-    });
-    window.sessionStorage.clear();
-    // oxlint-disable-next-line typescript/no-implied-eval -- Executes the generated init script standalone, proving it captures no module closures.
-    new Function(script)();
+  it.for(["sessions.catalog.continue", "sessions.create"])(
+    "does not publish rejected %s materialization to sessions.list",
+    async (method, { gatewayPage }) => {
+      const { window, execute } = gatewayPage;
+      const sessionKey = "agent:main:rejected-session";
+      execute(
+        createControlUiMockGatewayInitScript({
+          methodResponses: {
+            [method]: {
+              __mockError: { code: "INVALID_REQUEST", message: "materialization rejected" },
+            },
+          },
+        }),
+      );
+      const socket = new window.WebSocket("ws://mock-gateway");
+      const frames: ResponseFrame[] = [];
+      socket.addEventListener("message", (event: MessageEvent) => {
+        frames.push(JSON.parse(String(event.data)) as ResponseFrame);
+      });
+      await flushMockTimers();
+      socket.send(
+        JSON.stringify({
+          type: "req",
+          id: "rejected",
+          method,
+          params:
+            method === "sessions.create"
+              ? { agentId: "main", key: sessionKey }
+              : { catalogId: "codex", hostId: "gateway:local", threadId: "thread-1" },
+        }),
+      );
+      await flushMockTimers();
+      socket.send(
+        JSON.stringify({
+          type: "req",
+          id: "list-after-rejection",
+          method: "sessions.list",
+          params: { agentId: "main", search: "rejected-session" },
+        }),
+      );
+      await flushMockTimers();
+      const listed = frames.find((frame) => frame.id === "list-after-rejection")?.payload;
+      expect(listed).toMatchObject({ count: 1, sessions: [{ key: "agent:main:main" }] });
+      expect(JSON.stringify(listed)).not.toContain(sessionKey);
+    },
+  );
 
-    const socket = new WebSocket("ws://mock-gateway");
-    const frames: ResponseFrame[] = [];
-    socket.addEventListener("message", (event) => {
-      frames.push(JSON.parse(String((event as MessageEvent).data)) as ResponseFrame);
-    });
-    await flushMockTimers();
-
-    socket.send(
-      JSON.stringify({
-        type: "req",
-        id: "rejected-create",
-        method: "sessions.create",
-        params: { agentId: "main", key: sessionKey },
-      }),
-    );
-    await flushMockTimers();
-    socket.send(
-      JSON.stringify({
-        type: "req",
-        id: "list-after-rejection",
-        method: "sessions.list",
-        params: { agentId: "main", search: "rejected-session" },
-      }),
-    );
-    await flushMockTimers();
-
-    const listed = frames.find((frame) => frame.id === "list-after-rejection")?.payload;
-    expect(listed).toMatchObject({ count: 1, sessions: [{ key: "main" }] });
-    expect(JSON.stringify(listed)).not.toContain(sessionKey);
-    socket.close();
-  });
-
-  it("cycles subscription-scoped session events and stops after unsubscribe", async () => {
+  it("cycles subscription-scoped session events and stops after unsubscribe", async ({
+    gatewayPage,
+  }) => {
+    const { window, execute } = gatewayPage;
     const sessionKey = "agent:main:sidebar-narration-demo";
     const script = createControlUiMockGatewayInitScript({
       methodResponses: {
@@ -310,14 +426,12 @@ describe("mock gateway stateful sessions", () => {
         ],
       },
     });
-    window.sessionStorage.clear();
-    // oxlint-disable-next-line typescript/no-implied-eval -- Executes the generated init script standalone, proving it captures no module closures.
-    new Function(script)();
+    execute(script);
 
-    const socket = new WebSocket("ws://mock-gateway");
+    const socket = new window.WebSocket("ws://mock-gateway");
     const frames: ResponseFrame[] = [];
-    socket.addEventListener("message", (event) => {
-      frames.push(JSON.parse(String((event as MessageEvent).data)) as ResponseFrame);
+    socket.addEventListener("message", (event: MessageEvent) => {
+      frames.push(JSON.parse(String(event.data)) as ResponseFrame);
     });
     await flushMockTimers();
 
@@ -389,10 +503,10 @@ describe("mock gateway stateful sessions", () => {
     const eventCount = frames.filter((frame) => frame.type === "event").length;
     await waitForMockCycle();
     expect(frames.filter((frame) => frame.type === "event")).toHaveLength(eventCount);
-    socket.close();
   });
 
-  it("keeps archive filtering opt-in for static session fixtures", async () => {
+  it("keeps archive filtering opt-in for static session fixtures", async ({ gatewayPage }) => {
+    const { window, execute } = gatewayPage;
     const script = createControlUiMockGatewayInitScript({
       methodResponses: {
         "sessions.list": {
@@ -405,14 +519,12 @@ describe("mock gateway stateful sessions", () => {
         "sessions.patch": { ok: true },
       },
     });
-    window.sessionStorage.clear();
-    // oxlint-disable-next-line typescript/no-implied-eval -- Executes the generated init script standalone, proving it captures no module closures.
-    new Function(script)();
+    execute(script);
 
-    const socket = new WebSocket("ws://mock-gateway");
+    const socket = new window.WebSocket("ws://mock-gateway");
     const frames: ResponseFrame[] = [];
-    socket.addEventListener("message", (event) => {
-      frames.push(JSON.parse(String((event as MessageEvent).data)) as ResponseFrame);
+    socket.addEventListener("message", (event: MessageEvent) => {
+      frames.push(JSON.parse(String(event.data)) as ResponseFrame);
     });
     await flushMockTimers();
 
@@ -430,12 +542,19 @@ describe("mock gateway stateful sessions", () => {
 
     expect(frames.find((frame) => frame.id === "list-1")?.payload).toMatchObject({
       count: 1,
-      sessions: [{ key: "agent:main:research", archived: false }],
+      sessions: [
+        {
+          key: "agent:main:research",
+          archived: true,
+          archivedAt: expect.any(Number),
+          pinned: false,
+        },
+      ],
     });
-    socket.close();
   });
 
-  it("moves archive patches between active and archived session lists", async () => {
+  it("moves archive patches between active and archived session lists", async ({ gatewayPage }) => {
+    const { window, execute } = gatewayPage;
     const script = createControlUiMockGatewayInitScript({
       methodResponses: {
         "sessions.list": {
@@ -452,14 +571,12 @@ describe("mock gateway stateful sessions", () => {
       },
       sessionArchiveFiltering: true,
     });
-    window.sessionStorage.clear();
-    // oxlint-disable-next-line typescript/no-implied-eval -- Executes the generated init script standalone, proving it captures no module closures.
-    new Function(script)();
+    execute(script);
 
-    const socket = new WebSocket("ws://mock-gateway");
+    const socket = new window.WebSocket("ws://mock-gateway");
     const frames: ResponseFrame[] = [];
-    socket.addEventListener("message", (event) => {
-      frames.push(JSON.parse(String((event as MessageEvent).data)) as ResponseFrame);
+    socket.addEventListener("message", (event: MessageEvent) => {
+      frames.push(JSON.parse(String(event.data)) as ResponseFrame);
     });
     await flushMockTimers();
 
@@ -499,6 +616,5 @@ describe("mock gateway stateful sessions", () => {
     expect(keys(await request("list-8", "sessions.list", { archived: true }))).toEqual([
       "agent:main:research",
     ]);
-    socket.close();
   });
 });

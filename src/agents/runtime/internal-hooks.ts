@@ -1,0 +1,14 @@
+export {
+  acknowledgeInternalToolResult,
+  attachInternalToolBatchLifecycle,
+  attachInternalToolExecutionPreparer,
+  attachInternalToolResultAcknowledgement,
+  attachInternalToolResultProvenance,
+  copyInternalToolExecutionPreparer,
+  copyInternalToolResultState,
+  getInternalToolResultProvenance,
+  getInternalToolExecutionPreparer,
+  setInternalBeforeToolBatch,
+  type InternalBeforeToolBatchHook,
+  type InternalToolExecutionPreparer,
+} from "../../../packages/agent-core/src/internal-hooks.js";

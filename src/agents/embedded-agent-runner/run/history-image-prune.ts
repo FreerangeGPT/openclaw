@@ -1,3 +1,4 @@
+import path from "node:path";
 import { buildInboundMediaNoteProjection } from "../../../auto-reply/media-note.js";
 import {
   readPersistedMediaFacts,
@@ -10,8 +11,8 @@ import {
  */
 import { buildLateMediaAttachedProjection } from "../../../sessions/user-turn-transcript.js";
 import type { AgentMessage } from "../../runtime/index.js";
-import { isRunnerToolCallBlockType } from "./attempt.tool-call-block-type.js";
-import { hasNonBlankUserText } from "./attempt.user-message-boundary.js";
+import { hasNonBlankUserText } from "./attempt-history.js";
+import { isRunnerToolCallBlockType } from "./attempt-tool-call-block-type.js";
 import { hydratePromptMediaMessages } from "./images.js";
 
 /** Replacement text for old image blocks that were already available to the model. */
@@ -81,7 +82,7 @@ function resolveMessageMediaFacts(message: AgentMessage): MediaFact[] {
 }
 
 function wasStructurallyMediaPruned(message: AgentMessage): boolean {
-  const meta = (message as unknown as Record<string, unknown>)["__openclaw"];
+  const meta = Reflect.get(message, "__openclaw");
   return (
     Boolean(meta) &&
     typeof meta === "object" &&
@@ -97,11 +98,36 @@ function replaceLegacyFactlessMediaText(text: string): string {
     .replace(LEGACY_INBOUND_MEDIA_URI_PATTERN, PRUNED_HISTORY_MEDIA_REFERENCE_MARKER);
 }
 
+function normalizeMarkerIdentity(identity: string): string {
+  return identity.replaceAll("\\", "/");
+}
+
+function resolveWorkspaceRelativeMarkerAliases(fact: MediaFact): string[] {
+  if (
+    !fact.path ||
+    !fact.workspaceDir ||
+    !path.isAbsolute(fact.path) ||
+    !path.isAbsolute(fact.workspaceDir)
+  ) {
+    return [];
+  }
+  const relativePath = path.relative(fact.workspaceDir, fact.path);
+  if (!relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+    return [];
+  }
+  const normalizedRelativePath = normalizeMarkerIdentity(relativePath);
+  return [normalizedRelativePath, `./${normalizedRelativePath}`];
+}
+
 function factOwnsMarkerIdentity(identity: string, media: MediaFact[]): boolean {
-  const normalizedIdentity = identity.replaceAll("\\", "/");
-  return media.some((fact) =>
-    [fact.path, fact.url].some((alias) => alias?.replaceAll("\\", "/") === normalizedIdentity),
-  );
+  const normalizedIdentity = normalizeMarkerIdentity(identity);
+  return media.some((fact) => {
+    // Persistence anchors sandbox paths for browser previews, while existing
+    // prompt marker text remains relative. Derive aliases only from an
+    // explicitly recorded workspace so unrelated absolute facts stay distinct.
+    const aliases = [fact.path, fact.url, ...resolveWorkspaceRelativeMarkerAliases(fact)];
+    return aliases.some((alias) => alias && normalizeMarkerIdentity(alias) === normalizedIdentity);
+  });
 }
 
 function extractMediaAttachedIdentity(marker: string): string {

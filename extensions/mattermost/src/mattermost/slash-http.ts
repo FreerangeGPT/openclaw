@@ -34,13 +34,9 @@ import {
   authorizeMattermostCommandInvocation,
   normalizeMattermostAllowList,
 } from "./monitor-auth.js";
+import { deliverMattermostReplyPayload } from "./reply-delivery.js";
 import {
-  createMattermostReplyDeliveryBarrier,
-  deliverMattermostReplyPayload,
-  toMattermostChannelDeliveryResult,
-} from "./reply-delivery.js";
-import {
-  buildModelsProviderData,
+  buildPreparedModelsProviderData,
   isRequestBodyLimitError,
   logTypingFailure,
   readRequestBodyWithLimit,
@@ -580,7 +576,11 @@ async function authorizeSlashInvocation(params: {
 export function createSlashCommandHttpHandler(params: SlashHttpHandlerParams) {
   const { account, cfg, runtime, registeredCommands, triggerMap, log, bodyTimeoutMs } = params;
 
-  return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+  return async (
+    req: IncomingMessage,
+    res: ServerResponse,
+    bufferedBody?: string,
+  ): Promise<void> => {
     if (req.method !== "POST") {
       res.statusCode = 405;
       res.setHeader("Allow", "POST");
@@ -590,7 +590,7 @@ export function createSlashCommandHttpHandler(params: SlashHttpHandlerParams) {
 
     let body: string;
     try {
-      body = await readBody(req, MAX_BODY_BYTES, bodyTimeoutMs);
+      body = bufferedBody ?? (await readBody(req, MAX_BODY_BYTES, bodyTimeoutMs));
     } catch (error) {
       if (isRequestBodyLimitError(error, "REQUEST_BODY_TIMEOUT")) {
         res.statusCode = 408;
@@ -787,9 +787,9 @@ async function handleSlashCommandAsync(params: {
   const to = kind === "direct" ? `user:${senderId}` : `channel:${channelId}`;
   const pickerEntry = resolveMattermostModelPickerEntry(commandText);
   if (pickerEntry) {
-    const data = await buildModelsProviderData(cfg, route.agentId);
+    const data = await buildPreparedModelsProviderData(cfg, route.agentId);
     if (data.providers.length === 0) {
-      await sendMessageMattermost(to, "No models available.", {
+      await sendMessageMattermost(`channel:${channelId}`, "No models available.", {
         cfg,
         accountId: account.accountId,
       });
@@ -821,7 +821,7 @@ async function handleSlashCommandAsync(params: {
               currentModel,
             });
 
-    await sendMessageMattermost(to, view.text, {
+    await sendMessageMattermost(`channel:${channelId}`, view.text, {
       cfg,
       accountId: account.accountId,
       buttons: view.buttons,
@@ -846,7 +846,10 @@ async function handleSlashCommandAsync(params: {
     SessionKey: route.sessionKey,
     AccountId: route.accountId,
     ChatType: chatType,
+    ConversationRouteContextObserved: true,
+    ConversationRoutePeerId: kind === "direct" ? senderId : channelId,
     ConversationLabel: fromLabel,
+    GroupSpace: teamId,
     GroupSubject: kind !== "direct" ? channelDisplay || roomLabel : undefined,
     SenderName: senderName,
     SenderId: senderId,
@@ -856,6 +859,7 @@ async function handleSlashCommandAsync(params: {
     Timestamp: Date.now(),
     WasMentioned: true,
     CommandAuthorized: commandAuthorized,
+    InboundAccessAuthorized: true,
     CommandSource: "native" as const,
     OriginatingChannel: "mattermost" as const,
     OriginatingTo: to,
@@ -871,10 +875,6 @@ async function handleSlashCommandAsync(params: {
   });
 
   const humanDelay = resolveHumanDelayConfig(cfg, route.agentId);
-  const deliveryBarrier = createMattermostReplyDeliveryBarrier({
-    isDirect: kind === "direct",
-    dmRetryOptions: account.config.dmChannelRetry,
-  });
 
   await core.channel.inbound.dispatch({
     cfg,
@@ -887,21 +887,19 @@ async function handleSlashCommandAsync(params: {
     },
     ctxPayload,
     delivery: {
+      observeMessageSent: true,
       deliver: async (payload) => {
-        const result = toMattermostChannelDeliveryResult(
-          await deliverMattermostReplyPayload({
-            core,
-            cfg,
-            payload,
-            to,
-            accountId: account.accountId,
-            agentId: route.agentId,
-            textLimit,
-            tableMode,
-            sendMessage: sendMessageMattermost,
-            onDmChannelResolution: deliveryBarrier.trackDmChannelResolution,
-          }),
-        );
+        const result = await deliverMattermostReplyPayload({
+          core,
+          cfg,
+          payload,
+          channelId,
+          accountId: account.accountId,
+          agentId: route.agentId,
+          textLimit,
+          tableMode,
+          sendMessage: sendMessageMattermost,
+        });
         if (result.visibleReplySent) {
           runtime.log?.(`delivered slash reply to ${to}`);
         }
@@ -927,8 +925,6 @@ async function handleSlashCommandAsync(params: {
       },
     },
     dispatcherOptions: {
-      resolveFollowupAdmissionBarrierTimeoutPolicy: deliveryBarrier.resolveTimeoutPolicy,
-      onDeliverySettled: deliveryBarrier.markDeliverySettled,
       humanDelay,
     },
     replyOptions: {

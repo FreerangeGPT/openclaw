@@ -1,24 +1,31 @@
 // Completed cron work must become durable before unrelated batch work drains.
+import { MAX_DATE_TIMESTAMP_MS } from "@openclaw/normalization-core/number-coercion";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  createDeferred,
   createDueIsolatedJob,
   noopLogger,
   setupCronRegressionFixtures,
 } from "../../../test/helpers/cron/service-regression-fixtures.js";
+import { createDeferred } from "../../../test/helpers/promise.js";
 import { DEFAULT_CRON_MAX_CONCURRENT_RUNS } from "../../config/cron-limits.js";
+import { openOpenClawStateDatabase } from "../../state/openclaw-state-db.js";
 import { listTaskRecordsUnsorted } from "../../tasks/task-registry.js";
 import { resetTaskRegistryForTests } from "../../tasks/task-runtime.test-helpers.js";
 import { isCronJobActive, markCronJobActive } from "../active-jobs.js";
-import * as cronStoreModule from "../store.js";
+import { createCronExecutionId } from "../run-id.js";
 import { loadCronStore, saveCronStore } from "../store.js";
+import { cronStoreKey } from "../store/key.js";
+import { readCronTaskRunHistoryPage } from "../task-run-history.js";
 import type { CronJob } from "../types.js";
+import { start, stop } from "./ops-lifecycle.js";
+import { add, remove } from "./ops-mutations.js";
 import { createCronServiceState } from "./state.js";
+import type { TimedCronRunOutcome } from "./timer-execution-timeout.js";
 import {
   createCompletedCronRunOutcomeDrain,
   finalizeCompletedCronRunOutcomes,
 } from "./timer-outcome-finalization.js";
-import { runMissedJobs } from "./timer.js";
+import { authorCronRunCompletion, runMissedJobs } from "./timer.js";
 import { onTimer } from "./timer.test-support.js";
 
 const fixtures = setupCronRegressionFixtures({
@@ -37,6 +44,7 @@ function createBatchState(params: {
   runIsolatedAgentJob: Parameters<typeof createCronServiceState>[0]["runIsolatedAgentJob"];
   concurrency?: number;
   onEvent?: Parameters<typeof createCronServiceState>[0]["onEvent"];
+  isAgentAvailable?: Parameters<typeof createCronServiceState>[0]["isAgentAvailable"];
 }) {
   const state = createCronServiceState({
     cronEnabled: true,
@@ -46,6 +54,7 @@ function createBatchState(params: {
     enqueueSystemEvent: vi.fn(),
     requestHeartbeat: vi.fn(),
     runIsolatedAgentJob: params.runIsolatedAgentJob,
+    isAgentAvailable: params.isAgentAvailable,
     maxMissedJobsPerRestart: 40,
     onEvent: params.onEvent,
   });
@@ -68,7 +77,279 @@ function findCronTask(jobId: string) {
   );
 }
 
+function authorOutcome(
+  state: ReturnType<typeof createCronServiceState>,
+  outcome: Omit<TimedCronRunOutcome, "completionStatus" | "deliveryState">,
+) {
+  return authorCronRunCompletion(state, outcome.job, outcome);
+}
+
 describe("cron batch outcome finalization", () => {
+  it.each([
+    { trigger: "scheduled", installSuccessor: false },
+    { trigger: "scheduled", installSuccessor: true },
+    { trigger: "startup", installSuccessor: false },
+    { trigger: "startup", installSuccessor: true },
+  ] as const)(
+    "supersedes a stale $trigger outcome (successor=$installSuccessor)",
+    async ({ trigger, installSuccessor }) => {
+      const store = fixtures.makeStorePath();
+      const dueAt = Date.parse("2026-02-06T10:04:59.750Z");
+      const successorAt = dueAt + 1;
+      const job = createDueIsolatedJob({
+        id: `${trigger}-supersede-preserves-successor`,
+        nowMs: dueAt,
+        nextRunAtMs: dueAt,
+      });
+      await saveCronStore(store.storePath, { version: 1, jobs: [job] });
+
+      const runStarted = createDeferred();
+      const releaseRun = createDeferred<{ status: "ok"; summary: string }>();
+      let ownerAvailable = true;
+      const state = createBatchState({
+        storePath: store.storePath,
+        nowMs: dueAt,
+        isAgentAvailable: () => ownerAvailable,
+        runIsolatedAgentJob: vi.fn(async () => {
+          runStarted.resolve();
+          return await releaseRun.promise;
+        }),
+      });
+      const batch = startBatch(trigger, state);
+
+      try {
+        await runStarted.promise;
+        if (installSuccessor) {
+          const successorStore = await loadCronStore(store.storePath);
+          successorStore.jobs[0]!.state.runningAtMs = successorAt;
+          await saveCronStore(store.storePath, successorStore);
+        }
+        ownerAvailable = false;
+        releaseRun.resolve({ status: "ok", summary: "stale completion" });
+        await batch;
+
+        expect((await loadCronStore(store.storePath)).jobs[0]?.state.runningAtMs).toBe(
+          installSuccessor ? successorAt : undefined,
+        );
+        const receipt = openOpenClawStateDatabase()
+          .db.prepare(
+            "SELECT status FROM cron_run_receipts WHERE store_key = ? AND job_id = ? ORDER BY started_at_ms DESC LIMIT 1",
+          )
+          .get(cronStoreKey(store.storePath), job.id) as { status: string } | undefined;
+        expect(receipt?.status).toBe("superseded");
+      } finally {
+        ownerAvailable = false;
+        releaseRun.resolve({ status: "ok", summary: "stale completion" });
+        await batch;
+        if (state.timer) {
+          clearTimeout(state.timer);
+        }
+      }
+    },
+  );
+
+  it.each(["scheduled", "startup"] as const)(
+    "recovers one finalized %s run when admission advances its execution clock",
+    async (trigger) => {
+      const store = fixtures.makeStorePath();
+      const reservedAt = Date.parse("2026-02-06T10:05:00.250Z");
+      const startedAt = reservedAt + 7;
+      const job = createDueIsolatedJob({
+        id: `${trigger}-recover-advanced-execution-clock`,
+        nowMs: reservedAt,
+        nextRunAtMs: reservedAt,
+      });
+      await saveCronStore(store.storePath, { version: 1, jobs: [job] });
+
+      let now = reservedAt;
+      let reservationPersisted = false;
+      let terminalWriteRejected = false;
+      const events: Array<{ action: string; jobId: string; status?: string }> = [];
+      const runIsolatedAgentJob = vi.fn(async () => ({
+        status: "ok" as const,
+        summary: "finished before terminal store failure",
+      }));
+      const state = createCronServiceState({
+        cronEnabled: true,
+        storePath: store.storePath,
+        log: noopLogger,
+        nowMs: () => now,
+        enqueueSystemEvent: vi.fn(),
+        requestHeartbeat: vi.fn(),
+        runIsolatedAgentJob,
+        onEvent: (event) => events.push(event),
+      });
+      const database = openOpenClawStateDatabase().db;
+      const functionName = `observe_advanced_clock_${trigger}`;
+      const triggerName = `observe_advanced_clock_${trigger}`;
+      database.function(functionName, (writtenJobId, stateJson) => {
+        if (writtenJobId !== job.id || typeof stateJson !== "string") {
+          return 0;
+        }
+        const persistedState = JSON.parse(stateJson) as CronJob["state"];
+        if (!reservationPersisted && persistedState.queuedAtMs === reservedAt) {
+          reservationPersisted = true;
+          now = startedAt;
+        } else if (!terminalWriteRejected && persistedState.lastRunStatus === "ok") {
+          terminalWriteRejected = true;
+          throw new Error("cron terminal write failed");
+        }
+        return 0;
+      });
+      database.exec(`
+        CREATE TEMP TRIGGER ${triggerName}
+        AFTER UPDATE ON cron_jobs
+        BEGIN
+          SELECT ${functionName}(NEW.job_id, NEW.state_json);
+        END;
+      `);
+
+      let recoveryState: ReturnType<typeof createCronServiceState> | undefined;
+      try {
+        await expect(startBatch(trigger, state)).rejects.toThrow("cron terminal write failed");
+        expect(runIsolatedAgentJob).toHaveBeenCalledOnce();
+        expect((await loadCronStore(store.storePath)).jobs[0]?.state.runningAtMs).toBe(startedAt);
+
+        const task = findCronTask(job.id);
+        expect(task).toMatchObject({
+          runId: expect.stringMatching(new RegExp(`^${createCronExecutionId(job.id, startedAt)}:`)),
+          startedAt,
+          status: "succeeded",
+          terminalSummary: "finished before terminal store failure",
+        });
+        expect(events.filter((event) => event.action === "finished")).toEqual([]);
+
+        database.exec(`DROP TRIGGER IF EXISTS ${triggerName}`);
+        recoveryState = createCronServiceState({
+          cronEnabled: true,
+          storePath: store.storePath,
+          log: noopLogger,
+          nowMs: () => startedAt + 1,
+          enqueueSystemEvent: vi.fn(),
+          requestHeartbeat: vi.fn(),
+          runIsolatedAgentJob,
+          onEvent: (event) => events.push(event),
+        });
+        await start(recoveryState);
+
+        expect(runIsolatedAgentJob).toHaveBeenCalledOnce();
+        expect(
+          listTaskRecordsUnsorted().filter(
+            (record) => record.runtime === "cron" && record.sourceId === job.id,
+          ),
+        ).toEqual([expect.objectContaining({ runId: task?.runId, status: "succeeded" })]);
+        expect(
+          readCronTaskRunHistoryPage({
+            storeKey: cronStoreKey(store.storePath),
+            jobId: job.id,
+          }).entries,
+        ).toEqual([
+          expect.objectContaining({
+            jobId: job.id,
+            runAtMs: startedAt,
+            status: "ok",
+            summary: "finished before terminal store failure",
+          }),
+        ]);
+        expect((await loadCronStore(store.storePath)).jobs[0]).toMatchObject({
+          enabled: false,
+          state: { lastRunAtMs: startedAt, lastRunStatus: "ok", lastStatus: "ok" },
+        });
+        expect(events.filter((event) => event.action === "finished")).toHaveLength(0);
+      } finally {
+        database.exec(`DROP TRIGGER IF EXISTS ${triggerName}`);
+        stop(state);
+        if (recoveryState) {
+          stop(recoveryState);
+        }
+      }
+    },
+  );
+
+  it.each([
+    { trigger: "scheduled", deleteAfterRun: false },
+    { trigger: "scheduled", deleteAfterRun: true },
+    { trigger: "startup", deleteAfterRun: false },
+    { trigger: "startup", deleteAfterRun: true },
+  ] as const)(
+    "does not apply a removed $trigger run to a same-id replacement (deleteAfterRun=$deleteAfterRun)",
+    async ({ trigger, deleteAfterRun }) => {
+      const store = fixtures.makeStorePath();
+      const dueAt = Date.parse("2026-02-06T10:05:00.750Z");
+      const replacementAt = dueAt + 60 * 60_000;
+      const original = createDueIsolatedJob({
+        id: `removed-${trigger}-replacement-${deleteAfterRun}`,
+        nowMs: dueAt,
+        nextRunAtMs: dueAt,
+        deleteAfterRun,
+      });
+      original.name = "removed original scheduled job";
+      await saveCronStore(store.storePath, { version: 1, jobs: [original] });
+
+      const started = createDeferred();
+      const release = createDeferred<{ status: "ok"; summary: string }>();
+      const events: Array<{ action: string; jobId: string; job?: CronJob }> = [];
+      const state = createBatchState({
+        storePath: store.storePath,
+        nowMs: dueAt,
+        runIsolatedAgentJob: vi.fn(async () => {
+          started.resolve();
+          return await release.promise;
+        }),
+        onEvent: (event) => events.push(event),
+      });
+      const batch = startBatch(trigger, state);
+
+      try {
+        await started.promise;
+        await expect(remove(state, original.id)).resolves.toEqual({ ok: true, removed: true });
+        await add(state, {
+          id: original.id,
+          name: "independent replacement scheduled job",
+          enabled: true,
+          deleteAfterRun,
+          schedule: { kind: "at", at: new Date(replacementAt).toISOString() },
+          sessionTarget: "isolated",
+          wakeMode: "next-heartbeat",
+          payload: { kind: "agentTurn", message: "run only the replacement occurrence" },
+          delivery: { mode: "none" },
+        });
+
+        release.resolve({ status: "ok", summary: "removed original completed" });
+        await batch;
+
+        for (const jobs of [state.store?.jobs ?? [], (await loadCronStore(store.storePath)).jobs]) {
+          const replacement = jobs.find((job) => job.id === original.id);
+          expect(replacement).toMatchObject({
+            id: original.id,
+            name: "independent replacement scheduled job",
+            enabled: true,
+            deleteAfterRun,
+            state: { nextRunAtMs: replacementAt },
+          });
+          expect(replacement?.state.lastRunAtMs).toBeUndefined();
+          expect(replacement?.state.lastRunStatus).toBeUndefined();
+          expect(replacement?.state.lastStatus).toBeUndefined();
+          expect(replacement?.state.runningAtMs).toBeUndefined();
+        }
+        expect(
+          events.filter((event) => event.action === "finished" && event.jobId === original.id),
+        ).toEqual([
+          expect.objectContaining({
+            job: expect.objectContaining({ name: "removed original scheduled job" }),
+          }),
+        ]);
+        expect(isCronJobActive(original.id)).toBe(false);
+      } finally {
+        release.resolve({ status: "ok", summary: "removed original completed" });
+        await batch;
+        if (state.timer) {
+          clearTimeout(state.timer);
+        }
+      }
+    },
+  );
+
   it("coalesces simultaneously finished outcomes into one durable write", async () => {
     const store = fixtures.makeStorePath();
     const dueAt = Date.parse("2026-02-06T10:05:01.000Z");
@@ -79,16 +360,6 @@ describe("cron batch outcome finalization", () => {
     });
     await saveCronStore(store.storePath, { version: 1, jobs });
 
-    const save = cronStoreModule.saveCronJobsStore;
-    let terminalWrites = 0;
-    const saveSpy = vi
-      .spyOn(cronStoreModule, "saveCronJobsStore")
-      .mockImplementation(async (...args) => {
-        if (args[1].jobs.some((job) => job.state.lastRunStatus === "ok")) {
-          terminalWrites += 1;
-        }
-        return await save(...args);
-      });
     const state = createBatchState({
       storePath: store.storePath,
       nowMs: dueAt,
@@ -96,25 +367,250 @@ describe("cron batch outcome finalization", () => {
     });
     const outcomeDrain = createCompletedCronRunOutcomeDrain(state);
 
-    try {
-      for (const job of jobs) {
-        outcomeDrain.enqueue({
+    for (const job of jobs) {
+      outcomeDrain.enqueue(
+        authorOutcome(state, {
           jobId: job.id,
           job,
           activeJobMarker: markCronJobActive(job.id),
           status: "ok",
           startedAt: dueAt,
           endedAt: dueAt,
-        });
-      }
+        }),
+      );
+    }
 
-      expect(await outcomeDrain.flush()).toHaveLength(jobs.length);
-      expect(terminalWrites).toBe(1);
-      for (const job of jobs) {
-        expect(isCronJobActive(job.id)).toBe(false);
-      }
+    expect(await outcomeDrain.flush()).toHaveLength(jobs.length);
+    for (const job of jobs) {
+      expect(isCronJobActive(job.id)).toBe(false);
+    }
+  });
+
+  it("notifies the owning agent once after a recurring auto-disable is durable", async () => {
+    const store = fixtures.makeStorePath();
+    const dueAt = Date.parse("2026-08-01T15:00:00.000Z");
+    const job = createDueIsolatedJob({
+      id: "recurring-auto-disable-notification",
+      nowMs: dueAt,
+      nextRunAtMs: dueAt,
+    });
+    job.name = "Recurring report";
+    job.schedule = { kind: "every", everyMs: 60_000, anchorMs: dueAt - 60_000 };
+    job.state.consecutiveErrors = 9;
+    job.state.runningAtMs = dueAt;
+    await saveCronStore(store.storePath, { version: 1, jobs: [job] });
+
+    const order: string[] = [];
+    const enqueueSystemEvent = vi.fn(
+      (
+        _text: string,
+        _opts?: {
+          agentId?: string;
+          sessionKey?: string;
+          contextKey?: string;
+          deliveryContext?: unknown;
+        },
+      ) => {
+        const persisted = openOpenClawStateDatabase()
+          .db.prepare("SELECT enabled FROM cron_jobs WHERE store_key = ? AND job_id = ?")
+          .get(cronStoreKey(store.storePath), job.id) as { enabled: number };
+        expect(persisted.enabled).toBe(0);
+        order.push("notify");
+      },
+    );
+    const requestHeartbeat = vi.fn(() => {
+      order.push("heartbeat");
+    });
+    const deliveryContext = { channel: "discord", to: "channel-1", accountId: "default" };
+    const resolveOriginDeliveryContext = vi.fn(() => deliveryContext);
+    const state = createCronServiceState({
+      cronEnabled: true,
+      storePath: store.storePath,
+      log: noopLogger,
+      nowMs: () => dueAt + 10,
+      defaultAgentId: "main",
+      enqueueSystemEvent,
+      resolveOriginDeliveryContext,
+      requestHeartbeat,
+      runIsolatedAgentJob: vi.fn(),
+    });
+    await finalizeCompletedCronRunOutcomes(state, [
+      authorOutcome(state, {
+        jobId: job.id,
+        job: structuredClone(job),
+        activeJobMarker: markCronJobActive(job.id),
+        status: "error",
+        error: "cron: job execution timed out at /private/agent/work",
+        startedAt: dueAt,
+        endedAt: dueAt + 10,
+      }),
+    ]);
+
+    expect(order).toEqual(["notify", "heartbeat"]);
+    expect(enqueueSystemEvent).toHaveBeenCalledOnce();
+    expect(enqueueSystemEvent).toHaveBeenCalledWith(
+      expect.stringContaining(`openclaw automations enable ${job.id}`),
+      {
+        agentId: "main",
+        sessionKey: undefined,
+        contextKey: `cron:${job.id}:auto-disabled`,
+        deliveryContext,
+      },
+    );
+    expect(enqueueSystemEvent.mock.calls[0]?.[0]).toContain("Recurring report");
+    expect(enqueueSystemEvent.mock.calls[0]?.[0]).toContain(job.id);
+    expect(enqueueSystemEvent.mock.calls[0]?.[0]).toContain("10 consecutive run failures");
+    expect(enqueueSystemEvent.mock.calls[0]?.[0]).toContain("Cause: timeout");
+    expect(enqueueSystemEvent.mock.calls[0]?.[0]).not.toContain("/private/agent/work");
+    expect(resolveOriginDeliveryContext).toHaveBeenCalledWith({
+      agentId: "main",
+      sessionKey: undefined,
+    });
+    expect(requestHeartbeat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "notifications-event",
+        intent: "immediate",
+        reason: "wake",
+        agentId: "main",
+      }),
+    );
+    expect((await loadCronStore(store.storePath)).jobs[0]).toMatchObject({
+      enabled: false,
+      state: {
+        consecutiveErrors: 10,
+        lastError: "cron: job execution timed out at /private/agent/work",
+        autoDisabled: {
+          reason: "consecutive-failures",
+          atMs: dueAt + 10,
+          consecutiveErrors: 10,
+        },
+      },
+    });
+  });
+
+  it("records and notifies a Date-overflow auto-disable only after persistence", async () => {
+    const store = fixtures.makeStorePath();
+    const dueAt = Date.parse("2026-08-01T15:02:00.000Z");
+    const job = createDueIsolatedJob({
+      id: "date-overflow-auto-disable",
+      nowMs: dueAt,
+      nextRunAtMs: dueAt,
+    });
+    job.schedule = { kind: "every", everyMs: 60_000, anchorMs: dueAt - 60_000 };
+    job.pacing = { min: "1s" };
+    job.state.runningAtMs = dueAt;
+    await saveCronStore(store.storePath, { version: 1, jobs: [job] });
+
+    const order: string[] = [];
+    const enqueueSystemEvent = vi.fn((_text: string) => {
+      const persisted = openOpenClawStateDatabase()
+        .db.prepare("SELECT enabled FROM cron_jobs WHERE store_key = ? AND job_id = ?")
+        .get(cronStoreKey(store.storePath), job.id) as { enabled: number };
+      expect(persisted.enabled).toBe(0);
+      order.push("notify");
+    });
+    const requestHeartbeat = vi.fn(() => {
+      order.push("heartbeat");
+    });
+    const state = createCronServiceState({
+      cronEnabled: true,
+      storePath: store.storePath,
+      log: noopLogger,
+      nowMs: () => dueAt + 10,
+      enqueueSystemEvent,
+      requestHeartbeat,
+      runIsolatedAgentJob: vi.fn(),
+    });
+    const finalized = await finalizeCompletedCronRunOutcomes(state, [
+      authorOutcome(state, {
+        jobId: job.id,
+        job: structuredClone(job),
+        activeJobMarker: markCronJobActive(job.id),
+        status: "ok",
+        startedAt: dueAt,
+        endedAt: dueAt + 10,
+        nextCheck: { delayMs: MAX_DATE_TIMESTAMP_MS },
+      }),
+    ]);
+
+    expect(finalized).toHaveLength(1);
+    expect(state.store?.jobs[0]?.enabled).toBe(false);
+    expect(state.store?.jobs[0]?.state.nextRunAtMs).toBeUndefined();
+    expect(order).toEqual(["notify", "heartbeat"]);
+    expect(enqueueSystemEvent).toHaveBeenCalledOnce();
+    expect(enqueueSystemEvent.mock.calls[0]?.[0]).toContain(
+      "Check automation history for details.",
+    );
+    expect(enqueueSystemEvent.mock.calls[0]?.[0]).not.toContain(
+      "next run is outside the supported Date range",
+    );
+    expect(requestHeartbeat).toHaveBeenCalledOnce();
+    expect((await loadCronStore(store.storePath)).jobs[0]).toMatchObject({
+      enabled: false,
+      state: {
+        autoDisabled: {
+          reason: "schedule-errors",
+          atMs: dueAt + 10,
+          consecutiveErrors: 1,
+        },
+      },
+    });
+  });
+
+  it("rolls back recurring auto-disable without notifying when persistence fails", async () => {
+    const store = fixtures.makeStorePath();
+    const dueAt = Date.parse("2026-08-01T15:05:00.000Z");
+    const job = createDueIsolatedJob({
+      id: "recurring-auto-disable-rollback",
+      nowMs: dueAt,
+      nextRunAtMs: dueAt,
+    });
+    job.schedule = { kind: "every", everyMs: 60_000, anchorMs: dueAt - 60_000 };
+    job.state.consecutiveErrors = 9;
+    job.state.runningAtMs = dueAt;
+    await saveCronStore(store.storePath, { version: 1, jobs: [job] });
+
+    const state = createCronServiceState({
+      cronEnabled: true,
+      storePath: store.storePath,
+      log: noopLogger,
+      nowMs: () => dueAt + 10,
+      enqueueSystemEvent: vi.fn(),
+      requestHeartbeat: vi.fn(),
+      runIsolatedAgentJob: vi.fn(),
+    });
+    const database = openOpenClawStateDatabase().db;
+    database.exec(`
+      CREATE TEMP TRIGGER reject_auto_disable_terminal_write
+      BEFORE UPDATE ON cron_jobs
+      WHEN NEW.job_id = '${job.id}'
+        AND json_extract(NEW.state_json, '$.autoDisabled') IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'terminal write failed');
+      END;
+    `);
+
+    try {
+      await expect(
+        finalizeCompletedCronRunOutcomes(state, [
+          authorOutcome(state, {
+            jobId: job.id,
+            job: structuredClone(job),
+            activeJobMarker: markCronJobActive(job.id),
+            status: "error",
+            error: "tenth failure",
+            startedAt: dueAt,
+            endedAt: dueAt + 10,
+          }),
+        ]),
+      ).rejects.toThrow("terminal write failed");
+      expect(state.deps.enqueueSystemEvent).not.toHaveBeenCalled();
+      expect(state.deps.requestHeartbeat).not.toHaveBeenCalled();
+      expect(state.store?.jobs[0]?.enabled).toBe(true);
+      expect(state.store?.jobs[0]?.state.autoDisabled).toBeUndefined();
+      expect((await loadCronStore(store.storePath)).jobs[0]?.enabled).toBe(true);
     } finally {
-      saveSpy.mockRestore();
+      database.exec("DROP TRIGGER IF EXISTS reject_auto_disable_terminal_write");
     }
   });
 
@@ -141,7 +637,7 @@ describe("cron batch outcome finalization", () => {
       await finalizeCompletedCronRunOutcomes(
         state,
         [
-          {
+          authorOutcome(state, {
             jobId: job.id,
             job,
             activeJobMarker,
@@ -149,7 +645,7 @@ describe("cron batch outcome finalization", () => {
             error: "setup timed out before runner start",
             startedAt: dueAt,
             endedAt: dueAt,
-          },
+          }),
         ],
         { clearOnFailure: false, discardWhenStopped: true },
       ),
@@ -168,7 +664,7 @@ describe("cron batch outcome finalization", () => {
     });
     await saveCronStore(store.storePath, { version: 1, jobs: [job] });
 
-    const runStarted = createDeferred<void>();
+    const runStarted = createDeferred();
     const releaseRun = createDeferred<{ status: "ok"; summary: string }>();
     const state = createBatchState({
       storePath: store.storePath,
@@ -202,57 +698,6 @@ describe("cron batch outcome finalization", () => {
   });
 
   it.each(["scheduled", "startup"] as const)(
-    "releases %s execution admission while terminal persistence is blocked",
-    async (trigger) => {
-      const store = fixtures.makeStorePath();
-      const dueAt = Date.parse("2026-02-06T10:05:01.500Z");
-      const job = createDueIsolatedJob({
-        id: `${trigger}-blocked-terminal-persistence`,
-        nowMs: dueAt,
-        nextRunAtMs: dueAt,
-      });
-      await saveCronStore(store.storePath, { version: 1, jobs: [job] });
-
-      const terminalWriteStarted = createDeferred<void>();
-      const releaseTerminalWrite = createDeferred<void>();
-      const save = cronStoreModule.saveCronJobsStore;
-      const saveSpy = vi
-        .spyOn(cronStoreModule, "saveCronJobsStore")
-        .mockImplementation(async (...args) => {
-          const persistedJob = args[1].jobs.find((entry) => entry.id === job.id);
-          if (persistedJob?.state.lastRunStatus === "ok") {
-            terminalWriteStarted.resolve();
-            await releaseTerminalWrite.promise;
-          }
-          return await save(...args);
-        });
-      const state = createBatchState({
-        storePath: store.storePath,
-        nowMs: dueAt,
-        runIsolatedAgentJob: vi.fn(async () => ({ status: "ok" as const })),
-      });
-
-      const batch = startBatch(trigger, state);
-      try {
-        await terminalWriteStarted.promise;
-        expect(state.runAdmission.active).toBe(0);
-        expect(findCronTask(job.id)?.status).toBe("succeeded");
-        expect((await loadCronStore(store.storePath)).jobs[0]?.state.runningAtMs).toBe(dueAt);
-      } finally {
-        releaseTerminalWrite.resolve();
-        await batch;
-        saveSpy.mockRestore();
-        if (state.timer) {
-          clearTimeout(state.timer);
-        }
-      }
-
-      expect(findCronTask(job.id)?.status).toBe("succeeded");
-      expect(isCronJobActive(job.id)).toBe(false);
-    },
-  );
-
-  it.each(["scheduled", "startup"] as const)(
     "drains later %s completions after a sibling terminal write fails",
     async (trigger) => {
       const store = fixtures.makeStorePath();
@@ -269,22 +714,31 @@ describe("cron batch outcome finalization", () => {
       });
       await saveCronStore(store.storePath, { version: 1, jobs: [first, second] });
 
-      const terminalWriteFailed = createDeferred<void>();
-      const secondStarted = createDeferred<void>();
+      const terminalWriteFailed = createDeferred();
+      const secondStarted = createDeferred();
       const releaseSecond = createDeferred<{ status: "ok"; summary: string }>();
-      const save = cronStoreModule.saveCronJobsStore;
       let rejectedTerminalWrite = false;
-      const saveSpy = vi
-        .spyOn(cronStoreModule, "saveCronJobsStore")
-        .mockImplementation(async (...args) => {
-          const persistedFirst = args[1].jobs.find((job) => job.id === first.id);
-          if (!rejectedTerminalWrite && persistedFirst?.state.lastRunStatus === "ok") {
+      const database = openOpenClawStateDatabase().db;
+      const functionName = `reject_sibling_terminal_${trigger}`;
+      const triggerName = `reject_sibling_terminal_${trigger}`;
+      database.function(functionName, (jobId, stateJson) => {
+        if (jobId === first.id && typeof stateJson === "string") {
+          const persistedState = JSON.parse(stateJson) as CronJob["state"];
+          if (!rejectedTerminalWrite && persistedState.lastRunStatus === "ok") {
             rejectedTerminalWrite = true;
             terminalWriteFailed.resolve();
             throw new Error("cron terminal write failed");
           }
-          return await save(...args);
-        });
+        }
+        return 0;
+      });
+      database.exec(`
+        CREATE TEMP TRIGGER ${triggerName}
+        AFTER UPDATE ON cron_jobs
+        BEGIN
+          SELECT ${functionName}(NEW.job_id, NEW.state_json);
+        END;
+      `);
       const state = createBatchState({
         storePath: store.storePath,
         nowMs: dueAt,
@@ -319,7 +773,7 @@ describe("cron batch outcome finalization", () => {
       } finally {
         releaseSecond.resolve({ status: "ok", summary: "later completion" });
         await completion;
-        saveSpy.mockRestore();
+        database.exec(`DROP TRIGGER IF EXISTS ${triggerName}`);
         if (state.timer) {
           clearTimeout(state.timer);
         }
@@ -331,7 +785,7 @@ describe("cron batch outcome finalization", () => {
     const store = fixtures.makeStorePath();
     const dueAt = Date.parse("2026-02-06T10:05:01.875Z");
     const first = createDueIsolatedJob({
-      id: "startup-failed-write-before-recovery",
+      id: "startup-failed-write-before-stop",
       nowMs: dueAt,
       nextRunAtMs: dueAt,
     });
@@ -342,22 +796,30 @@ describe("cron batch outcome finalization", () => {
     });
     await saveCronStore(store.storePath, { version: 1, jobs: [first, unstarted] });
 
-    const save = cronStoreModule.saveCronJobsStore;
     let rejectedTerminalWrite = false;
-    const saveSpy = vi
-      .spyOn(cronStoreModule, "saveCronJobsStore")
-      .mockImplementation(async (...args) => {
-        const persistedFirst = args[1].jobs.find((job) => job.id === first.id);
-        if (!rejectedTerminalWrite && persistedFirst?.state.lastRunStatus === "ok") {
+    const database = openOpenClawStateDatabase().db;
+    database.function("reject_startup_terminal", (jobId, stateJson) => {
+      if (jobId === first.id && typeof stateJson === "string") {
+        const persistedState = JSON.parse(stateJson) as CronJob["state"];
+        if (!rejectedTerminalWrite && persistedState.lastRunStatus === "ok") {
           rejectedTerminalWrite = true;
+          stop(state);
           throw new Error("startup terminal write failed");
         }
-        return await save(...args);
-      });
-    const runIsolatedAgentJob = vi.fn(async () => {
-      state.restartRecoveryPending = true;
-      return { status: "ok" as const, summary: "completed before restart recovery" };
+      }
+      return 0;
     });
+    database.exec(`
+      CREATE TEMP TRIGGER reject_startup_terminal
+      AFTER UPDATE ON cron_jobs
+      BEGIN
+        SELECT reject_startup_terminal(NEW.job_id, NEW.state_json);
+      END;
+    `);
+    const runIsolatedAgentJob = vi.fn(async () => ({
+      status: "ok" as const,
+      summary: "completed before service stop",
+    }));
     const state = createBatchState({
       storePath: store.storePath,
       nowMs: dueAt,
@@ -376,7 +838,7 @@ describe("cron batch outcome finalization", () => {
       expect(isCronJobActive(first.id)).toBe(false);
       expect(isCronJobActive(unstarted.id)).toBe(false);
     } finally {
-      saveSpy.mockRestore();
+      database.exec("DROP TRIGGER IF EXISTS reject_startup_terminal");
       if (state.timer) {
         clearTimeout(state.timer);
       }
@@ -408,7 +870,7 @@ describe("cron batch outcome finalization", () => {
       });
       await saveCronStore(store.storePath, { version: 1, jobs: [first, second] });
 
-      const secondStarted = createDeferred<void>();
+      const secondStarted = createDeferred();
       const releaseSecond = createDeferred<{ status: "ok"; summary: string }>();
       const events: Array<{ action: string; jobId: string; status?: string }> = [];
       const state = createBatchState({
@@ -484,7 +946,7 @@ describe("cron batch outcome finalization", () => {
       if (!lastJob) {
         throw new Error("expected a final cron stress-test job");
       }
-      const finalRunStarted = createDeferred<void>();
+      const finalRunStarted = createDeferred();
       const releaseFinalRun = createDeferred<{ status: "ok"; summary: string }>();
       const state = createBatchState({
         storePath: store.storePath,

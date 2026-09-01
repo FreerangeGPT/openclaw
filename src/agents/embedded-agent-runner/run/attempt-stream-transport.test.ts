@@ -9,10 +9,7 @@ import {
   assertMainSessionCacheKeeperEvidenceFresh,
 } from "../prompt-cache-evidence.js";
 import { wrapStreamFnWithProviderPromptState } from "../provider-prompt-state.js";
-import {
-  observeCacheKeeperStream,
-  observeProviderPromptStream,
-} from "./attempt-stream-transport.js";
+import { observeCacheKeeperStream, observeProviderPromptStream } from "./attempt-stream-settle.js";
 
 describe("cache keeper stream observation", () => {
   it("refreshes live evidence when the caller consumes result() without iterating", async () => {
@@ -188,7 +185,7 @@ describe("provider prompt stream observation", () => {
     const observed = observeProviderPromptStream({
       stream,
       readSnapshot: () => snapshot,
-      trajectoryRecorder: { recordEvent, flush: async () => undefined },
+      recordEvent,
       replayRecorder: {
         enabled: true,
         recordRequest: vi.fn(),
@@ -253,7 +250,7 @@ describe("provider prompt stream observation", () => {
     const observed = observeProviderPromptStream({
       stream,
       readSnapshot: () => snapshot,
-      trajectoryRecorder: { recordEvent, flush: async () => undefined },
+      recordEvent,
       replayRecorder: {
         enabled: true,
         recordRequest: vi.fn(),
@@ -326,7 +323,7 @@ describe("provider prompt stream observation", () => {
     const observed = observeProviderPromptStream({
       stream,
       readSnapshot: () => snapshot,
-      trajectoryRecorder: { recordEvent, flush: async () => undefined },
+      recordEvent,
       replayRecorder: {
         enabled: true,
         recordRequest: vi.fn(),

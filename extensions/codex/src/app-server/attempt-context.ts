@@ -6,12 +6,13 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import {
   buildBootstrapContextForFiles,
+  buildWatchedSessionsHarnessContext,
   embeddedAgentLog,
   resolveBootstrapFilesForRun,
   type AgentMessage,
   type ContextEngineProjection,
   type EmbeddedContextFile,
-  type EmbeddedRunAttemptParams,
+  type EmbeddedRunAttemptParamsV2 as EmbeddedRunAttemptParams,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { resolveAgentWorkspaceDir } from "openclaw/plugin-sdk/agent-runtime";
 import {
@@ -19,10 +20,15 @@ import {
   prepareMemorySystemPromptAddition,
 } from "openclaw/plugin-sdk/core";
 import { MESSAGE_TOOL_DELIVERY_HINTS } from "openclaw/plugin-sdk/message-tool-delivery-hints";
+import type {
+  SessionTranscriptTargetParams,
+  TranscriptTurnAdmission,
+} from "openclaw/plugin-sdk/session-transcript-runtime";
+import { readNonBlankString as readNonEmptyString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { EmbeddedRunAttemptResult } from "./attempt-terminal.js";
+import { isMessageOnlyCodexSourceReply } from "./dynamic-tool-profile.js";
 import type { CodexDynamicToolFunctionSpec, CodexDynamicToolSpec, JsonValue } from "./protocol.js";
-import { flattenCodexDynamicToolFunctions } from "./protocol.js";
-import { isJsonObject } from "./protocol.js";
+import { flattenCodexDynamicToolFunctions, isJsonObject } from "./protocol.js";
 import type { CodexAppServerThreadBinding } from "./session-binding.js";
 import { readCodexMirroredSessionHistoryMessages } from "./session-history.js";
 import {
@@ -60,13 +66,16 @@ type CodexBootstrapContext = {
 export type CodexSystemPromptReport = NonNullable<EmbeddedRunAttemptResult["systemPromptReport"]>;
 type CodexToolReportEntry = CodexSystemPromptReport["tools"]["entries"][number];
 type CodexWorkspaceBootstrapContext = CodexBootstrapContext & {
+  inheritsAgentWorkspace: boolean;
   promptContextFiles?: EmbeddedContextFile[];
+  threadDeveloperInstructionFiles?: EmbeddedContextFile[];
   turnScopedDeveloperInstructionFiles?: EmbeddedContextFile[];
   memoryReferenceFiles?: EmbeddedContextFile[];
   memoryToolRoutedBootstrapFiles?: CodexBootstrapFile[];
   memoryToolNames?: string[];
   memoryToolRouted?: boolean;
   promptContext?: string;
+  threadDeveloperInstructions?: string;
   turnScopedDeveloperInstructions?: string;
   memoryCollaborationInstructions?: string;
 };
@@ -77,8 +86,15 @@ export async function readMirroredSessionHistoryMessages(params: {
   sessionFile: string;
   sessionId: string;
   sessionKey?: string;
+  sessionTarget?: Partial<SessionTranscriptTargetParams>;
+  admission?: TranscriptTurnAdmission;
 }): Promise<AgentMessage[] | undefined> {
-  const messages = await readCodexMirroredSessionHistoryMessages(params);
+  const { admission, ...target } = params;
+  const messages = await readCodexMirroredSessionHistoryMessages(
+    target,
+    admission,
+    "model-context",
+  );
   if (!messages) {
     embeddedAgentLog.warn("failed to read mirrored session history for codex harness hooks", {
       sessionFile: params.sessionFile,
@@ -160,19 +176,26 @@ export function resolveContextEngineBootstrapProjectionDecision(params: {
 export async function buildCodexWorkspaceBootstrapContext(params: {
   params: EmbeddedRunAttemptParams;
   resolvedWorkspace: string;
+  executionWorkspace?: string;
   effectiveWorkspace: string;
   sessionKey: string;
   sessionAgentId: string;
   memoryToolNames: readonly string[];
+  ringZeroActive: boolean;
   sandboxed?: boolean;
 }): Promise<CodexWorkspaceBootstrapContext> {
   try {
+    const executionWorkspace = params.executionWorkspace ?? params.resolvedWorkspace;
+    const inheritsAgentWorkspace = executionWorkspace !== params.resolvedWorkspace;
+    const promptWorkspace = inheritsAgentWorkspace
+      ? params.resolvedWorkspace
+      : params.effectiveWorkspace;
     const memoryToolsAvailable =
       params.memoryToolNames.length > 0 &&
       canRouteCodexWorkspaceMemoryThroughTools({
         config: params.params.config,
         agentId: params.params.agentId ?? params.sessionAgentId,
-        workspaceDir: params.effectiveWorkspace,
+        workspaceDir: inheritsAgentWorkspace ? params.resolvedWorkspace : params.effectiveWorkspace,
       });
     // Native Codex turns should read workspace MEMORY.md through tools when
     // possible; pasting it into every prompt turns durable memory into policy.
@@ -181,6 +204,7 @@ export async function buildCodexWorkspaceBootstrapContext(params: {
       config: params.params.config,
       sessionKey: params.sessionKey,
       sessionId: params.params.sessionId,
+      chatType: params.params.chatType,
       agentId: params.params.agentId ?? params.sessionAgentId,
       warn: (message) => embeddedAgentLog.warn(message),
       contextMode: params.params.bootstrapContextMode,
@@ -196,7 +220,7 @@ export async function buildCodexWorkspaceBootstrapContext(params: {
       remapCodexContextFilePath({
         file: toCodexEmbeddedContextFile(file),
         sourceWorkspaceDir: params.resolvedWorkspace,
-        targetWorkspaceDir: params.effectiveWorkspace,
+        targetWorkspaceDir: promptWorkspace,
       }),
     );
     const contextFiles = buildBootstrapContextForFiles(
@@ -218,28 +242,45 @@ export async function buildCodexWorkspaceBootstrapContext(params: {
       remapCodexContextFilePath({
         file,
         sourceWorkspaceDir: params.resolvedWorkspace,
-        targetWorkspaceDir: params.effectiveWorkspace,
+        targetWorkspaceDir: promptWorkspace,
       }),
     );
     const promptContextFiles = selectCodexWorkspacePromptContextFiles(contextFiles, {
       excludeMemory: memoryToolsAvailable,
       memoryWorkspaceDir: params.effectiveWorkspace,
     });
-    const turnScopedDeveloperInstructionFiles = shouldInjectCodexOpenClawPromptContext(
-      params.params,
-    )
+    const injectOpenClawContext = shouldInjectCodexOpenClawPromptContext(params.params);
+    const restrictedProjectDocNeedsOpenClawCarrier =
+      params.params.pluginHarnessToolPolicyRestricted === true &&
+      !params.params.disableTools &&
+      !isMessageOnlyCodexSourceReply(params.params) &&
+      params.params.bootstrapContextMode !== "lightweight";
+    const threadDeveloperInstructionFiles =
+      injectOpenClawContext &&
+      !params.ringZeroActive &&
+      (inheritsAgentWorkspace || restrictedProjectDocNeedsOpenClawCarrier)
+        ? selectCodexWorkspaceAgentProjectInstructionFiles(contextFiles, params.resolvedWorkspace)
+        : [];
+    const turnScopedDeveloperInstructionFiles = injectOpenClawContext
       ? selectCodexWorkspaceTurnScopedDeveloperInstructionFiles(contextFiles)
       : [];
     return {
       bootstrapFiles,
       contextFiles,
+      inheritsAgentWorkspace,
       promptContextFiles,
+      threadDeveloperInstructionFiles,
       turnScopedDeveloperInstructionFiles,
       memoryReferenceFiles,
       memoryToolRoutedBootstrapFiles,
       memoryToolNames: [...params.memoryToolNames],
       memoryToolRouted: memoryToolsAvailable,
       promptContext: renderCodexWorkspaceBootstrapPromptContext(promptContextFiles),
+      threadDeveloperInstructions: renderCodexWorkspaceDeveloperInstructions({
+        files: threadDeveloperInstructionFiles,
+        header: "## OpenClaw Agent Workspace Instructions",
+        preamble: "OpenClaw loaded this bounded snapshot from the configured agent workspace.",
+      }),
       turnScopedDeveloperInstructions: renderCodexWorkspaceCollaborationDeveloperInstructions(
         turnScopedDeveloperInstructionFiles,
       ),
@@ -257,7 +298,7 @@ export async function buildCodexWorkspaceBootstrapContext(params: {
     };
   } catch (error) {
     embeddedAgentLog.warn("failed to load codex workspace bootstrap instructions", { error });
-    return { bootstrapFiles: [], contextFiles: [] };
+    return { bootstrapFiles: [], contextFiles: [], inheritsAgentWorkspace: false };
   }
 }
 
@@ -302,8 +343,10 @@ export function buildCodexSystemPromptReport(params: {
     injectedWorkspaceFiles: buildCodexBootstrapInjectionStats({
       bootstrapFiles: params.workspaceBootstrapContext.bootstrapFiles,
       injectedFiles: params.workspaceBootstrapContext.promptContextFiles ?? [],
-      developerInstructionFiles:
-        params.workspaceBootstrapContext.turnScopedDeveloperInstructionFiles ?? [],
+      developerInstructionFiles: [
+        ...(params.workspaceBootstrapContext.threadDeveloperInstructionFiles ?? []),
+        ...(params.workspaceBootstrapContext.turnScopedDeveloperInstructionFiles ?? []),
+      ],
       memoryToolRoutedBootstrapFiles:
         params.workspaceBootstrapContext.memoryToolRoutedBootstrapFiles ?? [],
       memoryToolRouted: params.workspaceBootstrapContext.memoryToolRouted === true,
@@ -429,12 +472,23 @@ function buildCodexBootstrapInjectionStats(params: {
       ? undefined
       : (readCodexIndexedContextFileContent(injectedIndex, pathValue, fileName) ??
         readCodexIndexedContextFileContent(developerInstructionIndex, pathValue, fileName));
-    let injectedChars = memoryToolRoutedFile ? 0 : (injected?.length ?? 0);
-    let truncated = memoryToolRoutedFile ? false : !file.missing && injectedChars < rawChars;
-    if (injected === undefined && CODEX_NATIVE_PROJECT_DOC_BASENAMES.has(baseName)) {
-      injectedChars = rawChars;
-      truncated = false;
+    if (
+      !file.missing &&
+      injected === undefined &&
+      CODEX_NATIVE_PROJECT_DOC_BASENAMES.has(baseName)
+    ) {
+      return {
+        name: displayName,
+        path: pathValue,
+        missing: false,
+        rawChars,
+        injectionStatus: "native_unverified",
+        injectedChars: null,
+        truncated: null,
+      };
     }
+    const injectedChars = memoryToolRoutedFile ? 0 : (injected?.length ?? 0);
+    const truncated = memoryToolRoutedFile ? false : !file.missing && injectedChars < rawChars;
     return {
       name: displayName,
       path: pathValue,
@@ -493,16 +547,13 @@ function readPositiveNumber(value: unknown): number | undefined {
     : undefined;
 }
 
-function readNonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
-}
-
 /**
  * Builds OpenClaw-provided workspace prompt context for the current Codex turn.
  */
 export function buildCodexOpenClawPromptContext(params: {
   params: EmbeddedRunAttemptParams;
   workspacePromptContext?: string;
+  watchedSessionsContext?: string;
 }): string | undefined {
   if (!shouldInjectCodexOpenClawPromptContext(params.params)) {
     return undefined;
@@ -511,6 +562,7 @@ export function buildCodexOpenClawPromptContext(params: {
     params.workspacePromptContext?.trim()
       ? ["## OpenClaw Workspace Context", "", params.workspacePromptContext.trim()].join("\n")
       : undefined,
+    params.watchedSessionsContext?.trim() || undefined,
   ].filter(isNonEmptyString);
   if (sections.length === 0) {
     return undefined;
@@ -521,6 +573,31 @@ export function buildCodexOpenClawPromptContext(params: {
     "",
     ...sections,
   ].join("\n");
+}
+
+/**
+ * Renders the watched-sessions block for the Codex per-turn runtime context.
+ * Codex builds its own instruction layers, so the embedded prompt's Watched
+ * Sessions section must be re-surfaced here or Codex-backed main sessions
+ * keep refusing cross-session questions (openclaw#114797).
+ */
+export function buildCodexWatchedSessionsContext(params: {
+  attempt: EmbeddedRunAttemptParams;
+  dynamicTools: readonly CodexDynamicToolSpec[];
+  sessionKey?: string;
+  sandboxed?: boolean;
+}): string | undefined {
+  if (!shouldInjectCodexOpenClawPromptContext(params.attempt)) {
+    return undefined;
+  }
+  return buildWatchedSessionsHarnessContext({
+    config: params.attempt.config,
+    sessionKey: params.sessionKey,
+    sandboxed: params.sandboxed,
+    toolNames: flattenCodexDynamicToolFunctions(params.dynamicTools).map((tool) =>
+      normalizeCodexDynamicToolName(tool.name),
+    ),
+  });
 }
 
 function shouldInjectCodexOpenClawPromptContext(params: EmbeddedRunAttemptParams): boolean {
@@ -643,7 +720,7 @@ function renderCodexWorkspaceBootstrapPromptContext(
     return undefined;
   }
   const lines = [
-    "OpenClaw loaded these user-editable workspace files for the current turn. Codex loads AGENTS.md natively. SOUL.md, IDENTITY.md, and USER.md are provided as turn-scoped collaboration instructions so native Codex subagents do not inherit them. Those files are not repeated here.",
+    "OpenClaw loaded these user-editable workspace files for the current turn. Codex loads project-local AGENTS.md natively. When execution uses another folder, OpenClaw supplies the agent workspace AGENTS.md as thread-level developer instructions. SOUL.md, IDENTITY.md, and USER.md remain turn-scoped collaboration instructions. Those files are not repeated here.",
     "",
     "# Project Context",
     "",
@@ -686,6 +763,17 @@ function selectCodexWorkspaceTurnScopedDeveloperInstructionFiles(
     contextFiles,
     CODEX_TURN_SCOPED_WORKSPACE_DEVELOPER_CONTEXT_BASENAMES,
   );
+}
+
+function selectCodexWorkspaceAgentProjectInstructionFiles(
+  contextFiles: EmbeddedContextFile[],
+  agentWorkspaceDir: string,
+): EmbeddedContextFile[] {
+  const agentProjectDocPath = path.join(path.resolve(agentWorkspaceDir), "AGENTS.md");
+  return selectCodexWorkspaceDeveloperInstructionFiles(
+    contextFiles,
+    CODEX_NATIVE_PROJECT_DOC_BASENAMES,
+  ).filter((file) => path.resolve(file.path) === agentProjectDocPath);
 }
 
 function selectCodexWorkspaceDeveloperInstructionFiles(

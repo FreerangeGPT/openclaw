@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
 import { resolveGatewayServiceDescription } from "./constants.js";
 import { formatLine, writeFormattedLines } from "./output.js";
@@ -37,6 +38,7 @@ import {
   isStartupEntryInstalled,
   launchFallbackTaskScript,
   removeStartupEntries,
+  probeScheduledTaskExists,
   resolveFallbackRuntime,
   waitForFallbackTakeoverRuntime,
   waitForScheduledTaskRunningEvidence,
@@ -121,16 +123,13 @@ async function writeScheduledTaskScript({
   scriptPath: string;
   taskLaunchPath: string;
   taskDescription: string;
-  taskEnv: GatewayServiceEnv;
 }> {
-  await assertSchtasksAvailable().catch(() => undefined);
   const taskEnv = resolveScheduledTaskRenderEnv(env, environment);
   const scriptPath = resolveTaskScriptPath(taskEnv);
   const taskLaunchPath = resolveTaskLauncherScriptPath(taskEnv, scriptPath);
   await fs.mkdir(path.dirname(scriptPath), { recursive: true });
   const taskDescription = resolveGatewayServiceDescription({
     env: taskEnv,
-    environment,
     description,
   });
   const script = buildTaskScript({
@@ -147,7 +146,7 @@ async function writeScheduledTaskScript({
       encodeWindowsLauncherScript({ format: "vbs", content: launcher }),
     );
   }
-  return { scriptPath, taskLaunchPath, taskDescription, taskEnv };
+  return { scriptPath, taskLaunchPath, taskDescription };
 }
 
 export async function stageScheduledTask({
@@ -389,8 +388,23 @@ export async function uninstallScheduledTask({
 }: GatewayServiceManageArgs): Promise<void> {
   await assertSchtasksAvailable();
   const taskName = resolveTaskName(env);
-  if (await isRegisteredScheduledTask(env).catch(() => false)) {
-    await execSchtasks(["/Delete", "/F", "/TN", taskName]);
+  const query = await execSchtasks(["/Query", "/TN", taskName]);
+  const queryDetail = normalizeLowercaseStringOrEmpty(query.stderr || query.stdout);
+  const exists =
+    query.code === 0
+      ? true
+      : queryDetail.includes("cannot find the file")
+        ? false
+        : probeScheduledTaskExists(taskName);
+  if (exists === null) {
+    throw new Error(`Could not verify whether Scheduled Task ${taskName} exists.`);
+  }
+  if (exists) {
+    const deletion = await execSchtasks(["/Delete", "/F", "/TN", taskName]);
+    if (deletion.code !== 0) {
+      const detail = (deletion.stderr || deletion.stdout).trim() || "unknown error";
+      throw new Error(`schtasks delete failed: ${detail}`);
+    }
   }
   await removeStartupEntries(env, stdout);
 
@@ -407,12 +421,19 @@ export async function uninstallScheduledTask({
     try {
       await fs.unlink(launcherPath);
       stdout.write(`${formatLine("Removed task launcher", launcherPath)}\n`);
-    } catch {}
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
   }
   try {
     await fs.unlink(scriptPath);
     stdout.write(`${formatLine("Removed task script", scriptPath)}\n`);
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
     stdout.write(`Task script not found at ${scriptPath}\n`);
   }
 }

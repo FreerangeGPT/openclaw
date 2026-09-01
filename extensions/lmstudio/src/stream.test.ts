@@ -1,9 +1,12 @@
-// Lmstudio tests cover stream plugin behavior.
 import type { StreamFn } from "openclaw/plugin-sdk/agent-core";
-import { createAssistantMessageEventStream } from "openclaw/plugin-sdk/llm";
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createAssistantMessageEventStream, type AssistantMessage } from "openclaw/plugin-sdk/llm";
+// Lmstudio tests cover stream plugin behavior.
+import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 let wrapLmstudioInferencePreload: typeof import("./stream.js").wrapLmstudioInferencePreload;
+let defaultBaseUrl: string;
+let defaultBaseUrlSequence = 0;
 
 const ensureLmstudioModelLoadedMock = vi.hoisted(() => vi.fn());
 const resolveLmstudioProviderHeadersMock = vi.hoisted(() =>
@@ -13,36 +16,41 @@ const resolveLmstudioRuntimeApiKeyMock = vi.hoisted(() =>
   vi.fn(async (_params?: unknown) => undefined),
 );
 
-vi.mock("./models.fetch.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./models.fetch.js")>();
-  return {
-    ...actual,
-    ensureLmstudioModelLoaded: (params: unknown) => ensureLmstudioModelLoadedMock(params),
-  };
-});
+vi.mock("./models.fetch.js", () => ({
+  ensureLmstudioModelLoaded: (params: unknown) => ensureLmstudioModelLoadedMock(params),
+}));
 
-vi.mock("./runtime.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./runtime.js")>();
-  return {
-    ...actual,
-    resolveLmstudioProviderHeaders: (params: unknown) => resolveLmstudioProviderHeadersMock(params),
-    resolveLmstudioRuntimeApiKey: (params: unknown) => resolveLmstudioRuntimeApiKeyMock(params),
-  };
-});
+vi.mock("./runtime.js", () => ({
+  resolveLmstudioProviderHeaders: (params: unknown) => resolveLmstudioProviderHeadersMock(params),
+  resolveLmstudioRuntimeApiKey: (params: unknown) => resolveLmstudioRuntimeApiKeyMock(params),
+}));
 
-afterAll(() => {
-  vi.doUnmock("./models.fetch.js");
-  vi.doUnmock("./runtime.js");
-  vi.resetModules();
+beforeAll(async () => {
+  ({ wrapLmstudioInferencePreload } = await import("./stream.js"));
 });
 
 type StreamEvent = { type: string } & Record<string, unknown>;
 
-function requireRecord(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`expected ${label} to be a record`);
-  }
-  return value as Record<string, unknown>;
+const requireRecord = createRequireRecord("record", "expected-label-record");
+
+function lmstudioAssistantMessage(content: AssistantMessage["content"]): AssistantMessage {
+  return {
+    role: "assistant" as const,
+    content,
+    api: "openai-completions" as const,
+    provider: "lmstudio",
+    model: "qwen3-8b-instruct",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop" as const,
+    timestamp: 1,
+  };
 }
 
 function expectRecordFields(record: Record<string, unknown>, fields: Record<string, unknown>) {
@@ -116,7 +124,7 @@ function buildDoneStreamFn(): StreamFn {
   return vi.fn((_model, _context, _options) => {
     const stream = createAssistantMessageEventStream();
     queueMicrotask(() => {
-      stream.push({ type: "done", reason: "stop", message: {} as never });
+      stream.push({ type: "done", reason: "stop", message: lmstudioAssistantMessage([]) });
       stream.end();
     });
     return stream;
@@ -147,7 +155,7 @@ function createWrappedLmstudioStream(
       models: {
         providers: {
           lmstudio: {
-            baseUrl: params?.baseUrl ?? "http://localhost:1234",
+            baseUrl: params?.baseUrl ?? defaultBaseUrl,
             models: [],
           },
         },
@@ -194,9 +202,10 @@ function runWrappedLmstudioStream(
 }
 
 describe("lmstudio stream wrapper", () => {
-  beforeEach(async () => {
-    vi.resetModules();
-    ({ wrapLmstudioInferencePreload } = await import("./stream.js"));
+  beforeEach(() => {
+    // Production preload state is keyed by base URL, model, and context length.
+    // Give each test a real cache namespace while preserving within-test reuse.
+    defaultBaseUrl = `http://lmstudio-test-${defaultBaseUrlSequence++}.localhost:1234`;
   });
 
   afterEach(() => {
@@ -242,7 +251,7 @@ describe("lmstudio stream wrapper", () => {
     expectSingleDoneEvent(events);
     expectEnsureLoadedFields({
       modelKey: variantKey,
-      baseUrl: "http://localhost:1234/v1",
+      baseUrl: `${defaultBaseUrl}/v1`,
     });
     expectBaseStreamModelFields(baseStream, {
       provider: "lmstudio",
@@ -309,7 +318,7 @@ describe("lmstudio stream wrapper", () => {
         models: {
           providers: {
             lmstudio: {
-              baseUrl: "http://localhost:1234",
+              baseUrl: defaultBaseUrl,
               models: [],
             },
           },
@@ -392,7 +401,7 @@ describe("lmstudio stream wrapper", () => {
         models: {
           providers: {
             lmstudio: {
-              baseUrl: "http://localhost:1234",
+              baseUrl: defaultBaseUrl,
               params: { preload: false },
               models: [],
             },
@@ -442,7 +451,7 @@ describe("lmstudio stream wrapper", () => {
         models: {
           providers: {
             lmstudio: {
-              baseUrl: "http://localhost:1234",
+              baseUrl: defaultBaseUrl,
               models: [],
             },
           },
@@ -490,6 +499,67 @@ describe("lmstudio stream wrapper", () => {
     expect(ensureLmstudioModelLoadedMock).toHaveBeenCalledTimes(1);
   });
 
+  it("does not start model preload for an already-aborted inference", async () => {
+    const baseStream = buildDoneStreamFn();
+    const wrapped = createWrappedLmstudioStream(baseStream);
+    const controller = new AbortController();
+    const abortReason = new Error("inference already cancelled");
+    controller.abort(abortReason);
+    const options = { signal: controller.signal };
+    const stream = Promise.resolve().then(() =>
+      runWrappedLmstudioStream(wrapped, { contextWindow: 32_768 }, options),
+    );
+
+    await expect(stream).rejects.toBe(abortReason);
+    expect(ensureLmstudioModelLoadedMock).not.toHaveBeenCalled();
+    expect(baseStream).not.toHaveBeenCalled();
+  });
+
+  it("cancels one shared preload waiter without cancelling another inference", async () => {
+    let resolvePreload: (() => void) | undefined;
+    ensureLmstudioModelLoadedMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolvePreload = resolve;
+        }),
+    );
+    const baseStream = buildDoneStreamFn();
+    const wrapped = createWrappedLmstudioStream(baseStream);
+    const controller = new AbortController();
+    const first = collectEvents(
+      runWrappedLmstudioStream(wrapped, { contextWindow: 32_768 }, { signal: controller.signal }),
+    );
+    let firstOutcome: string | undefined;
+    void first.then(
+      () => {
+        firstOutcome = "completed";
+      },
+      (error: unknown) => {
+        firstOutcome = error instanceof Error ? error.name : "unknown";
+      },
+    );
+    const second = collectEvents(runWrappedLmstudioStream(wrapped, { contextWindow: 32_768 }));
+
+    try {
+      await vi.waitFor(() => expect(resolvePreload).toBeDefined());
+      controller.abort(new DOMException("inference cancelled", "AbortError"));
+
+      await vi.waitFor(() => expect(firstOutcome).toBe("AbortError"), {
+        timeout: 250,
+      });
+      expect(baseStream).not.toHaveBeenCalled();
+      expect(ensureLmstudioModelLoadedMock).toHaveBeenCalledTimes(1);
+
+      resolvePreload?.();
+
+      expectSingleDoneEvent(await second);
+      expect(baseStream).toHaveBeenCalledTimes(1);
+    } finally {
+      resolvePreload?.();
+      await Promise.allSettled([first, second]);
+    }
+  });
+
   it("skips preload on the second attempt while the failure backoff is active", async () => {
     ensureLmstudioModelLoadedMock.mockRejectedValue(new Error("out of memory"));
     const baseStream = buildDoneStreamFn();
@@ -500,7 +570,7 @@ describe("lmstudio stream wrapper", () => {
         models: {
           providers: {
             lmstudio: {
-              baseUrl: "http://localhost:1234",
+              baseUrl: defaultBaseUrl,
               models: [],
             },
           },
@@ -577,7 +647,7 @@ describe("lmstudio stream wrapper", () => {
         models: {
           providers: {
             lmstudio: {
-              baseUrl: "http://localhost:1234",
+              baseUrl: defaultBaseUrl,
               models: [],
             },
           },
@@ -663,7 +733,7 @@ describe("lmstudio stream wrapper", () => {
         models: {
           providers: {
             lmstudio: {
-              baseUrl: "http://localhost:1234",
+              baseUrl: defaultBaseUrl,
               models: [],
             },
           },
@@ -749,7 +819,7 @@ describe("lmstudio stream wrapper", () => {
         models: {
           providers: {
             lmstudio: {
-              baseUrl: "http://localhost:1234",
+              baseUrl: defaultBaseUrl,
               params: { preload: false },
               models: [],
             },
@@ -792,18 +862,18 @@ describe("lmstudio stream wrapper", () => {
       "[END_TOOL_REQUEST]",
     ].join("\n");
     const baseStream = buildEventStreamFn([
-      { type: "start", partial: { content: [] } },
-      { type: "text_start", contentIndex: 0, partial: { content: [{ type: "text", text: "" }] } },
+      { type: "start", partial: lmstudioAssistantMessage([]) },
+      {
+        type: "text_start",
+        contentIndex: 0,
+        partial: lmstudioAssistantMessage([{ type: "text", text: "" }]),
+      },
       { type: "text_delta", contentIndex: 0, delta: rawToolText },
       { type: "text_end", contentIndex: 0, content: rawToolText },
       {
         type: "done",
         reason: "stop",
-        message: {
-          role: "assistant",
-          content: [{ type: "text", text: rawToolText }],
-          stopReason: "stop",
-        },
+        message: lmstudioAssistantMessage([{ type: "text", text: rawToolText }]),
       },
     ]);
     const wrapped = createWrappedLmstudioStream(baseStream);
@@ -845,18 +915,18 @@ describe("lmstudio stream wrapper", () => {
     const rawToolText =
       'commentary to=read code {"path":"/path/to/file","line_start":1,"line_end":400}';
     const baseStream = buildEventStreamFn([
-      { type: "start", partial: { content: [] } },
-      { type: "text_start", contentIndex: 0, partial: { content: [{ type: "text", text: "" }] } },
+      { type: "start", partial: lmstudioAssistantMessage([]) },
+      {
+        type: "text_start",
+        contentIndex: 0,
+        partial: lmstudioAssistantMessage([{ type: "text", text: "" }]),
+      },
       { type: "text_delta", contentIndex: 0, delta: rawToolText },
       { type: "text_end", contentIndex: 0, content: rawToolText },
       {
         type: "done",
         reason: "stop",
-        message: {
-          role: "assistant",
-          content: [{ type: "text", text: rawToolText }],
-          stopReason: "stop",
-        },
+        message: lmstudioAssistantMessage([{ type: "text", text: rawToolText }]),
       },
     ]);
     const wrapped = createWrappedLmstudioStream(baseStream);
@@ -892,18 +962,18 @@ describe("lmstudio stream wrapper", () => {
       "[/mempalace_mempalace_search]",
     ].join("\n");
     const baseStream = buildEventStreamFn([
-      { type: "start", partial: { content: [] } },
-      { type: "text_start", contentIndex: 0, partial: { content: [{ type: "text", text: "" }] } },
+      { type: "start", partial: lmstudioAssistantMessage([]) },
+      {
+        type: "text_start",
+        contentIndex: 0,
+        partial: lmstudioAssistantMessage([{ type: "text", text: "" }]),
+      },
       { type: "text_delta", contentIndex: 0, delta: rawToolText },
       { type: "text_end", contentIndex: 0, content: rawToolText },
       {
         type: "done",
         reason: "stop",
-        message: {
-          role: "assistant",
-          content: [{ type: "text", text: rawToolText }],
-          stopReason: "stop",
-        },
+        message: lmstudioAssistantMessage([{ type: "text", text: rawToolText }]),
       },
     ]);
     const wrapped = createWrappedLmstudioStream(baseStream);

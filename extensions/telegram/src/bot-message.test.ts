@@ -2,6 +2,7 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TelegramBotDeps } from "./bot-deps.js";
+import type { TelegramMessageProcessorTurnContext } from "./bot-handlers.types.js";
 import type { TelegramMessageProcessingResult } from "./bot-processing-outcome.js";
 
 const buildTelegramMessageContext = vi.hoisted(() => vi.fn());
@@ -16,6 +17,20 @@ const upsertChannelPairingRequest = vi.hoisted(() =>
 
 function requireInvocationOrder(mock: { invocationCallOrder: number[] }, context: string): number {
   return expectDefined(mock.invocationCallOrder[0], context);
+}
+
+function createMemoryPrependHarness() {
+  const commit = vi.fn(async () => ({ applied: true as const, reason: "cleared" as const }));
+  const release = vi.fn(async () => ({ applied: true as const, reason: "released" as const }));
+  const prepare = vi.fn(async () => ({
+    body: "[Associative recall]\nremember this\n\nhello there",
+    databasePath: "/tmp/agent.sqlite",
+    includedFragments: 1,
+    truncated: false,
+    commit,
+    release,
+  }));
+  return { commit, prepare, release };
 }
 
 vi.mock("openclaw/plugin-sdk/runtime-env", () => ({
@@ -69,7 +84,35 @@ describe("telegram bot message processor", () => {
   const baseTurnContext = {
     cfg: {},
     telegramCfg: {},
-  } satisfies import("./bot-message.js").TelegramMessageProcessorTurnContext;
+  } satisfies TelegramMessageProcessorTurnContext;
+
+  it("passes the effective per-DM history limit into message context", async () => {
+    buildTelegramMessageContext.mockResolvedValue(null);
+    const processMessage = createTelegramMessageProcessor(baseDeps);
+
+    await processSampleMessage(
+      processMessage,
+      {
+        telegramCfg: {
+          dmHistoryLimit: 5,
+          dms: {
+            "42": { historyLimit: 0 },
+          },
+        },
+      },
+      {
+        message: {
+          chat: { id: 123, type: "private", title: "chat" },
+          message_id: 456,
+          from: { id: 42, first_name: "Pat" },
+        },
+      },
+    );
+
+    expect(buildTelegramMessageContext).toHaveBeenCalledWith(
+      expect.objectContaining({ dmHistoryLimit: 0 }),
+    );
+  });
 
   const baseDeps = {
     bot: {},
@@ -94,7 +137,7 @@ describe("telegram bot message processor", () => {
 
   async function processSampleMessage(
     processMessage: ReturnType<typeof createTelegramMessageProcessor>,
-    turnContext?: Partial<import("./bot-message.js").TelegramMessageProcessorTurnContext>,
+    turnContext?: Partial<TelegramMessageProcessorTurnContext>,
     primaryCtxOverrides: Record<string, unknown> = {},
     options: Parameters<typeof processMessage>[4] = {},
     allMedia: Parameters<typeof processMessage>[1] = [],
@@ -176,16 +219,7 @@ describe("telegram bot message processor", () => {
   });
 
   it("prepends queued recall to the agent body and commits after classic polling dispatch", async () => {
-    const commit = vi.fn(async () => ({ applied: true as const, reason: "cleared" as const }));
-    const release = vi.fn(async () => ({ applied: true as const, reason: "released" as const }));
-    const prepareAgentTurnMemoryPrepend = vi.fn(async () => ({
-      body: "[Associative recall]\nremember this\n\nhello there",
-      databasePath: "/tmp/agent.sqlite",
-      includedFragments: 1,
-      truncated: false,
-      commit,
-      release,
-    }));
+    const memoryPrepend = createMemoryPrependHarness();
     const ctxPayload = {
       From: "telegram:123",
       To: "telegram:123",
@@ -201,13 +235,13 @@ describe("telegram bot message processor", () => {
       ...baseDeps,
       telegramDeps: {
         ...telegramDepsForTest,
-        prepareAgentTurnMemoryPrepend,
+        prepareAgentTurnMemoryPrepend: memoryPrepend.prepare,
       },
     } as unknown as Parameters<typeof createTelegramMessageProcessor>[0]);
 
     await expect(processSampleMessage(processMessage)).resolves.toEqual({ kind: "completed" });
 
-    expect(prepareAgentTurnMemoryPrepend).toHaveBeenCalledWith({
+    expect(memoryPrepend.prepare).toHaveBeenCalledWith({
       agentId: "main",
       body: "hello there",
     });
@@ -223,21 +257,12 @@ describe("telegram bot message processor", () => {
         }),
       }),
     );
-    expect(commit).toHaveBeenCalledTimes(1);
-    expect(release).not.toHaveBeenCalled();
+    expect(memoryPrepend.commit).toHaveBeenCalledTimes(1);
+    expect(memoryPrepend.release).not.toHaveBeenCalled();
   });
 
   it("commits queued recall when a spooled polling turn is adopted", async () => {
-    const commit = vi.fn(async () => ({ applied: true as const, reason: "cleared" as const }));
-    const release = vi.fn(async () => ({ applied: true as const, reason: "released" as const }));
-    const prepareAgentTurnMemoryPrepend = vi.fn(async () => ({
-      body: "[Associative recall]\nremember this\n\nhello there",
-      databasePath: "/tmp/agent.sqlite",
-      includedFragments: 1,
-      truncated: false,
-      commit,
-      release,
-    }));
+    const memoryPrepend = createMemoryPrependHarness();
     buildTelegramMessageContext.mockResolvedValue(
       createMessageContext({
         ctxPayload: {
@@ -259,7 +284,7 @@ describe("telegram bot message processor", () => {
       ...baseDeps,
       telegramDeps: {
         ...telegramDepsForTest,
-        prepareAgentTurnMemoryPrepend,
+        prepareAgentTurnMemoryPrepend: memoryPrepend.prepare,
       },
     } as unknown as Parameters<typeof createTelegramMessageProcessor>[0]);
     const update = { update_id: 734 };
@@ -279,21 +304,12 @@ describe("telegram bot message processor", () => {
         }),
       }),
     );
-    expect(commit).toHaveBeenCalledTimes(1);
-    expect(release).not.toHaveBeenCalled();
+    expect(memoryPrepend.commit).toHaveBeenCalledTimes(1);
+    expect(memoryPrepend.release).not.toHaveBeenCalled();
   });
 
   it("releases queued recall when spooled polling fails before adoption", async () => {
-    const commit = vi.fn(async () => ({ applied: true as const, reason: "cleared" as const }));
-    const release = vi.fn(async () => ({ applied: true as const, reason: "released" as const }));
-    const prepareAgentTurnMemoryPrepend = vi.fn(async () => ({
-      body: "[Associative recall]\nremember this\n\nhello there",
-      databasePath: "/tmp/agent.sqlite",
-      includedFragments: 1,
-      truncated: false,
-      commit,
-      release,
-    }));
+    const memoryPrepend = createMemoryPrependHarness();
     const dispatchError = new Error("agent dispatch failed");
     buildTelegramMessageContext.mockResolvedValue(
       createMessageContext({
@@ -315,7 +331,7 @@ describe("telegram bot message processor", () => {
       ...baseDeps,
       telegramDeps: {
         ...telegramDepsForTest,
-        prepareAgentTurnMemoryPrepend,
+        prepareAgentTurnMemoryPrepend: memoryPrepend.prepare,
       },
     } as unknown as Parameters<typeof createTelegramMessageProcessor>[0]);
     const update = { update_id: 735 };
@@ -325,8 +341,8 @@ describe("telegram bot message processor", () => {
     );
 
     expect(replay.value).toEqual({ kind: "failed-retryable", error: dispatchError });
-    expect(release).toHaveBeenCalledTimes(1);
-    expect(commit).not.toHaveBeenCalled();
+    expect(memoryPrepend.release).toHaveBeenCalledTimes(1);
+    expect(memoryPrepend.commit).not.toHaveBeenCalled();
   });
 
   it("leaves queued recall pending for Telegram control commands", async () => {
@@ -622,6 +638,37 @@ describe("telegram bot message processor", () => {
     expect(finalizeSpooledReplayResult).toHaveBeenCalledWith({ kind: "completed" }, "adopted");
   });
 
+  it("keeps a pre-adoption owner abort retryable when dispatch returns completed", async () => {
+    buildTelegramMessageContext.mockResolvedValue(createMessageContext());
+    const timeoutError = new Error("handler-timeout");
+    const abortController = new AbortController();
+    const finalizeSpooledReplayResult = vi.fn(
+      async (result: TelegramMessageProcessingResult): Promise<TelegramMessageProcessingResult> =>
+        result,
+    );
+    dispatchTelegramMessage.mockImplementationOnce(async () => {
+      abortController.abort(timeoutError);
+      return { kind: "completed" };
+    });
+    const processMessage = createTelegramMessageProcessor(baseDeps);
+
+    await expect(
+      processSampleMessage(
+        processMessage,
+        {
+          finalizeSpooledReplayResult,
+          spooledReplayAbortSignal: abortController.signal,
+        },
+        {},
+        { spooledReplay: true, isolateSpooledReplaySettlement: true },
+      ),
+    ).resolves.toEqual({ kind: "failed-retryable", error: timeoutError });
+    expect(finalizeSpooledReplayResult).toHaveBeenCalledWith(
+      { kind: "failed-retryable", error: timeoutError },
+      "terminal",
+    );
+  });
+
   it("retries durable replay protection after an active steer already committed", async () => {
     buildTelegramMessageContext.mockResolvedValue(createMessageContext());
     const finalizerError = new Error("dedupe commit failed");
@@ -811,7 +858,7 @@ describe("telegram bot message processor", () => {
     await expect(replay.deferredWork?.task).resolves.toEqual({ kind: "completed" });
   });
 
-  it("settles an abandoned deferred turn as skipped", async () => {
+  it("settles an abandoned deferred turn as retryable", async () => {
     buildTelegramMessageContext.mockResolvedValue(createMessageContext());
     const finalizeSpooledReplayResult = vi.fn(
       async (result: TelegramMessageProcessingResult): Promise<TelegramMessageProcessingResult> =>
@@ -829,10 +876,15 @@ describe("telegram bot message processor", () => {
       processSampleMessage(processMessage, { finalizeSpooledReplayResult }, { update }),
     );
 
-    expect(replay.value).toEqual({ kind: "skipped" });
-    await expect(replay.deferredWork?.task).resolves.toEqual({ kind: "skipped" });
+    expect(replay.value).toMatchObject({ kind: "failed-retryable" });
+    await expect(replay.deferredWork?.task).resolves.toMatchObject({
+      kind: "failed-retryable",
+    });
     expect(finalizeSpooledReplayResult).toHaveBeenCalledTimes(1);
-    expect(finalizeSpooledReplayResult).toHaveBeenCalledWith({ kind: "skipped" }, "terminal");
+    expect(finalizeSpooledReplayResult).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "failed-retryable" }),
+      "terminal",
+    );
   });
 
   it("keeps isolated retry settlement separate from the outer spool participant", async () => {
@@ -904,7 +956,10 @@ describe("telegram bot message processor", () => {
     await deferred;
     outerAbortController.abort(new Error("outer spool timeout"));
 
-    await expect(processing).resolves.toEqual({ kind: "skipped" });
+    await expect(processing).resolves.toEqual({
+      kind: "failed-retryable",
+      error: "turn-abandoned",
+    });
     expect(queuedAbortSignal?.aborted).toBe(true);
   });
 

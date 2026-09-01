@@ -1,8 +1,8 @@
 // Real-browser proof for native-host link routing and the bridge-free browser path.
-import fs from "node:fs";
 import path from "node:path";
 import { chromium, type Browser, type BrowserContext } from "playwright";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { beforeEach, afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
 import {
   canRunPlaywrightChromium,
   installMockGateway,
@@ -15,7 +15,10 @@ const chromiumExecutablePath = resolvePlaywrightChromiumExecutablePath(chromium.
 const chromiumAvailable = canRunPlaywrightChromium(chromiumExecutablePath);
 const allowMissingChromium = process.env.OPENCLAW_UI_E2E_ALLOW_MISSING_CHROMIUM === "1";
 const describeControlUiE2e = chromiumAvailable || !allowMissingChromium ? describe : describe.skip;
-const artifactDir = path.resolve(process.cwd(), ".artifacts/control-ui-e2e/native-link-routing");
+let artifactDir: string;
+beforeEach(() => {
+  artifactDir = createControlUiE2eArtifactDir("native-link-routing");
+});
 
 let server: ControlUiE2eServer;
 // Browser contexts preserve test isolation; keep one process warm for this file.
@@ -43,7 +46,6 @@ describeControlUiE2e("native link routing", () => {
     if (!chromiumAvailable) {
       throw new Error(`Playwright Chromium is unavailable at ${chromiumExecutablePath}`);
     }
-    fs.mkdirSync(artifactDir, { recursive: true });
     browser = await chromium.launch({ executablePath: chromiumExecutablePath });
     try {
       server = await startControlUiE2eServer();
@@ -162,7 +164,7 @@ describeControlUiE2e("native link routing", () => {
     expect(bubbleBox).not.toBeNull();
     await bubble.click({
       button: "right",
-      position: { x: bubbleBox!.width - 8, y: bubbleBox!.height - 8 },
+      position: { x: bubbleBox!.width - 8, y: bubbleBox!.height - 2 },
     });
     const replyMenu = page.getByRole("menu", { name: "Message actions" });
     await expect.poll(() => replyMenu.isVisible()).toBe(true);
@@ -202,12 +204,39 @@ describeControlUiE2e("native link routing", () => {
       .poll(() => page.evaluate(() => navigator.clipboard.readText()))
       .toBe("https://example.com/report");
 
-    const popupPromise = page.waitForEvent("popup");
+    await page.evaluate(() => {
+      const host = window as Window & {
+        openclawModifiedLinkClick?: { defaultPrevented: boolean; metaKey: boolean };
+      };
+      document.addEventListener(
+        "click",
+        (event) => {
+          host.openclawModifiedLinkClick = {
+            defaultPrevented: event.defaultPrevented,
+            metaKey: event.metaKey,
+          };
+        },
+        { once: true },
+      );
+    });
     await link.click({ modifiers: ["Meta"] });
-    const popup = await popupPromise;
-    await popup.waitForLoadState("domcontentloaded");
-    expect(popup.url()).toBe("https://example.com/report");
-    await popup.close();
+    expect(
+      await page.evaluate(
+        () =>
+          (
+            window as Window & {
+              openclawModifiedLinkClick?: { defaultPrevented: boolean; metaKey: boolean };
+            }
+          ).openclawModifiedLinkClick,
+      ),
+    ).toEqual({ defaultPrevented: false, metaKey: true });
+    expect(
+      await page.evaluate(
+        () =>
+          (window as Window & { openclawNativeLinkMessages?: unknown[] })
+            .openclawNativeLinkMessages,
+      ),
+    ).toHaveLength(3);
 
     await page.evaluate(async () => {
       await customElements.whenDefined("openclaw-modal-dialog");
@@ -262,7 +291,7 @@ describeControlUiE2e("native link routing", () => {
       .click({ button: "right" });
     expect(await page.locator("openclaw-native-link-menu").count()).toBe(0);
     const messageMenu = page.getByRole("menu", { name: "Message actions" });
-    await expect.poll(() => messageMenu.isVisible()).toBe(true);
+    await expect.poll(() => messageMenu.isVisible()).toBe(false);
     await page.evaluate(() => new Promise(requestAnimationFrame));
     await page.keyboard.press("Escape");
     await expect.poll(() => messageMenu.count()).toBe(0);
