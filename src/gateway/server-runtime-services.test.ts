@@ -420,6 +420,7 @@ describe("server-runtime-services", () => {
       deliver: expect.any(Function),
       cfg: {},
       log: deliveryLog,
+      shouldContinue: expect.any(Function),
     });
     expect(hoisted.recoverPendingRestartContinuationDeliveries).toHaveBeenCalledWith({
       deps: {},
